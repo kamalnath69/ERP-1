@@ -25,12 +25,14 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 
 def _encode(payload: dict[str, Any], expires_delta: timedelta, token_type: str) -> str:
+    import secrets
     now = datetime.now(timezone.utc)
     to_encode = payload.copy()
     to_encode.update({
         "exp": now + expires_delta,
         "iat": now,
         "type": token_type,
+        "jti": secrets.token_urlsafe(16),
     })
     return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
