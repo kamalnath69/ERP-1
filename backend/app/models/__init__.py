@@ -26,6 +26,21 @@ from app.models.ai import ChatConversation, ChatMessage
 from app.models.audit import AuditLog
 from app.models.billing import Subscription, Invoice, PaymentEvent
 from app.models.settings import Setting, FeatureFlag, Notification
+from app.models.timetable import TimetableSlot, CalendarEvent
+from app.models.fees import FeeStructure, FeeInvoice
+from app.models.extra import (
+    Book,
+    BookLoan,
+    TransportRoute,
+    TransportVehicle,
+    TransportAllocation,
+    HostelBlock,
+    HostelRoom,
+    HostelAllocation,
+    PlacementDrive,
+    PlacementOffer,
+    AdmissionApplication,
+)
 
 __all__ = [
     "Base",
@@ -71,4 +86,19 @@ __all__ = [
     "Setting",
     "FeatureFlag",
     "Notification",
+    "TimetableSlot",
+    "CalendarEvent",
+    "FeeStructure",
+    "FeeInvoice",
+    "Book",
+    "BookLoan",
+    "TransportRoute",
+    "TransportVehicle",
+    "TransportAllocation",
+    "HostelBlock",
+    "HostelRoom",
+    "HostelAllocation",
+    "PlacementDrive",
+    "PlacementOffer",
+    "AdmissionApplication",
 ]

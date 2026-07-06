@@ -4,7 +4,8 @@ import { useAuth } from "@/contexts/AuthContext";
 import {
   House, Users, GraduationCap, ChalkboardTeacher, CalendarBlank, Exam,
   Buildings, ShieldCheck, ChatCircleDots, ChartLineUp, CreditCard,
-  Gear, SignOut, ClipboardText, Sparkle, ListChecks,
+  Gear, SignOut, ClipboardText, Sparkle, ListChecks, UsersThree, Clock,
+  CalendarDots, Bank, Books, Bus, Bed, Briefcase, FilePdf, Bell, UserPlus, Link as LinkIcon,
 } from "@phosphor-icons/react";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -12,15 +13,32 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
 
 const NAV = [
   { to: "/app", label: "Overview", icon: House, perm: null, end: true },
+  { section: "People" },
   { to: "/app/students", label: "Students", icon: GraduationCap, perm: "students.view" },
+  { to: "/app/parents", label: "Parents", icon: UsersThree, perm: "students.view" },
   { to: "/app/faculty", label: "Faculty", icon: ChalkboardTeacher, perm: "faculty.view" },
+  { to: "/app/users", label: "Users", icon: Users, perm: "users.view" },
+  { to: "/app/admissions", label: "Admissions", icon: UserPlus, perm: "students.view" },
+  { section: "Academics" },
+  { to: "/app/academic", label: "Structure", icon: Buildings, perm: "academic.view" },
+  { to: "/app/assignments", label: "Assignments", icon: LinkIcon, perm: "academic.view" },
+  { to: "/app/timetable", label: "Timetable", icon: Clock, perm: "academic.view" },
+  { to: "/app/calendar", label: "Calendar", icon: CalendarDots, perm: "academic.view" },
   { to: "/app/attendance", label: "Attendance", icon: CalendarBlank, perm: "attendance.view" },
   { to: "/app/marks", label: "Exams & Marks", icon: Exam, perm: "marks.view" },
-  { to: "/app/academic", label: "Academic Structure", icon: Buildings, perm: "academic.view" },
-  { to: "/app/users", label: "Users", icon: Users, perm: "users.view" },
-  { to: "/app/roles", label: "Roles & Permissions", icon: ShieldCheck, perm: "roles.manage" },
+  { section: "Operations" },
+  { to: "/app/fees", label: "Fees", icon: Bank, perm: "billing.view" },
+  { to: "/app/library", label: "Library", icon: Books, perm: "students.view" },
+  { to: "/app/transport", label: "Transport", icon: Bus, perm: "students.view" },
+  { to: "/app/hostel", label: "Hostel", icon: Bed, perm: "students.view" },
+  { to: "/app/placements", label: "Placements", icon: Briefcase, perm: "students.view" },
+  { section: "Intelligence" },
   { to: "/app/ai", label: "Athena AI", icon: Sparkle, perm: "ai.use" },
   { to: "/app/analytics", label: "Analytics", icon: ChartLineUp, perm: "analytics.view" },
+  { to: "/app/reports", label: "Reports", icon: FilePdf, perm: "reports.view" },
+  { section: "System" },
+  { to: "/app/roles", label: "Roles & Permissions", icon: ShieldCheck, perm: "roles.manage" },
+  { to: "/app/notifications", label: "Notifications", icon: Bell, perm: "notifications.view" },
   { to: "/app/audit", label: "Audit Logs", icon: ClipboardText, perm: "audit.view" },
   { to: "/app/billing", label: "Billing", icon: CreditCard, perm: "billing.view" },
   { to: "/app/settings", label: "Settings", icon: Gear, perm: "settings.manage" },
@@ -52,7 +70,14 @@ export default function AppLayout({ children }) {
               <span>Super Admin</span>
             </NavLink>
           )}
-          {NAV.map((n) => {
+          {NAV.map((n, idx) => {
+            if (n.section) {
+              return (
+                <div key={`section-${idx}`} className="px-5 pt-4 pb-1 overline text-[10px]">
+                  {n.section}
+                </div>
+              );
+            }
             if (n.perm && !can(n.perm)) return null;
             const Icon = n.icon;
             return (

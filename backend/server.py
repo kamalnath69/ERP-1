@@ -11,15 +11,22 @@ from app.core.database import Base, SessionLocal, engine
 from app.api.v1 import (
     academic,
     ai as ai_router,
+    assignments,
     attendance,
     auth,
     billing,
+    extra,
     faculty,
+    fees,
     marks,
     misc,
+    notifications_send,
+    parents,
+    reports,
     roles,
     students,
     super_admin,
+    timetable,
     users,
 )
 from app.api.v1 import analytics
@@ -59,6 +66,13 @@ api_router.include_router(ai_router.router)
 api_router.include_router(super_admin.router)
 api_router.include_router(analytics.router)
 api_router.include_router(billing.router)
+api_router.include_router(parents.router)
+api_router.include_router(assignments.router)
+api_router.include_router(timetable.router)
+api_router.include_router(fees.router)
+api_router.include_router(extra.router)
+api_router.include_router(reports.router)
+api_router.include_router(notifications_send.router)
 api_router.include_router(misc.router)
 
 
