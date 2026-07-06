@@ -1,0 +1,45 @@
+{
+  "summary": "Comprehensive backend + frontend smoke test for Athena Education ERP (multi-tenant SaaS). 35/36 pytest tests pass. Only failure is /api/auth/refresh returning 500 when called twice for the same user within 1 second — a real production bug (JWT refresh tokens generated in the same second have identical payloads → identical sha256 hash → UniqueViolation on refresh_tokens.token_hash). Frontend loads well: landing/login/register/dashboard/super-admin all render, all sidebar navigation testids resolve, dashboard shows 6 KPI cards + 2 charts, multi-tenancy isolation verified, RBAC 403 enforcement verified, faculty auto-creates user+role, billing mock-pay upgrades plan, audit logs populated. AI chat endpoint actually returned 200 (Emergent LLM key has budget after all).",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "POST /api/auth/refresh",
+        "issue": "Returns 500 IntegrityError (UniqueViolation on refresh_tokens.token_hash) when two refresh calls happen for the same user within the same second. Root cause: create_refresh_token() in app/core/security.py encodes {sub, tid, exp, iat, type} — no jti claim — so within a 1-second window the JWT string is byte-identical, and sha256(token) collides with an existing row. Fix: add a unique jti (uuid4 hex) claim in _encode(), OR use datetime.now with microsecond precision, OR wrap the insert in try/except IntegrityError and rotate.",
+        "priority": "HIGH"
+      }
+    ],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "Dashboard (initial paint)",
+        "issues": ["Recharts logs 4x console warnings 'The width(-1) and height(-1) of chart should be greater than 0' on first render — cosmetic only, charts render correctly after data arrives. Consider giving ResponsiveContainer an explicit min-height."]
+      }
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/backend_test.py", "/app/test_reports/pytest/results.xml"],
+  "action_items": [
+    "FIX: /api/auth/refresh IntegrityError — add `jti` (uuid4) claim to JWT payload in app/core/security.py _encode() so refresh tokens are always unique, even within the same second.",
+    "OPTIONAL: Add min-height to Recharts ResponsiveContainer on dashboard to silence -1 width/height warnings."
+  ],
+  "critical_code_review_comments": [
+    "app/core/security.py create_refresh_token(): missing unique claim (jti). Two calls within the same second produce identical tokens → same sha256 hash → DB UniqueViolation. Also blocks any legitimate re-issue during the same second.",
+    "app/api/v1/billing.py mock_pay(): stores plan as free-form string parsed from invoice description ('Upgrade to pro'). Fragile — better to persist the plan on the Invoice row at creation and read it back.",
+    "app/api/v1/roles.py update_role(): mixes db.query() (legacy) with 2.0-style select() inside the same handler; consider consistency.",
+    "Backend tests: /api/auth/me correctly returns permissions/roles/organization — no _id/ObjectId issues (Postgres). RBAC dependency require_permissions returns 403 for users with zero roles (verified).",
+    "Frontend: all requested data-testids (login-submit-btn, dashboard-page, students-page, faculty-page, attendance-page, marks-page, roles-page, ai-chat-page, analytics-page, billing-page, super-admin-page) are present and resolve."
+  ],
+  "updated_files": [
+    "/app/backend/tests/backend_test.py (created)"
+  ],
+  "success_rate": {"backend": "97% (35/36)", "frontend": "100% smoke"},
+  "test_credentials": "principal@demo-college.edu / Principal@123, meena.iyer@demo-college.edu / Faculty@123, superadmin@platform.io / Super@123456",
+  "seed_data_creation": "Tests create TEST_-prefixed departments, units, levels, sections, subjects, students, faculty, users, roles, exams, attendance sessions, and a new test organization (test-uni-<rand>). No cleanup is performed — data prefixed with TEST for easy identification.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "backend_test.py must run sequentially (NOT with xdist -n 2) because it uses a module-level STATE dict shared across classes. Run with: `cd /app && pytest backend/tests/backend_test.py -v -n 0`. The single failing test is TestAuth.test_refresh — main agent needs to add a jti claim in app/core/security.py::_encode() to fix. AI chat currently returns 200 (Emergent LLM key has budget — the earlier 'known limitation' note in the review request is no longer accurate).",
+  "rca_of_the_issue": "TestAuth.test_refresh fails with 500. Backend log shows: sqlalchemy.exc.IntegrityError: (psycopg2.errors.UniqueViolation) duplicate key value violates unique constraint 'ix_refresh_tokens_token_hash'. The offending flow: _issue_tokens() calls create_refresh_token(user.id, user.organization_id) which encodes JWT payload {sub, tid, exp, iat (second precision), type:'refresh'}. When two refresh requests arrive within the same second, JWT payload is byte-identical → hashed token identical → INSERT into refresh_tokens table hits the unique index and raises IntegrityError → 500. Mitigation: add `jti: uuid.uuid4().hex` in app/core/security.py::_encode(). Reproduction: `curl -X POST $URL/api/auth/refresh -d '{\"refresh_token\":\"<valid>\"}'` twice within 1s of each other with the SAME source token — first succeeds, second returns 500."
+}
