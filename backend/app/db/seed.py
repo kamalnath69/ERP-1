@@ -50,6 +50,7 @@ PERMISSION_CATALOGUE: dict[str, list[tuple[str, str]]] = {
         ("users.view", "View users"),
         ("users.manage", "Manage users"),
         ("roles.manage", "Manage roles and permissions"),
+        ("ai.scopes.manage", "Manage AI access scopes for users"),
     ],
     "reports": [
         ("reports.view", "View reports"),
@@ -86,7 +87,7 @@ DEFAULT_ROLES: dict[str, list[str]] = {
         "marks.view", "marks.publish",
         "academic.view", "departments.manage", "subjects.manage",
         "reports.view", "reports.export", "analytics.view",
-        "ai.use", "notifications.view", "notifications.send",
+        "ai.use", "ai.scopes.manage", "notifications.view", "notifications.send",
     ],
     "Faculty": [
         "students.view", "attendance.view", "attendance.mark", "attendance.edit",

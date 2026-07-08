@@ -24,6 +24,7 @@ from app.api.v1 import (
     parents,
     reports,
     roles,
+    scopes,
     students,
     super_admin,
     timetable,
@@ -73,6 +74,7 @@ api_router = APIRouter(prefix="/api")
 api_router.include_router(auth.router)
 api_router.include_router(users.router)
 api_router.include_router(roles.router)
+api_router.include_router(scopes.router)
 api_router.include_router(academic.router)
 api_router.include_router(students.router)
 api_router.include_router(faculty.router)

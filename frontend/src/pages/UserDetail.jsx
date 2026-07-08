@@ -13,6 +13,7 @@ import {
   ArrowLeft, CheckCircle, XCircle, Circle, ShieldCheck, FloppyDisk, TrashSimple,
   MagnifyingGlass,
 } from "@phosphor-icons/react";
+import UserAIScopes from "@/components/UserAIScopes";
 
 // Three possible states per (user, permission):
 //   inherit  -> no override row (falls back to role); UI value: undefined
@@ -158,6 +159,11 @@ export default function UserDetail() {
           </CardContent>
         </Card>
       )}
+
+      <UserAIScopes
+        userId={id}
+        canManage={can("ai.scopes.manage") || can("roles.manage")}
+      />
 
       <Card className="rounded-sm border-border">
         <CardHeader className="flex flex-row items-center justify-between space-y-0">
