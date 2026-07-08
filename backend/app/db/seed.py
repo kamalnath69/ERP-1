@@ -50,6 +50,7 @@ PERMISSION_CATALOGUE: dict[str, list[tuple[str, str]]] = {
         ("users.view", "View users"),
         ("users.manage", "Manage users"),
         ("roles.manage", "Manage roles and permissions"),
+        ("ai.scopes.manage", "Manage AI access scopes for users"),
     ],
     "reports": [
         ("reports.view", "View reports"),
@@ -86,7 +87,7 @@ DEFAULT_ROLES: dict[str, list[str]] = {
         "marks.view", "marks.publish",
         "academic.view", "departments.manage", "subjects.manage",
         "reports.view", "reports.export", "analytics.view",
-        "ai.use", "notifications.view", "notifications.send",
+        "ai.use", "ai.scopes.manage", "notifications.view", "notifications.send",
     ],
     "Faculty": [
         "students.view", "attendance.view", "attendance.mark", "attendance.edit",
@@ -151,6 +152,48 @@ def seed_organization_defaults(db: Session, org: Organization, admin_user: User)
     # Default feature flags
     for flag in ["ai_assistant", "analytics", "attendance", "marks", "reports"]:
         db.add(FeatureFlag(organization_id=org.id, flag=flag, enabled=True))
+
+    # Default academic engine metadata (exam types, attendance statuses, grade bands)
+    from app.models import AttendanceStatusConfig, ExamType, GradeBand
+    default_exams = [
+        ("class_test", "Class Test", 10, 25, False, 1),
+        ("assignment", "Assignment", 10, 20, False, 2),
+        ("mid_sem", "Mid Semester", 30, 50, False, 3),
+        ("final", "Final Exam", 50, 100, True, 4),
+    ]
+    for code, name, w, mm, is_f, order in default_exams:
+        db.add(ExamType(
+            organization_id=org.id, code=code, name=name,
+            weightage_default=w, max_marks_default=mm,
+            is_final=is_f, display_order=order,
+        ))
+    default_att = [
+        ("P", "Present", True, False, "#22c55e", 1),
+        ("A", "Absent", False, False, "#ef4444", 2),
+        ("L", "Late", True, False, "#f59e0b", 3),
+        ("OD", "On Duty", True, False, "#3b82f6", 4),
+        ("SL", "Sick Leave", False, True, "#a855f7", 5),
+    ]
+    for code, label, present, is_lv, color, order in default_att:
+        db.add(AttendanceStatusConfig(
+            organization_id=org.id, code=code, label=label,
+            counts_as_present=present, is_leave=is_lv,
+            color=color, display_order=order,
+        ))
+    default_grades = [
+        (90, 100, "O",  10, "Outstanding", 1),
+        (80, 89.99, "A+", 9, "Excellent",   2),
+        (70, 79.99, "A",  8, "Very Good",   3),
+        (60, 69.99, "B+", 7, "Good",        4),
+        (50, 59.99, "B",  6, "Above Average", 5),
+        (40, 49.99, "C",  5, "Average",     6),
+        (0,  39.99, "F",  0, "Fail",        7),
+    ]
+    for mn, mx, g, gp, desc, order in default_grades:
+        db.add(GradeBand(
+            organization_id=org.id, min_percent=mn, max_percent=mx,
+            grade=g, grade_point=gp, description=desc, display_order=order,
+        ))
 
     db.flush()
 

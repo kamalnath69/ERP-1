@@ -1,7 +1,7 @@
 """User and refresh token models."""
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -22,6 +22,10 @@ class User(TimestampMixin, Base):
     last_name: Mapped[str] = mapped_column(String(100), nullable=False)
     phone: Mapped[str | None] = mapped_column(String(30))
     avatar_url: Mapped[str | None] = mapped_column(String(500))
+    # Data-URI base64 avatar (client-side resized to <= ~256px, ~40-60KB max).
+    avatar_base64: Mapped[str | None] = mapped_column(Text)
+    bio: Mapped[str | None] = mapped_column(Text)
+    designation: Mapped[str | None] = mapped_column(String(200))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_super_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     last_login: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

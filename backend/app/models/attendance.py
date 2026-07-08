@@ -1,7 +1,7 @@
 """Attendance sessions and per-student records."""
 import enum
 
-from sqlalchemy import Date, Enum, ForeignKey, String, Text, Time, UniqueConstraint
+from sqlalchemy import Date, ForeignKey, String, Text, Time, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -9,6 +9,7 @@ from app.models.base import TimestampMixin, UUID_STR, uuid_pk, tenant_fk
 
 
 class AttendanceStatusEnum(str, enum.Enum):
+    """Legacy default codes. Tenants can override via `attendance_status_configs`."""
     present = "present"
     absent = "absent"
     late = "late"
@@ -41,9 +42,7 @@ class AttendanceRecord(TimestampMixin, Base):
         UUID_STR, ForeignKey("attendance_sessions.id", ondelete="CASCADE"), nullable=False, index=True
     )
     student_id: Mapped[str] = mapped_column(UUID_STR, ForeignKey("students.id", ondelete="CASCADE"), nullable=False, index=True)
-    status: Mapped[AttendanceStatusEnum] = mapped_column(
-        Enum(AttendanceStatusEnum, name="attendance_status"),
-        nullable=False,
-        default=AttendanceStatusEnum.present,
-    )
+    # status is now a FREE-FORM code that references the tenant's `attendance_status_configs`
+    # (or a default like "present"/"absent"/"late"/"excused" when no catalogue exists).
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="present")
     remarks: Mapped[str | None] = mapped_column(String(300))

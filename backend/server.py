@@ -15,6 +15,7 @@ from app.api.v1 import (
     attendance,
     auth,
     billing,
+    config as config_router,
     extra,
     faculty,
     fees,
@@ -24,6 +25,7 @@ from app.api.v1 import (
     parents,
     reports,
     roles,
+    scopes,
     students,
     super_admin,
     timetable,
@@ -38,6 +40,31 @@ logger = logging.getLogger(__name__)
 
 def _init_db():
     Base.metadata.create_all(engine)
+
+    # Lightweight column migrations for evolving models (SQLAlchemy `create_all`
+    # doesn't add new columns to existing tables). Safe to run repeatedly.
+    from sqlalchemy import text
+    _migrations = [
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_base64 TEXT",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS designation VARCHAR(200)",
+        # attendance_records.status: enum -> varchar(30). Idempotent — checks pg_type first.
+        (
+            "DO $$ BEGIN "
+            "IF EXISTS (SELECT 1 FROM pg_type WHERE typname = 'attendance_status') THEN "
+            "  ALTER TABLE attendance_records ALTER COLUMN status TYPE VARCHAR(30) USING status::text; "
+            "  ALTER TABLE attendance_records ALTER COLUMN status SET DEFAULT 'present'; "
+            "  DROP TYPE attendance_status; "
+            "END IF; END $$;"
+        ),
+    ]
+    with engine.begin() as conn:
+        for sql in _migrations:
+            try:
+                conn.execute(text(sql))
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("Migration '%s' skipped: %s", sql, exc)
+
     from app.db.seed import seed_demo_organization, seed_super_admin
 
     with SessionLocal() as db:
@@ -57,6 +84,8 @@ api_router = APIRouter(prefix="/api")
 api_router.include_router(auth.router)
 api_router.include_router(users.router)
 api_router.include_router(roles.router)
+api_router.include_router(scopes.router)
+api_router.include_router(config_router.router)
 api_router.include_router(academic.router)
 api_router.include_router(students.router)
 api_router.include_router(faculty.router)

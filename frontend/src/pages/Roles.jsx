@@ -63,7 +63,10 @@ export default function Roles() {
           <h1 className="text-3xl font-display font-bold tracking-tight mt-1">Roles & Permissions</h1>
           <p className="text-sm text-muted-foreground mt-2">Every role is dynamic — clone, edit, or invent your own.</p>
         </div>
-        <NewRoleDialog permissions={permissions} onCreated={loadRoles} />
+        <div className="flex items-center gap-2">
+          <NewPermissionDialog onCreated={() => api.get("/roles/permissions").then((r) => setPermissions(r.data))} />
+          <NewRoleDialog permissions={permissions} onCreated={loadRoles} />
+        </div>
       </header>
 
       <div className="grid lg:grid-cols-3 gap-4">
@@ -169,3 +172,91 @@ function NewRoleDialog({ permissions, onCreated }) {
     </Dialog>
   );
 }
+
+function NewPermissionDialog({ onCreated }) {
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState({ code: "", label: "", module: "", description: "" });
+  const [saving, setSaving] = useState(false);
+  const submit = async (e) => {
+    e.preventDefault();
+    setSaving(true);
+    try {
+      await api.post("/permissions", form);
+      toast.success("Permission created");
+      setOpen(false);
+      setForm({ code: "", label: "", module: "", description: "" });
+      onCreated();
+    } catch (err) {
+      toast.error(err?.response?.data?.detail || "Failed to create permission");
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button variant="outline" className="rounded-sm" data-testid="new-permission-btn">
+          <Plus size={14} className="mr-2" /> New permission
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="rounded-sm max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="font-display tracking-tight">Create custom permission</DialogTitle>
+        </DialogHeader>
+        <form onSubmit={submit} className="grid grid-cols-2 gap-3">
+          <div className="col-span-2">
+            <Label>Code</Label>
+            <Input
+              required
+              value={form.code}
+              onChange={(e) => setForm({ ...form, code: e.target.value })}
+              placeholder="workflows.approve"
+              className="rounded-sm font-mono"
+              data-testid="new-perm-code"
+            />
+            <p className="text-[11px] text-muted-foreground mt-1">
+              Machine code the AI/backend checks. Use dot.notation. Must be unique.
+            </p>
+          </div>
+          <div>
+            <Label>Label</Label>
+            <Input
+              required
+              value={form.label}
+              onChange={(e) => setForm({ ...form, label: e.target.value })}
+              placeholder="Approve workflows"
+              className="rounded-sm"
+              data-testid="new-perm-label"
+            />
+          </div>
+          <div>
+            <Label>Module</Label>
+            <Input
+              required
+              value={form.module}
+              onChange={(e) => setForm({ ...form, module: e.target.value })}
+              placeholder="workflows"
+              className="rounded-sm"
+              data-testid="new-perm-module"
+            />
+          </div>
+          <div className="col-span-2">
+            <Label>Description</Label>
+            <Textarea
+              rows={2}
+              value={form.description}
+              onChange={(e) => setForm({ ...form, description: e.target.value })}
+              className="rounded-sm"
+            />
+          </div>
+          <div className="col-span-2 flex justify-end pt-2">
+            <Button type="submit" disabled={saving} className="rounded-sm" data-testid="new-perm-submit">
+              {saving ? "Creating…" : "Create"}
+            </Button>
+          </div>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+

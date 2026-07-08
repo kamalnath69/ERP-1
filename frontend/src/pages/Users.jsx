@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import api from "@/lib/api";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -45,8 +46,12 @@ export default function Users() {
             <tbody>
               {users.length === 0 && <tr><td colSpan={4} className="text-center py-10 text-muted-foreground">No users.</td></tr>}
               {users.map((u) => (
-                <tr key={u.id} className="border-t border-border" data-testid={`user-row-${u.email}`}>
-                  <td className="px-4 py-3">{u.first_name} {u.last_name}</td>
+                <tr key={u.id} className="border-t border-border hover:bg-secondary/40" data-testid={`user-row-${u.email}`}>
+                  <td className="px-4 py-3">
+                    <Link to={`/app/users/${u.id}`} className="hover:underline font-medium">
+                      {u.first_name} {u.last_name}
+                    </Link>
+                  </td>
                   <td className="px-4 py-3 text-muted-foreground">{u.email}</td>
                   <td className="px-4 py-3 font-mono">{u.phone || "—"}</td>
                   <td className="px-4 py-3"><span className={`text-xs px-2 py-1 rounded-sm font-mono uppercase ${u.is_active ? "bg-emerald-100 text-emerald-800" : "bg-muted"}`}>{u.is_active ? "active" : "inactive"}</span></td>
