@@ -72,6 +72,7 @@ const NAV_SECTIONS = [
     label: "System",
     items: [
       { to: "/app/roles", label: "Roles & Permissions", icon: ShieldCheck, perm: "roles.manage" },
+      { to: "/app/config", label: "Academic Config", icon: Gear, perm: "academic.manage" },
       { to: "/app/notifications", label: "Notifications", icon: Bell, perm: "notifications.view" },
       { to: "/app/audit", label: "Audit Logs", icon: ClipboardText, perm: "audit.view" },
       { to: "/app/billing", label: "Billing", icon: CreditCard, perm: "billing.view" },

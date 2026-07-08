@@ -41,6 +41,7 @@ from app.models.extra import (
     PlacementOffer,
     AdmissionApplication,
 )
+from app.models.config import ExamType, AttendanceStatusConfig, GradeBand
 
 __all__ = [
     "Base",
@@ -101,4 +102,7 @@ __all__ = [
     "PlacementDrive",
     "PlacementOffer",
     "AdmissionApplication",
+    "ExamType",
+    "AttendanceStatusConfig",
+    "GradeBand",
 ]

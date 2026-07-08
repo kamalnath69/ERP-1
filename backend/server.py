@@ -15,6 +15,7 @@ from app.api.v1 import (
     attendance,
     auth,
     billing,
+    config as config_router,
     extra,
     faculty,
     fees,
@@ -75,6 +76,7 @@ api_router.include_router(auth.router)
 api_router.include_router(users.router)
 api_router.include_router(roles.router)
 api_router.include_router(scopes.router)
+api_router.include_router(config_router.router)
 api_router.include_router(academic.router)
 api_router.include_router(students.router)
 api_router.include_router(faculty.router)

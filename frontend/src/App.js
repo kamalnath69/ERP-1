@@ -36,6 +36,7 @@ import Admissions from "@/pages/Admissions";
 import PublicAdmissions from "@/pages/PublicAdmissions";
 import MyProfile from "@/pages/MyProfile";
 import UserDetail from "@/pages/UserDetail";
+import AcademicConfig from "@/pages/AcademicConfig";
 import AppLayout from "@/components/layout/AppLayout";
 
 function RequireAuth({ children }) {
@@ -86,6 +87,7 @@ function App() {
           <Route path="/app/notifications" element={<RequireAuth><AppLayout><Notifications /></AppLayout></RequireAuth>} />
           <Route path="/app/audit" element={<RequireAuth><AppLayout><AuditLogs /></AppLayout></RequireAuth>} />
           <Route path="/app/settings" element={<RequireAuth><AppLayout><SettingsPage /></AppLayout></RequireAuth>} />
+          <Route path="/app/config" element={<RequireAuth><AppLayout><AcademicConfig /></AppLayout></RequireAuth>} />
 
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
