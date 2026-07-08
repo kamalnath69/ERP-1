@@ -8,22 +8,26 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { toast } from "sonner";
 import { Plus } from "@phosphor-icons/react";
+import useTerminology from "@/hooks/useTerminology";
 
 export default function Academic() {
+  const { plural, t } = useTerminology();
   return (
     <div className="space-y-6" data-testid="academic-page">
       <header>
-        <div className="overline text-muted-foreground">Academic Structure</div>
-        <h1 className="text-3xl font-display font-bold tracking-tight mt-1">Departments · Units · Levels · Sections · Subjects</h1>
-        <p className="text-sm text-muted-foreground mt-2">Generic hierarchy — same schema for K-12 & higher-ed.</p>
+        <div className="overline text-muted-foreground">{t("academic_unit")} Structure</div>
+        <h1 className="text-3xl font-display font-bold tracking-tight mt-1">
+          {plural("department")} · {plural("academic_unit")} · {plural("level")} · {plural("section")} · {plural("subject")}
+        </h1>
+        <p className="text-sm text-muted-foreground mt-2">Generic hierarchy — same schema for K-12 &amp; higher-ed.</p>
       </header>
       <Tabs defaultValue="departments">
         <TabsList className="rounded-sm bg-secondary">
-          <TabsTrigger value="departments" className="rounded-sm">Departments</TabsTrigger>
-          <TabsTrigger value="units" className="rounded-sm">Units</TabsTrigger>
-          <TabsTrigger value="levels" className="rounded-sm">Levels</TabsTrigger>
-          <TabsTrigger value="sections" className="rounded-sm">Sections</TabsTrigger>
-          <TabsTrigger value="subjects" className="rounded-sm">Subjects</TabsTrigger>
+          <TabsTrigger value="departments" className="rounded-sm">{plural("department")}</TabsTrigger>
+          <TabsTrigger value="units" className="rounded-sm">{plural("academic_unit")}</TabsTrigger>
+          <TabsTrigger value="levels" className="rounded-sm">{plural("level")}</TabsTrigger>
+          <TabsTrigger value="sections" className="rounded-sm">{plural("section")}</TabsTrigger>
+          <TabsTrigger value="subjects" className="rounded-sm">{plural("subject")}</TabsTrigger>
         </TabsList>
         <TabsContent value="departments"><Departments /></TabsContent>
         <TabsContent value="units"><Units /></TabsContent>

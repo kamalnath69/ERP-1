@@ -8,9 +8,11 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { toast } from "sonner";
 import { Plus } from "@phosphor-icons/react";
 import { useAuth } from "@/contexts/AuthContext";
+import useTerminology from "@/hooks/useTerminology";
 
 export default function Faculty() {
   const { can } = useAuth();
+  const { plural, t } = useTerminology();
   const [faculty, setFaculty] = useState([]);
   const [departments, setDepartments] = useState([]);
   const [open, setOpen] = useState(false);
@@ -27,7 +29,7 @@ export default function Faculty() {
     <div className="space-y-6" data-testid="faculty-page">
       <header className="flex items-baseline justify-between">
         <div>
-          <div className="overline text-muted-foreground">Faculty</div>
+          <div className="overline text-muted-foreground">{plural("faculty")}</div>
           <h1 className="text-3xl font-display font-bold tracking-tight mt-1">Teaching staff</h1>
         </div>
         {can("faculty.create") && <NewFacultyDialog open={open} setOpen={setOpen} departments={departments} onCreated={load} />}

@@ -10,7 +10,6 @@ from app.core.deps import require_permissions
 from app.models import (
     AttendanceRecord,
     AttendanceSession,
-    AttendanceStatusEnum,
     AuditLog,
     CalendarEvent,
     Department,
@@ -157,8 +156,11 @@ def enterprise_widgets(user: User = Depends(require_permissions("analytics.view"
             func.count(AttendanceRecord.id).label("total"),
             func.sum(
                 case(
-                    (AttendanceRecord.status == AttendanceStatusEnum.present, 1),
-                    (AttendanceRecord.status == AttendanceStatusEnum.late, 1),
+                    (AttendanceRecord.status == "present", 1),
+                    (AttendanceRecord.status == "late", 1),
+                    (AttendanceRecord.status == "P", 1),
+                    (AttendanceRecord.status == "L", 1),
+                    (AttendanceRecord.status == "OD", 1),
                     else_=0,
                 )
             ).label("present"),

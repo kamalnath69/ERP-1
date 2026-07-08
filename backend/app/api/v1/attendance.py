@@ -7,10 +7,45 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.deps import require_permissions
-from app.models import AttendanceRecord, AttendanceSession, AttendanceStatusEnum, User
+from app.models import (
+    AttendanceRecord,
+    AttendanceSession,
+    AttendanceStatusConfig,
+    AttendanceStatusEnum,
+    User,
+)
 from app.schemas import AttendanceSessionCreate, AttendanceSessionOut
 
 router = APIRouter(prefix="/attendance", tags=["attendance"])
+
+# Default fallback statuses used when the tenant has NOT configured a catalogue.
+_DEFAULT_STATUS_CODES = {s.value for s in AttendanceStatusEnum}
+
+
+def _validate_status_code(db: Session, org_id: str, code: str) -> str:
+    """Validate & normalise an incoming attendance status code."""
+    code = (code or "present").strip()
+    # 1) Tenant catalogue takes precedence
+    tenant_codes = db.execute(
+        select(AttendanceStatusConfig.code).where(
+            AttendanceStatusConfig.organization_id == org_id,
+            AttendanceStatusConfig.is_active.is_(True),
+        )
+    ).scalars().all()
+    if tenant_codes:
+        # Case-insensitive lookup, but store the exact code as configured.
+        lower_map = {c.lower(): c for c in tenant_codes}
+        if code.lower() in lower_map:
+            return lower_map[code.lower()]
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail=f"status '{code}' is not in this organisation's attendance catalogue: {sorted(tenant_codes)}. "
+                   "Add it under Academic Config → Attendance Statuses first.",
+        )
+    # 2) Fallback to default enum values
+    if code.lower() in _DEFAULT_STATUS_CODES:
+        return code.lower()
+    return "present"
 
 
 @router.post("/sessions", response_model=AttendanceSessionOut, status_code=status.HTTP_201_CREATED)
@@ -35,16 +70,13 @@ def create_attendance_session(
     db.add(sess)
     db.flush()
     for rec in body.records:
-        try:
-            status_enum = AttendanceStatusEnum(rec.get("status", "present"))
-        except ValueError:
-            status_enum = AttendanceStatusEnum.present
+        status_code = _validate_status_code(db, user.organization_id, rec.get("status", "present"))
         db.add(
             AttendanceRecord(
                 organization_id=user.organization_id,
                 session_id=sess.id,
                 student_id=rec["student_id"],
-                status=status_enum,
+                status=status_code,
                 remarks=rec.get("remarks"),
             )
         )

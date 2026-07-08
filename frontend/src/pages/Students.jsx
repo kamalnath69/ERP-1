@@ -9,10 +9,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { toast } from "sonner";
 import { Plus, MagnifyingGlass } from "@phosphor-icons/react";
 import { useAuth } from "@/contexts/AuthContext";
+import useTerminology from "@/hooks/useTerminology";
 import { useNavigate } from "react-router-dom";
 
 export default function Students() {
   const { can } = useAuth();
+  const { plural } = useTerminology();
   const nav = useNavigate();
   const [students, setStudents] = useState([]);
   const [sections, setSections] = useState([]);
@@ -39,7 +41,7 @@ export default function Students() {
     <div className="space-y-6" data-testid="students-page">
       <header className="flex items-baseline justify-between">
         <div>
-          <div className="overline text-muted-foreground">Students</div>
+          <div className="overline text-muted-foreground">{plural("student")}</div>
           <h1 className="text-3xl font-display font-bold tracking-tight mt-1">Directory</h1>
         </div>
         {can("students.create") && (

@@ -400,3 +400,117 @@ def _serialize_grade(r: GradeBand) -> dict:
         "grade": r.grade, "grade_point": r.grade_point, "description": r.description,
         "display_order": r.display_order, "is_active": r.is_active,
     }
+
+
+# ========================================================================== #
+# 4) EXPORT / IMPORT — one-shot JSON snapshot of terminology + all catalogues.
+# ========================================================================== #
+
+class ConfigImportIn(BaseModel):
+    terminology: dict[str, str] | None = None
+    exam_types: list[dict] | None = None
+    attendance_statuses: list[dict] | None = None
+    grade_bands: list[dict] | None = None
+    mode: str = Field(default="merge", description="'merge' (upsert by code) or 'replace' (wipe first)")
+
+
+@router.get("/config/export")
+def export_config(user: CurrentUser, db: Session = Depends(get_db)):
+    """Dump the tenant's terminology + all metadata catalogues as a single JSON blob."""
+    if not user.organization_id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No organization context")
+    from datetime import datetime, timezone
+
+    terminology = get_terminology(user, db)["terms"]
+    exam_types = list_exam_types(user, db)
+    attendance_statuses = list_att_statuses(user, db)
+    grade_bands = list_grade_bands(user, db)
+
+    return {
+        "version": 1,
+        "organization_id": user.organization_id,
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "terminology": terminology,
+        "exam_types": [_strip_ids(e) for e in exam_types],
+        "attendance_statuses": [_strip_ids(a) for a in attendance_statuses],
+        "grade_bands": [_strip_ids(g) for g in grade_bands],
+    }
+
+
+def _strip_ids(d: dict) -> dict:
+    return {k: v for k, v in d.items() if k not in {"id"}}
+
+
+@router.post("/config/import")
+def import_config(
+    body: ConfigImportIn,
+    user: User = Depends(require_permissions("academic.manage")),
+    db: Session = Depends(get_db),
+):
+    """Upsert (or replace) the tenant's config from a JSON payload.
+
+    Returns counts of rows changed per section.
+    """
+    if not user.organization_id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No organization context")
+
+    stats = {"terminology": 0, "exam_types": 0, "attendance_statuses": 0, "grade_bands": 0}
+
+    if body.terminology is not None:
+        row = db.execute(
+            select(Setting).where(
+                Setting.organization_id == user.organization_id, Setting.key == "terminology",
+            )
+        ).scalar_one_or_none()
+        cleaned = {k: v.strip() for k, v in (body.terminology or {}).items() if isinstance(v, str) and v.strip()}
+        if row:
+            row.value = cleaned
+        else:
+            db.add(Setting(organization_id=user.organization_id, key="terminology", value=cleaned))
+        stats["terminology"] = len(cleaned)
+
+    def _upsert(model, rows, key_field="code", numeric_fields=None):
+        numeric_fields = set(numeric_fields or [])
+        if body.mode == "replace":
+            db.query(model).filter(model.organization_id == user.organization_id).delete()
+            db.flush()
+        changed = 0
+        for row in rows or []:
+            key_val = row.get(key_field)
+            if not key_val:
+                # e.g. grade_bands don't have a code; upsert by grade+min_percent identity
+                existing = None
+            else:
+                existing = db.execute(
+                    select(model).where(
+                        model.organization_id == user.organization_id,
+                        getattr(model, key_field) == key_val,
+                    )
+                ).scalar_one_or_none()
+            if existing:
+                for k, v in row.items():
+                    if hasattr(existing, k) and k not in {"id", "organization_id"}:
+                        setattr(existing, k, v)
+            else:
+                clean = {k: v for k, v in row.items() if k not in {"id", "organization_id"}}
+                db.add(model(organization_id=user.organization_id, **clean))
+            changed += 1
+        return changed
+
+    if body.exam_types is not None:
+        stats["exam_types"] = _upsert(ExamType, body.exam_types, key_field="code")
+    if body.attendance_statuses is not None:
+        stats["attendance_statuses"] = _upsert(AttendanceStatusConfig, body.attendance_statuses, key_field="code")
+    if body.grade_bands is not None:
+        # GradeBand has no unique code; replace-only makes sense, but merge = append here.
+        if body.mode == "replace":
+            db.query(GradeBand).filter(GradeBand.organization_id == user.organization_id).delete()
+            db.flush()
+        for row in body.grade_bands:
+            clean = {k: v for k, v in row.items() if k not in {"id", "organization_id"}}
+            db.add(GradeBand(organization_id=user.organization_id, **clean))
+            stats["grade_bands"] += 1
+
+    db.commit()
+    return {"ok": True, "mode": body.mode, "stats": stats}
+

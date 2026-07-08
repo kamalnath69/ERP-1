@@ -7,22 +7,82 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { toast } from "sonner";
-import { Plus, TrashSimple, FloppyDisk, Books, CalendarCheck, GraduationCap } from "@phosphor-icons/react";
+import { Plus, TrashSimple, FloppyDisk, Books, CalendarCheck, GraduationCap, DownloadSimple, UploadSimple } from "@phosphor-icons/react";
 
 /**
  * Academic Config — tenant-defined exam types, attendance statuses, grade bands.
  * All rows are metadata; no hardcoded assumptions.
  */
 export default function AcademicConfig() {
+  const fileRef = React.useRef(null);
+  const [importing, setImporting] = React.useState(false);
+
+  const exportConfig = async () => {
+    try {
+      const { data } = await api.get("/config/export");
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `athena-config-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast.success("Config exported");
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Export failed");
+    }
+  };
+
+  const onImportFile = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImporting(true);
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      const mode = window.confirm(
+        "Click OK to REPLACE existing config with the file (destructive).\n\n" +
+        "Click Cancel to MERGE (upsert by code — non-destructive)."
+      ) ? "replace" : "merge";
+      const payload = {
+        mode,
+        terminology: parsed.terminology,
+        exam_types: parsed.exam_types,
+        attendance_statuses: parsed.attendance_statuses,
+        grade_bands: parsed.grade_bands,
+      };
+      const { data } = await api.post("/config/import", payload);
+      toast.success(`Imported (${mode}) — ${JSON.stringify(data.stats)}`);
+      // Force a full page refresh so all tabs re-fetch
+      window.location.reload();
+    } catch (err) {
+      toast.error(err?.response?.data?.detail || err.message || "Import failed");
+    } finally {
+      setImporting(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  };
+
   return (
     <div className="space-y-6" data-testid="academic-config-page">
-      <header>
-        <div className="overline text-muted-foreground">Configuration</div>
-        <h1 className="text-4xl font-display font-bold tracking-tight mt-1">Academic Engine</h1>
-        <p className="text-sm text-muted-foreground mt-2">
-          Define your organization&apos;s own exam types, attendance statuses, and grading bands.
-          Nothing here is hardcoded — everything you configure drives the ERP and the AI assistant.
-        </p>
+      <header className="flex items-start justify-between flex-wrap gap-3">
+        <div>
+          <div className="overline text-muted-foreground">Configuration</div>
+          <h1 className="text-4xl font-display font-bold tracking-tight mt-1">Academic Engine</h1>
+          <p className="text-sm text-muted-foreground mt-2">
+            Define your organization&apos;s own exam types, attendance statuses, and grading bands.
+            Nothing here is hardcoded — everything you configure drives the ERP and the AI assistant.
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <input ref={fileRef} type="file" accept="application/json" onChange={onImportFile} className="hidden" data-testid="config-import-input" />
+          <Button variant="outline" className="rounded-sm" onClick={() => fileRef.current?.click()} disabled={importing} data-testid="config-import-btn">
+            <UploadSimple size={14} className="mr-2" /> {importing ? "Importing…" : "Import JSON"}
+          </Button>
+          <Button variant="outline" className="rounded-sm" onClick={exportConfig} data-testid="config-export-btn">
+            <DownloadSimple size={14} className="mr-2" /> Export JSON
+          </Button>
+        </div>
       </header>
 
       <Tabs defaultValue="exam-types">

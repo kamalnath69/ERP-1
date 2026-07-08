@@ -48,6 +48,15 @@ def _init_db():
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_base64 TEXT",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS designation VARCHAR(200)",
+        # attendance_records.status: enum -> varchar(30). Idempotent — checks pg_type first.
+        (
+            "DO $$ BEGIN "
+            "IF EXISTS (SELECT 1 FROM pg_type WHERE typname = 'attendance_status') THEN "
+            "  ALTER TABLE attendance_records ALTER COLUMN status TYPE VARCHAR(30) USING status::text; "
+            "  ALTER TABLE attendance_records ALTER COLUMN status SET DEFAULT 'present'; "
+            "  DROP TYPE attendance_status; "
+            "END IF; END $$;"
+        ),
     ]
     with engine.begin() as conn:
         for sql in _migrations:
