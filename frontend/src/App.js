@@ -34,6 +34,8 @@ import Reports from "@/pages/Reports";
 import Notifications from "@/pages/Notifications";
 import Admissions from "@/pages/Admissions";
 import PublicAdmissions from "@/pages/PublicAdmissions";
+import MyProfile from "@/pages/MyProfile";
+import UserDetail from "@/pages/UserDetail";
 import AppLayout from "@/components/layout/AppLayout";
 
 function RequireAuth({ children }) {
@@ -79,6 +81,8 @@ function App() {
           <Route path="/app/reports" element={<RequireAuth><AppLayout><Reports /></AppLayout></RequireAuth>} />
           <Route path="/app/billing" element={<RequireAuth><AppLayout><Billing /></AppLayout></RequireAuth>} />
           <Route path="/app/users" element={<RequireAuth><AppLayout><Users /></AppLayout></RequireAuth>} />
+          <Route path="/app/users/:id" element={<RequireAuth><AppLayout><UserDetail /></AppLayout></RequireAuth>} />
+          <Route path="/app/me" element={<RequireAuth><AppLayout><MyProfile /></AppLayout></RequireAuth>} />
           <Route path="/app/notifications" element={<RequireAuth><AppLayout><Notifications /></AppLayout></RequireAuth>} />
           <Route path="/app/audit" element={<RequireAuth><AppLayout><AuditLogs /></AppLayout></RequireAuth>} />
           <Route path="/app/settings" element={<RequireAuth><AppLayout><SettingsPage /></AppLayout></RequireAuth>} />

@@ -48,6 +48,9 @@ class UserOut(ORMBase):
     is_super_admin: bool
     organization_id: str | None = None
     avatar_url: str | None = None
+    avatar_base64: str | None = None
+    bio: str | None = None
+    designation: str | None = None
 
 
 class UserCreate(BaseModel):
@@ -64,6 +67,32 @@ class UserUpdate(BaseModel):
     last_name: str | None = None
     phone: str | None = None
     is_active: bool | None = None
+    bio: str | None = None
+    designation: str | None = None
+    avatar_base64: str | None = None
+
+
+class ProfileUpdate(BaseModel):
+    first_name: str | None = None
+    last_name: str | None = None
+    phone: str | None = None
+    bio: str | None = None
+    designation: str | None = None
+    avatar_base64: str | None = None
+
+
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=8)
+
+
+class OverrideEntry(BaseModel):
+    permission_id: str
+    granted: bool
+
+
+class UserOverridesUpdate(BaseModel):
+    overrides: list[OverrideEntry]
 
 
 # ---------------- ORG ----------------

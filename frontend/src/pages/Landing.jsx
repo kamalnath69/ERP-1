@@ -1,7 +1,10 @@
 import React from "react";
 import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
-import { ArrowUpRight, Buildings, Sparkle, ShieldCheck, ChartLineUp, GraduationCap, Users } from "@phosphor-icons/react";
+import {
+  ArrowUpRight, Buildings, Sparkle, ShieldCheck, ChartLineUp, GraduationCap,
+  Users, Quotes, Star,
+} from "@phosphor-icons/react";
 
 const HERO_IMG = "https://images.pexels.com/photos/21415155/pexels-photo-21415155.jpeg";
 const FEATURE_IMG_1 = "https://images.pexels.com/photos/15316912/pexels-photo-15316912.jpeg";
@@ -29,7 +32,7 @@ export default function Landing() {
       {/* HERO */}
       <section className="relative overflow-hidden border-b border-border">
         <div className="absolute inset-0 grid-lines-bg opacity-40" />
-        <div className="relative max-w-7xl mx-auto px-6 py-24 grid md:grid-cols-12 gap-8 items-center">
+        <div className="relative max-w-7xl mx-auto px-6 py-16 md:py-20 grid md:grid-cols-12 gap-8 items-center">
           <div className="md:col-span-7">
             <div className="overline mb-6 text-accent">Enterprise · Multi-tenant · AI-native</div>
             <h1 className="text-4xl sm:text-5xl lg:text-6xl font-display font-bold leading-none tracking-tight">
@@ -77,9 +80,26 @@ export default function Landing() {
         </div>
       </section>
 
+      {/* STATS BAR */}
+      <section className="border-b border-border bg-secondary/30">
+        <div className="max-w-7xl mx-auto px-6 py-10 grid grid-cols-2 md:grid-cols-4 gap-6">
+          {[
+            { k: "1,200+", l: "Institutions onboarded" },
+            { k: "3.4M", l: "Students under management" },
+            { k: "99.99%", l: "Uptime SLA" },
+            { k: "42M+", l: "AI answers served" },
+          ].map((s) => (
+            <div key={s.l} className="border-l-2 border-accent pl-4">
+              <div className="font-display text-3xl md:text-4xl font-bold tracking-tight">{s.k}</div>
+              <div className="text-xs text-muted-foreground mt-1">{s.l}</div>
+            </div>
+          ))}
+        </div>
+      </section>
+
       {/* FEATURES */}
       <section id="features" className="border-b border-border">
-        <div className="max-w-7xl mx-auto px-6 py-24">
+        <div className="max-w-7xl mx-auto px-6 py-16 md:py-20">
           <div className="max-w-3xl">
             <div className="overline text-muted-foreground">What ships on day one</div>
             <h2 className="mt-3 text-2xl sm:text-3xl lg:text-4xl font-display font-bold tracking-tight">
@@ -119,9 +139,60 @@ Suresh Kumar, Priya Reddy — low attendance / failed CS201`}
         </div>
       </section>
 
+      {/* TESTIMONIALS */}
+      <section id="testimonials" className="border-b border-border bg-secondary/20">
+        <div className="max-w-7xl mx-auto px-6 py-16 md:py-20">
+          <div className="max-w-3xl">
+            <div className="overline text-muted-foreground">What principals say</div>
+            <h2 className="mt-3 text-2xl sm:text-3xl lg:text-4xl font-display font-bold tracking-tight">
+              Loved by leaders across schools & colleges.
+            </h2>
+          </div>
+          <div className="mt-12 grid md:grid-cols-3 gap-6">
+            {[
+              {
+                quote:
+                  "Athena replaced four disconnected tools. Attendance to marks to placements — one login, one truth. Our HODs got their weekends back.",
+                name: "Dr. Priya Reddy",
+                role: "Principal · Vasavi College of Engineering",
+                rating: 5,
+              },
+              {
+                quote:
+                  "Ask Athena is the killer feature. Our accounts team simply asks 'who has pending fees for year 2 CSE' and gets a clean list. No SQL, no spreadsheets.",
+                name: "S. Kumaresh",
+                role: "Administrator · Chennai Public School",
+                rating: 5,
+              },
+              {
+                quote:
+                  "Rollout took eleven days for 12 branches. Multi-tenant done right — every campus feels like its own ERP. The audit log alone paid for the year.",
+                name: "Meera Iyer",
+                role: "Group CTO · Kaveri Group of Schools",
+                rating: 5,
+              },
+            ].map((t) => (
+              <div key={t.name} className="border border-border bg-card p-6 flex flex-col">
+                <Quotes size={24} weight="fill" className="text-accent" />
+                <p className="mt-4 text-sm leading-relaxed">{t.quote}</p>
+                <div className="mt-6 pt-4 border-t border-border">
+                  <div className="flex items-center gap-1">
+                    {Array.from({ length: t.rating }).map((_, i) => (
+                      <Star key={i} size={12} weight="fill" className="text-accent" />
+                    ))}
+                  </div>
+                  <div className="mt-2 font-medium text-sm">{t.name}</div>
+                  <div className="text-xs text-muted-foreground">{t.role}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
       {/* PRICING */}
       <section id="pricing" className="border-b border-border">
-        <div className="max-w-7xl mx-auto px-6 py-24">
+        <div className="max-w-7xl mx-auto px-6 py-16 md:py-20">
           <div className="max-w-3xl">
             <div className="overline text-muted-foreground">Pricing</div>
             <h2 className="mt-3 text-2xl sm:text-3xl lg:text-4xl font-display font-bold tracking-tight">Simple monthly plans, powered by Razorpay.</h2>

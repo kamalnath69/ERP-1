@@ -38,6 +38,22 @@ logger = logging.getLogger(__name__)
 
 def _init_db():
     Base.metadata.create_all(engine)
+
+    # Lightweight column migrations for evolving models (SQLAlchemy `create_all`
+    # doesn't add new columns to existing tables). Safe to run repeatedly.
+    from sqlalchemy import text
+    _migrations = [
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_base64 TEXT",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS designation VARCHAR(200)",
+    ]
+    with engine.begin() as conn:
+        for sql in _migrations:
+            try:
+                conn.execute(text(sql))
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("Migration '%s' skipped: %s", sql, exc)
+
     from app.db.seed import seed_demo_organization, seed_super_admin
 
     with SessionLocal() as db:

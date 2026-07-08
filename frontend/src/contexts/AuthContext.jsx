@@ -1,62 +1,55 @@
-import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
-import api, { tokenStore } from "@/lib/api";
+import React, { createContext, useContext, useEffect, useCallback } from "react";
+import { useDispatch, useSelector } from "react-redux";
+import { tokenStore } from "@/lib/api";
+import {
+  fetchMe,
+  loginThunk,
+  registerOrgThunk,
+  logoutThunk,
+  selectAuth,
+} from "@/store/slices/authSlice";
 
 const AuthCtx = createContext(null);
 
 export function AuthProvider({ children }) {
-  const [user, setUser] = useState(null);
-  const [organization, setOrganization] = useState(null);
-  const [permissions, setPermissions] = useState([]);
-  const [roles, setRoles] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const dispatch = useDispatch();
+  const { user, organization, permissions, roles, loading } = useSelector(selectAuth);
 
   const refreshMe = useCallback(async () => {
-    try {
-      const { data } = await api.get("/auth/me");
-      setUser(data.user);
-      setOrganization(data.organization);
-      setPermissions(data.permissions || []);
-      setRoles(data.roles || []);
-    } catch {
-      setUser(null);
-      setOrganization(null);
-      setPermissions([]);
-      setRoles([]);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+    await dispatch(fetchMe());
+  }, [dispatch]);
 
   useEffect(() => {
-    if (tokenStore.get()) refreshMe();
-    else setLoading(false);
-  }, [refreshMe]);
+    // Bootstrap: always try fetchMe once; it will resolve loading=false either way.
+    if (tokenStore.get()) {
+      dispatch(fetchMe());
+    } else {
+      dispatch(fetchMe()); // will 401 -> reducer clears loading
+    }
+  }, [dispatch]);
 
   const login = async (email, password) => {
-    const { data } = await api.post("/auth/login", { email, password });
-    tokenStore.set(data.access_token);
-    tokenStore.setRefresh(data.refresh_token);
-    await refreshMe();
-    return data.user;
+    const result = await dispatch(loginThunk({ email, password }));
+    if (loginThunk.rejected.match(result)) {
+      const err = new Error(result.payload?.detail || "Login failed");
+      err.response = { data: result.payload };
+      throw err;
+    }
+    return result.payload;
   };
 
   const registerOrg = async (payload) => {
-    const { data } = await api.post("/auth/register", payload);
-    tokenStore.set(data.access_token);
-    tokenStore.setRefresh(data.refresh_token);
-    await refreshMe();
-    return data.user;
+    const result = await dispatch(registerOrgThunk(payload));
+    if (registerOrgThunk.rejected.match(result)) {
+      const err = new Error(result.payload?.detail || "Registration failed");
+      err.response = { data: result.payload };
+      throw err;
+    }
+    return result.payload;
   };
 
   const logout = async () => {
-    try {
-      await api.post("/auth/logout", { refresh_token: tokenStore.getRefresh() });
-    } catch {}
-    tokenStore.clear();
-    setUser(null);
-    setOrganization(null);
-    setPermissions([]);
-    setRoles([]);
+    await dispatch(logoutThunk());
   };
 
   const can = (code) => user?.is_super_admin || permissions.includes(code);
