@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.deps import CurrentUser, require_permissions
 from app.models import AccessScope, User
-from app.services.scopes import scope_catalog, KNOWN_TYPES
+from app.services.scopes import get_implicit_scopes, scope_catalog, KNOWN_TYPES
 
 router = APIRouter(prefix="", tags=["access-scopes"])
 
@@ -21,12 +21,14 @@ class ScopeIn(BaseModel):
 
 
 class ScopeOut(BaseModel):
-    id: str
+    id: str | None
     user_id: str
     scope_type: str
     scope_value: str
     meta: dict | None = None
     is_known_type: bool
+    is_implicit: bool = False
+    source: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -63,24 +65,38 @@ def list_user_scopes(
     current_user: CurrentUser,
     db: Session = Depends(get_db),
 ):
-    """Anyone with users.view can inspect scopes; managing requires ai.scopes.manage or roles.manage."""
+    """Return explicit + implicit scopes. Implicit rows carry is_implicit=true and cannot be deleted."""
     target = db.get(User, user_id)
     if not target or not _can_manage_scopes(current_user, target):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
-    rows = db.execute(
+
+    # 1) explicit
+    explicit = db.execute(
         select(AccessScope).where(AccessScope.user_id == user_id).order_by(AccessScope.scope_type)
     ).scalars().all()
-    return [
+    out: list[ScopeOut] = [
         ScopeOut(
-            id=r.id,
-            user_id=r.user_id,
-            scope_type=r.scope_type,
-            scope_value=r.scope_value,
-            meta=r.meta,
+            id=r.id, user_id=r.user_id, scope_type=r.scope_type,
+            scope_value=r.scope_value, meta=r.meta,
             is_known_type=r.scope_type in KNOWN_TYPES,
+            is_implicit=False, source="explicit",
         )
-        for r in rows
+        for r in explicit
     ]
+
+    # 2) implicit (faculty assignments, section advisorship). De-dupe against explicit.
+    explicit_keys = {(r.scope_type, r.scope_value) for r in explicit}
+    for imp in get_implicit_scopes(db, target):
+        key = (imp["scope_type"], imp["scope_value"])
+        if key in explicit_keys:
+            continue
+        out.append(ScopeOut(
+            id=None, user_id=user_id, scope_type=imp["scope_type"],
+            scope_value=imp["scope_value"], meta=imp.get("meta") or {},
+            is_known_type=imp["scope_type"] in KNOWN_TYPES,
+            is_implicit=True, source=imp["source"],
+        ))
+    return out
 
 
 @router.post("/users/{user_id}/scopes", response_model=ScopeOut, status_code=status.HTTP_201_CREATED)
@@ -111,6 +127,7 @@ def add_user_scope(
             id=dup.id, user_id=dup.user_id, scope_type=dup.scope_type,
             scope_value=dup.scope_value, meta=dup.meta,
             is_known_type=dup.scope_type in KNOWN_TYPES,
+            is_implicit=False, source="explicit",
         )
 
     row = AccessScope(
@@ -127,6 +144,7 @@ def add_user_scope(
         id=row.id, user_id=row.user_id, scope_type=row.scope_type,
         scope_value=row.scope_value, meta=row.meta,
         is_known_type=row.scope_type in KNOWN_TYPES,
+        is_implicit=False, source="explicit",
     )
 
 
@@ -136,7 +154,10 @@ def delete_scope(
     current_user: CurrentUser,
     db: Session = Depends(get_db),
 ):
-    row = db.get(AccessScope, scope_id)
+    try:
+        row = db.get(AccessScope, scope_id)
+    except Exception:
+        row = None
     if not row or (not current_user.is_super_admin and row.organization_id != current_user.organization_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Scope not found")
     _require_manager(current_user, db)

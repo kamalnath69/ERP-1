@@ -68,17 +68,96 @@ class ScopeMap:
 
 # ------------------------------------------------------------------ load ---- #
 
+def get_implicit_scopes(db: Session, user: User) -> list[dict]:
+    """Compute implicit scopes from faculty_assignments and section advisorship.
+
+    Returns a list of dicts:
+        {"scope_type": ..., "scope_value": ..., "source": "faculty_assignment"|"section_advisor",
+         "meta": {...}}
+    """
+    if user.is_super_admin or not user.organization_id:
+        return []
+    implicit: list[dict] = []
+
+    # Faculty assignments -> subject + section + composite
+    fa_rows = db.execute(
+        select(FacultyAssignment).where(
+            FacultyAssignment.organization_id == user.organization_id,
+            FacultyAssignment.faculty_user_id == user.id,
+        )
+    ).scalars().all()
+    for fa in fa_rows:
+        implicit.append({
+            "scope_type": "subject",
+            "scope_value": fa.subject_id,
+            "source": "faculty_assignment",
+            "meta": {"assignment_id": fa.id, "role": fa.role},
+        })
+        implicit.append({
+            "scope_type": "section",
+            "scope_value": fa.section_id,
+            "source": "faculty_assignment",
+            "meta": {"assignment_id": fa.id, "role": fa.role},
+        })
+        implicit.append({
+            "scope_type": "faculty_assignment",
+            "scope_value": f"{fa.subject_id}:{fa.section_id}",
+            "source": "faculty_assignment",
+            "meta": {"assignment_id": fa.id, "role": fa.role},
+        })
+
+    # Section advisor -> section scope for that section
+    advisor_rows = db.execute(
+        select(Section).where(
+            Section.organization_id == user.organization_id,
+            Section.advisor_user_id == user.id,
+        )
+    ).scalars().all()
+    for sec in advisor_rows:
+        implicit.append({
+            "scope_type": "section",
+            "scope_value": sec.id,
+            "source": "section_advisor",
+            "meta": {"section_name": sec.name},
+        })
+
+    return implicit
+
+
 def get_user_scope_map(db: Session, user: User) -> ScopeMap:
+    """Effective scope map = explicit access_scopes UNION implicit faculty scopes.
+
+    Deduplicates identical (type, value) pairs across sources.
+    """
     if user.is_super_admin:
         return ScopeMap(by_type={}, meta_by_type={})
+
+    by_type: dict[str, list[str]] = {}
+    meta_by_type: dict[str, list[dict]] = {}
+    seen: set[tuple[str, str]] = set()
+
+    def _add(t: str, v: str, meta: dict | None):
+        key = (t, v)
+        if key in seen:
+            return
+        seen.add(key)
+        by_type.setdefault(t, []).append(v)
+        meta_by_type.setdefault(t, []).append(meta or {})
+
+    # 1) explicit
     rows = db.execute(
         select(AccessScope).where(AccessScope.user_id == user.id)
     ).scalars().all()
-    by_type: dict[str, list[str]] = {}
-    meta_by_type: dict[str, list[dict]] = {}
     for r in rows:
-        by_type.setdefault(r.scope_type, []).append(r.scope_value)
-        meta_by_type.setdefault(r.scope_type, []).append(r.meta or {})
+        _add(r.scope_type, r.scope_value, r.meta)
+
+    # 2) implicit (faculty assignments + section advisorship)
+    for imp in get_implicit_scopes(db, user):
+        meta = dict(imp.get("meta") or {})
+        meta["source"] = imp["source"]
+        meta["implicit"] = True
+        _add(imp["scope_type"], imp["scope_value"], meta)
+
     return ScopeMap(by_type=by_type, meta_by_type=meta_by_type)
 
 

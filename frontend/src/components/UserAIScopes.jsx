@@ -138,6 +138,8 @@ export default function UserAIScopes({ userId, canManage }) {
         ) : scopes.length === 0 ? (
           <div className="border border-dashed border-border p-4 text-sm text-muted-foreground">
             No scopes attached — user has <b>full tenant</b> AI access.
+            Assign the user as a class advisor or add faculty assignments to auto-scope them,
+            or use the form below to add explicit scopes.
           </div>
         ) : (
           <div className="space-y-3">
@@ -151,14 +153,25 @@ export default function UserAIScopes({ userId, canManage }) {
                 </div>
                 <ul className="divide-y divide-border">
                   {items.map((s) => (
-                    <li key={s.id} className="px-3 py-2 flex items-center justify-between text-sm" data-testid={`scope-row-${s.id}`}>
-                      <div>
-                        <div className="font-medium">{labelForValue(s.scope_type, s.scope_value)}</div>
+                    <li
+                      key={s.id || `${s.scope_type}:${s.scope_value}`}
+                      className={`px-3 py-2 flex items-center justify-between text-sm ${s.is_implicit ? "bg-secondary/30" : ""}`}
+                      data-testid={`scope-row-${s.id || s.scope_value}`}
+                    >
+                      <div className="flex-1">
+                        <div className="font-medium flex items-center gap-2">
+                          <span>{labelForValue(s.scope_type, s.scope_value)}</span>
+                          {s.is_implicit && (
+                            <Badge variant="outline" className="rounded-sm text-[10px] uppercase">
+                              auto · {s.source === "faculty_assignment" ? "assignment" : s.source === "section_advisor" ? "advisor" : "implicit"}
+                            </Badge>
+                          )}
+                        </div>
                         <div className="text-[11px] font-mono text-muted-foreground">
                           {s.scope_value}
                         </div>
                       </div>
-                      {canManage && (
+                      {canManage && !s.is_implicit && (
                         <Button
                           variant="ghost"
                           size="sm"
