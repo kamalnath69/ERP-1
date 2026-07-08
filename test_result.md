@@ -101,3 +101,94 @@
 #====================================================================================================
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
+
+user_problem_statement: |
+  User reported that the backend APIs were not working (preview / backend down).
+  Root cause: `/app/backend/.env` was missing so `DATABASE_URL` (required by
+  `app/core/config.py`) raised `KeyError` and uvicorn crashed on startup.
+  PostgreSQL was also not installed / running in the container.
+
+  Fix applied:
+    - Installed PostgreSQL 15 in the container and created role `athena` +
+      database `athena`.
+    - Added `/etc/supervisor/conf.d/postgresql.conf` so postgres starts under
+      supervisor (survives container restarts).
+    - Created `/app/backend/.env` with `DATABASE_URL`, `JWT_SECRET_KEY`,
+      `EMERGENT_LLM_KEY` (from emergent_integrations_manager) and
+      `DEFAULT_AI_PROVIDER=openai`, `DEFAULT_AI_MODEL=gpt-5.4`.
+    - Restarted backend — lifespan seed ran successfully, `/api/health`
+      returns 200 `{"status":"ok"}`.
+
+  Please verify the backend end-to-end (see backend task below).
+
+backend:
+  - task: "Backend boots + core API endpoints work (health, auth, seeded data)"
+    implemented: true
+    working: "NA"
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Backend was crashing with KeyError: 'DATABASE_URL' because
+            /app/backend/.env was missing and PostgreSQL wasn't installed.
+            Installed PostgreSQL 15 locally, created db `athena` with user
+            `athena`/`athena123`, added it to supervisor, and created
+            /app/backend/.env with DATABASE_URL, JWT_SECRET_KEY, EMERGENT_LLM_KEY.
+            Backend now starts cleanly. curl http://localhost:8001/api/health
+            returns 200 {"status":"ok"}. Seed logic (super admin + demo org)
+            runs in lifespan startup. Need testing agent to verify:
+              1. GET /api/health returns 200
+              2. GET /api/ returns service info
+              3. POST /api/auth/login with superadmin@platform.io / Super@123456
+                 returns tokens
+              4. POST /api/auth/login with principal@demo-college.edu / Principal@123
+                 returns tokens
+              5. GET /api/auth/me with bearer token returns the user
+              6. GET /api/super-admin/organizations (super admin token) works
+              7. GET /api/students, /api/faculty, /api/analytics/dashboard with
+                 principal token work (200)
+            Credentials are in /app/memory/test_credentials.md.
+
+frontend:
+  - task: "Sidebar stays fixed while main content scrolls"
+    implemented: true
+    working: "NA"
+    file: "frontend/src/components/layout/AppLayout.jsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Root container changed from `min-h-screen` to
+            `h-screen ... overflow-hidden` and the aside got `h-screen sticky top-0`.
+            Only the main content scrolls now; sidebar stays fixed.
+            User asked not to run frontend testing for this — skip retest.
+
+metadata:
+  created_by: "main_agent"
+  version: "1.1"
+  test_sequence: 1
+  run_ui: false
+
+test_plan:
+  current_focus:
+    - "Backend boots + core API endpoints work (health, auth, seeded data)"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "main"
+    message: |
+      Fixed backend downtime by installing PostgreSQL and creating
+      /app/backend/.env with DATABASE_URL / JWT_SECRET_KEY / EMERGENT_LLM_KEY.
+      Backend supervisor status: RUNNING; /api/health = 200.
+      Please run the backend smoke suite against the endpoints listed in the
+      backend task above, using the seeded credentials in
+      /app/memory/test_credentials.md.
