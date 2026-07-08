@@ -49,8 +49,8 @@ export default function AppLayout({ children }) {
   const nav = useNavigate();
 
   return (
-    <div className="min-h-screen flex bg-background text-foreground">
-      <aside className="w-60 shrink-0 border-r border-border bg-secondary/30 flex flex-col" data-testid="app-sidebar">
+    <div className="h-screen flex bg-background text-foreground overflow-hidden">
+      <aside className="w-60 shrink-0 border-r border-border bg-secondary/30 flex flex-col h-screen sticky top-0" data-testid="app-sidebar">
         <Link to="/app" className="p-5 border-b border-border block">
           <div className="flex items-baseline gap-2">
             <span className="text-2xl font-display font-bold tracking-tight">Athena</span>
