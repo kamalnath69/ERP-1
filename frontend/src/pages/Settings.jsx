@@ -6,10 +6,12 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { toast } from "sonner";
 import { useAuth } from "@/contexts/AuthContext";
+import useTerminology from "@/hooks/useTerminology";
 import { FloppyDisk } from "@phosphor-icons/react";
 
 export default function Settings() {
   const { organization, refreshMe } = useAuth();
+  const { refresh: refreshTerminology } = useTerminology();
   const [flags, setFlags] = useState([]);
   const [aiProvider, setAiProvider] = useState(organization?.ai_provider || "openai");
   const [aiModel, setAiModel] = useState(organization?.ai_model || "gpt-5.4");
@@ -36,6 +38,7 @@ export default function Settings() {
     setSavingTerms(true);
     try {
       await api.put("/settings/terminology", { terms });
+      await refreshTerminology();
       toast.success("Terminology saved");
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Failed");

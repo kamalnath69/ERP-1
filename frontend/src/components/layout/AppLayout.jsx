@@ -1,6 +1,7 @@
 import React, { useMemo, useState, useEffect } from "react";
 import { Link, NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
+import useTerminology from "@/hooks/useTerminology";
 import {
   House, Users, GraduationCap, ChalkboardTeacher, CalendarBlank, Exam,
   Buildings, ShieldCheck, ChatCircleDots, ChartLineUp, CreditCard,
@@ -103,15 +104,30 @@ function useCollapsibleSections() {
 
 export default function AppLayout({ children }) {
   const { user, organization, logout, can } = useAuth();
+  const { plural, t } = useTerminology();
   const nav = useNavigate();
   const { openSections, toggle } = useCollapsibleSections();
 
-  const visibleSections = useMemo(() => {
+  // Apply tenant terminology to People / Academics nav items.
+  const NAV_SECTIONS_LOCAL = useMemo(() => {
     return NAV_SECTIONS.map((sec) => ({
+      ...sec,
+      items: sec.items.map((it) => {
+        if (it.to === "/app/students") return { ...it, label: plural("student") };
+        if (it.to === "/app/parents") return { ...it, label: "Parents" };
+        if (it.to === "/app/faculty") return { ...it, label: plural("faculty") };
+        if (it.to === "/app/academic") return { ...it, label: `${t("academic_unit")} Structure` };
+        return it;
+      }),
+    }));
+  }, [plural, t]);
+
+  const visibleSections = useMemo(() => {
+    return NAV_SECTIONS_LOCAL.map((sec) => ({
       ...sec,
       items: sec.items.filter((it) => !it.perm || can(it.perm)),
     })).filter((sec) => sec.items.length > 0);
-  }, [can, user]);
+  }, [can, user, NAV_SECTIONS_LOCAL]);
 
   return (
     <div className="h-screen flex bg-background text-foreground overflow-hidden">

@@ -36,6 +36,19 @@ def create_exam(body: ExamCreate, user: User = Depends(require_permissions("mark
             payload["exam_date"] = date.fromisoformat(payload["exam_date"])
         except ValueError:
             payload["exam_date"] = None
+
+    # If the tenant has configured an exam_types catalogue, enforce membership.
+    from app.models import ExamType
+    catalogue = db.execute(
+        select(ExamType.code).where(ExamType.organization_id == user.organization_id, ExamType.is_active.is_(True))
+    ).scalars().all()
+    if catalogue and payload.get("exam_type") not in catalogue:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"exam_type '{payload.get('exam_type')}' is not in this organisation's catalogue: {sorted(catalogue)}. "
+            "Add it under Academic Config → Exam Types first.",
+        )
+
     e = Exam(organization_id=user.organization_id, **payload)
     db.add(e)
     db.commit()
