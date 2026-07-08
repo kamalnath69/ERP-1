@@ -1,5 +1,6 @@
 import { createSlice, createAsyncThunk } from "@reduxjs/toolkit";
 import api, { tokenStore } from "@/lib/api";
+import { invalidateTerminology, resetTerminology } from "@/hooks/useTerminology";
 
 export const fetchMe = createAsyncThunk("auth/fetchMe", async (_, { rejectWithValue }) => {
   try {
@@ -16,6 +17,8 @@ export const loginThunk = createAsyncThunk("auth/login", async ({ email, passwor
     tokenStore.set(data.access_token);
     tokenStore.setRefresh(data.refresh_token);
     await dispatch(fetchMe());
+    // Refresh tenant-specific caches so the new user never sees the previous tenant's data.
+    try { await invalidateTerminology(); } catch {}
     return data.user;
   } catch (e) {
     return rejectWithValue(e?.response?.data || { detail: "Login failed" });
@@ -28,6 +31,7 @@ export const registerOrgThunk = createAsyncThunk("auth/registerOrg", async (payl
     tokenStore.set(data.access_token);
     tokenStore.setRefresh(data.refresh_token);
     await dispatch(fetchMe());
+    try { await invalidateTerminology(); } catch {}
     return data.user;
   } catch (e) {
     return rejectWithValue(e?.response?.data || { detail: "Registration failed" });
@@ -39,6 +43,9 @@ export const logoutThunk = createAsyncThunk("auth/logout", async () => {
     await api.post("/auth/logout", { refresh_token: tokenStore.getRefresh() });
   } catch {}
   tokenStore.clear();
+  // Reset (no fetch — user is unauthenticated) so the login page & subsequent
+  // login from a different tenant doesn't briefly show the old terminology.
+  try { resetTerminology(); } catch {}
 });
 
 const initialState = {

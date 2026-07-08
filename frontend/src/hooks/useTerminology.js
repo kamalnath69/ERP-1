@@ -44,6 +44,25 @@ async function fetchTerms() {
 }
 
 /**
+ * Clear the in-memory + localStorage cache and re-fetch from the server.
+ * Call this on login / logout / org switch so a new user never sees the previous
+ * tenant's terminology map.
+ */
+export function invalidateTerminology() {
+  cached = null;
+  try { localStorage.removeItem(CACHE_KEY); } catch {}
+  notify();
+  return fetchTerms();
+}
+
+/** Local-only reset (used on logout — do NOT fetch, no auth). */
+export function resetTerminology() {
+  cached = { ...DEFAULTS };
+  try { localStorage.removeItem(CACHE_KEY); } catch {}
+  notify();
+}
+
+/**
  * useTerminology — returns:
  *   t(key)      => tenant-renamed label (falls back to default)
  *   plural(key) => t(key) + "s" (simple pluralisation)
