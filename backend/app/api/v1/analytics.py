@@ -28,6 +28,10 @@ from app.models import (
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
 
+def _status_key(value) -> str:
+    return str(value.value if hasattr(value, "value") else value)
+
+
 @router.get("/dashboard")
 def dashboard(user: User = Depends(require_permissions("analytics.view")), db: Session = Depends(get_db)):
     org_id = user.organization_id
@@ -47,7 +51,7 @@ def dashboard(user: User = Depends(require_permissions("analytics.view")), db: S
         )
         .group_by(AttendanceRecord.status)
     ).all()
-    att_counts = {r[0].value: r[1] for r in att_rows}
+    att_counts = {_status_key(r[0]): r[1] for r in att_rows}
     att_total = sum(att_counts.values())
     att_present = att_counts.get("present", 0) + att_counts.get("late", 0)
     att_pct = round((att_present / att_total) * 100, 2) if att_total else 0.0
@@ -65,7 +69,7 @@ def dashboard(user: User = Depends(require_permissions("analytics.view")), db: S
             )
             .group_by(AttendanceRecord.status)
         ).all()
-        c = {r[0].value: r[1] for r in rows}
+        c = {_status_key(r[0]): r[1] for r in rows}
         t = sum(c.values())
         p = c.get("present", 0) + c.get("late", 0)
         trend.append({"date": d.isoformat(), "attendance_percent": round(p / t * 100, 1) if t else 0.0})
@@ -115,7 +119,7 @@ def enterprise_widgets(user: User = Depends(require_permissions("analytics.view"
         )
         .group_by(AttendanceRecord.status)
     ).all()
-    att_counts = {r[0].value: r[1] for r in att_rows}
+    att_counts = {_status_key(r[0]): r[1] for r in att_rows}
     att_total = sum(att_counts.values())
     att_present = att_counts.get("present", 0) + att_counts.get("late", 0)
     att_pct = round((att_present / att_total) * 100, 2) if att_total else 0.0
@@ -133,7 +137,7 @@ def enterprise_widgets(user: User = Depends(require_permissions("analytics.view"
             )
             .group_by(AttendanceRecord.status)
         ).all()
-        c = {r[0].value: r[1] for r in rows}
+        c = {_status_key(r[0]): r[1] for r in rows}
         t = sum(c.values())
         p = c.get("present", 0) + c.get("late", 0)
         trend.append({"date": d.isoformat(), "attendance_percent": round(p / t * 100, 1) if t else 0.0})

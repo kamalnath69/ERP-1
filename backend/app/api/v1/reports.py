@@ -24,6 +24,10 @@ from app.models import (
 router = APIRouter(prefix="/reports", tags=["reports"])
 
 
+def _status_key(value) -> str:
+    return str(value.value if hasattr(value, "value") else value)
+
+
 def _pdf_response(title: str, headers: list[str], rows: list[list[str]], summary: dict | None = None) -> StreamingResponse:
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
@@ -141,7 +145,7 @@ def _attendance_data(db: Session, user: User, section_id: str | None, days: int)
     for adm, fn, ln, st, c in db.execute(q).all():
         key = (adm, f"{fn} {ln}")
         per_student.setdefault(key, {"present": 0, "absent": 0, "late": 0, "excused": 0})
-        per_student[key][st.value] = c
+        per_student[key][_status_key(st)] = c
     headers = ["Admission", "Name", "Present", "Absent", "Late", "Excused", "%"]
     rows = []
     total_p, total_all = 0, 0

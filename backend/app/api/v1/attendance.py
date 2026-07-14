@@ -22,6 +22,10 @@ router = APIRouter(prefix="/attendance", tags=["attendance"])
 _DEFAULT_STATUS_CODES = {s.value for s in AttendanceStatusEnum}
 
 
+def _status_key(value: str) -> str:
+    return str(value.value if hasattr(value, "value") else value)
+
+
 def _validate_status_code(db: Session, org_id: str, code: str) -> str:
     """Validate & normalise an incoming attendance status code."""
     code = (code or "present").strip()
@@ -128,7 +132,7 @@ def get_session_records(
         select(AttendanceRecord).where(AttendanceRecord.session_id == session_id)
     ).scalars().all()
     return [
-        {"id": r.id, "student_id": r.student_id, "status": r.status.value, "remarks": r.remarks}
+        {"id": r.id, "student_id": r.student_id, "status": _status_key(r.status), "remarks": r.remarks}
         for r in records
     ]
 
@@ -153,7 +157,7 @@ def attendance_summary(
         )
         .group_by(AttendanceRecord.status)
     )
-    counts = {r[0].value: r[1] for r in db.execute(stmt).all()}
+    counts = {_status_key(r[0]): r[1] for r in db.execute(stmt).all()}
     total = sum(counts.values())
     present = counts.get("present", 0) + counts.get("late", 0)
     return {"counts": counts, "total": total, "attendance_percent": round(present / total * 100, 2) if total else 0.0}
