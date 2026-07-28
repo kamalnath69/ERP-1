@@ -114,7 +114,7 @@ user_problem_statement: |
     - Added `/etc/supervisor/conf.d/postgresql.conf` so postgres starts under
       supervisor (survives container restarts).
     - Created `/app/backend/.env` with `DATABASE_URL`, `JWT_SECRET_KEY`,
-      `EMERGENT_LLM_KEY` (from emergent_integrations_manager) and
+      `AI_API_KEY` and
       `DEFAULT_AI_PROVIDER=openai`, `DEFAULT_AI_MODEL=gpt-5.4`.
     - Restarted backend — lifespan seed ran successfully, `/api/health`
       returns 200 `{"status":"ok"}`.
@@ -137,7 +137,7 @@ backend:
             /app/backend/.env was missing and PostgreSQL wasn't installed.
             Installed PostgreSQL 15 locally, created db `athena` with user
             `athena`/`athena123`, added it to supervisor, and created
-            /app/backend/.env with DATABASE_URL, JWT_SECRET_KEY, EMERGENT_LLM_KEY.
+            /app/backend/.env with DATABASE_URL, JWT_SECRET_KEY, AI_API_KEY.
             Backend now starts cleanly. curl http://localhost:8001/api/health
             returns 200 {"status":"ok"}. Seed logic (super admin + demo org)
             runs in lifespan startup. Need testing agent to verify:
@@ -187,7 +187,7 @@ agent_communication:
   - agent: "main"
     message: |
       Fixed backend downtime by installing PostgreSQL and creating
-      /app/backend/.env with DATABASE_URL / JWT_SECRET_KEY / EMERGENT_LLM_KEY.
+      /app/backend/.env with DATABASE_URL / JWT_SECRET_KEY / AI_API_KEY.
       Backend supervisor status: RUNNING; /api/health = 200.
       Please run the backend smoke suite against the endpoints listed in the
       backend task above, using the seeded credentials in

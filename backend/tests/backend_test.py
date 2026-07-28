@@ -14,7 +14,7 @@ import requests
 
 BASE = os.environ["REACT_APP_BACKEND_URL"].rstrip("/") if os.environ.get(
     "REACT_APP_BACKEND_URL"
-) else "https://sidebar-lock-1.preview.emergentagent.com"
+) else "http://localhost:8000"
 API = f"{BASE}/api"
 
 PRINCIPAL = {"email": "principal@demo-college.edu", "password": "Principal@123"}

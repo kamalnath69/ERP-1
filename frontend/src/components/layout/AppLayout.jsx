@@ -5,9 +5,8 @@ import useTerminology from "@/hooks/useTerminology";
 import {
   House, Users, GraduationCap, ChalkboardTeacher, CalendarBlank, Exam,
   Buildings, ShieldCheck, ChatCircleDots, ChartLineUp, CreditCard,
-  Gear, SignOut, ClipboardText, Sparkle, ListChecks, UsersThree, Clock,
-  CalendarDots, Bank, Books, Bus, Bed, Briefcase, FilePdf, Bell, UserPlus,
-  Link as LinkIcon, CaretDown, CaretRight, UserCircle,
+  Gear, SignOut, Sparkle, UsersThree,
+  FilePdf, Link as LinkIcon, CaretDown, CaretRight, UserCircle,
 } from "@phosphor-icons/react";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -33,7 +32,6 @@ const NAV_SECTIONS = [
       { to: "/app/parents", label: "Parents", icon: UsersThree, perm: "students.view" },
       { to: "/app/faculty", label: "Faculty", icon: ChalkboardTeacher, perm: "faculty.view" },
       { to: "/app/users", label: "Users", icon: Users, perm: "users.view" },
-      { to: "/app/admissions", label: "Admissions", icon: UserPlus, perm: "students.view" },
     ],
   },
   {
@@ -42,21 +40,8 @@ const NAV_SECTIONS = [
     items: [
       { to: "/app/academic", label: "Structure", icon: Buildings, perm: "academic.view" },
       { to: "/app/assignments", label: "Assignments", icon: LinkIcon, perm: "academic.view" },
-      { to: "/app/timetable", label: "Timetable", icon: Clock, perm: "academic.view" },
-      { to: "/app/calendar", label: "Calendar", icon: CalendarDots, perm: "academic.view" },
       { to: "/app/attendance", label: "Attendance", icon: CalendarBlank, perm: "attendance.view" },
       { to: "/app/marks", label: "Exams & Marks", icon: Exam, perm: "marks.view" },
-    ],
-  },
-  {
-    id: "operations",
-    label: "Operations",
-    items: [
-      { to: "/app/fees", label: "Fees", icon: Bank, perm: "billing.view" },
-      { to: "/app/library", label: "Library", icon: Books, perm: "students.view" },
-      { to: "/app/transport", label: "Transport", icon: Bus, perm: "students.view" },
-      { to: "/app/hostel", label: "Hostel", icon: Bed, perm: "students.view" },
-      { to: "/app/placements", label: "Placements", icon: Briefcase, perm: "students.view" },
     ],
   },
   {
@@ -74,8 +59,6 @@ const NAV_SECTIONS = [
     items: [
       { to: "/app/roles", label: "Roles & Permissions", icon: ShieldCheck, perm: "roles.manage" },
       { to: "/app/config", label: "Academic Config", icon: Gear, perm: "academic.manage" },
-      { to: "/app/notifications", label: "Notifications", icon: Bell, perm: "notifications.view" },
-      { to: "/app/audit", label: "Audit Logs", icon: ClipboardText, perm: "audit.view" },
       { to: "/app/billing", label: "Billing", icon: CreditCard, perm: "billing.view" },
       { to: "/app/settings", label: "Settings", icon: Gear, perm: "settings.manage" },
     ],
@@ -91,7 +74,7 @@ function useCollapsibleSections() {
       if (raw) return JSON.parse(raw);
     } catch {}
     // Default: only current-page's section expanded — approximate by opening People + Academics initially.
-    return { people: true, academics: true, operations: false, intelligence: true, system: false };
+    return { people: true, academics: true, intelligence: true, system: false };
   });
 
   useEffect(() => {
@@ -127,7 +110,7 @@ export default function AppLayout({ children }) {
       ...sec,
       items: sec.items.filter((it) => !it.perm || can(it.perm)),
     })).filter((sec) => sec.items.length > 0);
-  }, [can, user, NAV_SECTIONS_LOCAL]);
+  }, [can, NAV_SECTIONS_LOCAL]);
 
   return (
     <div className="h-screen flex bg-background text-foreground overflow-hidden">

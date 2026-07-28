@@ -10,7 +10,7 @@ import sys
 from typing import Dict, Any, Optional
 
 # Read base URL from frontend .env
-BASE_URL = "https://sidebar-lock-1.preview.emergentagent.com/api"
+BASE_URL = "http://localhost:8000/api"
 
 # Test credentials from /app/memory/test_credentials.md
 SUPER_ADMIN_CREDS = {

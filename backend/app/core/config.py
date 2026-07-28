@@ -15,7 +15,9 @@ class Settings:
     ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.environ.get("ACCESS_TOKEN_EXPIRE_MINUTES", 60))
     REFRESH_TOKEN_EXPIRE_DAYS: int = int(os.environ.get("REFRESH_TOKEN_EXPIRE_DAYS", 14))
 
-    EMERGENT_LLM_KEY: str = os.environ.get("EMERGENT_LLM_KEY", "")
+    AI_API_KEY: str = os.environ.get("AI_API_KEY", "")
+    OPENAI_BASE_URL: str = os.environ.get("OPENAI_BASE_URL", "")
+    GEMINI_BASE_URL: str = os.environ.get("GEMINI_BASE_URL", "")
     DEFAULT_AI_PROVIDER: str = os.environ.get("DEFAULT_AI_PROVIDER", "openai")
     DEFAULT_AI_MODEL: str = os.environ.get("DEFAULT_AI_MODEL", "gpt-5.4")
 

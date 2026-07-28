@@ -16,7 +16,11 @@ def list_permissions(user: User = Depends(require_permissions("roles.manage")), 
     stmt = select(Permission).where(
         (Permission.organization_id == user.organization_id) | (Permission.organization_id.is_(None))
     ).order_by(Permission.module, Permission.code)
-    return db.execute(stmt).scalars().all()
+    return [
+        p
+        for p in db.execute(stmt).scalars().all()
+        if p.module not in {"notifications"} and p.code != "audit.view"
+    ]
 
 
 @router.get("", response_model=list[RoleOut])

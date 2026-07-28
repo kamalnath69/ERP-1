@@ -1,4 +1,4 @@
-# Athena Education ERP — PRD
+# Athena Education ERP - PRD
 
 ## Original problem statement
 Build a production-grade AI-powered Education ERP SaaS platform that serves both
@@ -13,43 +13,42 @@ reports, and a superadmin console.
 - **Auth**: JWT access + refresh tokens (argon2 password hashing, refresh rotation).
 - **Multi-tenancy**: every business table carries `organization_id`; enforced at API layer.
 - **RBAC + ABAC**: dynamic roles + per-user permission overrides + scope table.
-- **AI**: multi-provider (OpenAI GPT-5.4 default + Gemini 3 Flash) via the Emergent proxy,
+- **AI**: multi-provider (OpenAI GPT-5.4 default + Gemini 3 Flash),
   OpenAI-compatible tool calling, tools authorized via authenticated user.
 - **Billing**: Razorpay orders + webhook + mock-pay dev endpoint.
 - **Audit log**: every mutation and AI query written to `audit_logs`.
 - **Feature flags**: per-org toggles for modules.
 
 ## User personas
-- **Super Admin** — platform ops, creates/suspends/activates organizations.
-- **Principal / Administrator** — full tenant admin.
-- **HOD / Class Advisor / Faculty** — role-scoped teaching workflows.
-- **Student / Parent** — read-only self-views.
+- **Super Admin** - platform ops, creates/suspends/activates organizations.
+- **Principal / Administrator** - full tenant admin.
+- **HOD / Class Advisor / Faculty** - role-scoped teaching workflows.
+- **Student / Parent** - read-only self-views.
 
-## Phase 1 — DELIVERED (2026-02)
+## Phase 1 - Delivered
 - [x] Multi-tenant registration with slug + admin bootstrap
-- [x] JWT + refresh flow, /auth/me
-- [x] Dynamic Role & Permission editor (matrix by module)
+- [x] JWT + refresh flow, `/auth/me`
+- [x] Dynamic Role & Permission editor
 - [x] Users, Faculty, Students CRUD
 - [x] Academic structure (Departments, Units, Levels, Sections, Subjects)
-- [x] Attendance marking (grid) + summary aggregation
+- [x] Attendance marking + summary aggregation
 - [x] Exams + Marks entry + publish workflow
-- [x] Athena AI Chat with 9 registered tools (search, profile, attendance,
-      marks, dept summary, faculty, risk prediction, analytics KPIs)
-- [x] Analytics dashboard (attendance trend, dept distribution, KPIs)
+- [x] Athena AI chat with tool calling
+- [x] Analytics dashboard (attendance trend, department distribution, KPIs)
 - [x] Super Admin console (orgs, health, suspend/activate)
 - [x] Billing page (plans, invoices, Razorpay order + mock-pay)
 - [x] Audit log viewer
 - [x] Feature flags UI
-- [x] Landing page (Bento grid, hero, pricing) + Login + Register
+- [x] Landing page + Login + Register
 
 ## Backlog (P1)
 - [ ] Parent portal + Parent-Student linking flow in UI
-- [ ] Access Scope editor (ABAC) — table exists, UI not built
-- [ ] Faculty assignments UI (subject × section)
+- [ ] Access Scope editor (ABAC) - table exists, UI not built
+- [ ] Faculty assignments UI
 - [ ] Timetable & Academic calendar
 - [ ] Fees module (Razorpay recurring subscriptions)
 - [ ] Reports export (PDF/Excel) endpoints
-- [ ] Notifications sending + email delivery (SendGrid/Resend)
+- [ ] Notifications sending + email delivery
 - [ ] Alembic migrations wired in (currently `create_all`)
 
 ## Backlog (P2)
@@ -57,10 +56,9 @@ reports, and a superadmin console.
 - [ ] Sentiment analysis on feedback
 - [ ] Placement, Library, Transport, Hostel modules
 - [ ] NBA / NAAC compliance workflows
-- [ ] Celery + Redis for scheduled jobs (webhook retries, notifications)
+- [ ] Celery + Redis for scheduled jobs
 
 ## Known limitations
-- **AI credits** — Emergent Universal Key needs balance top-up (Profile → Universal Key → Add Balance). Otherwise `/api/ai/chat` returns budget-exceeded errors. Everything else works without it.
-- Razorpay uses placeholder keys → `/billing/orders/{id}/mock-pay` demo endpoint is what powers the upgrade flow until real keys are added to `.env`.
+- **AI credentials** - add a valid provider key in `.env` before using `/api/ai/chat`.
+- Razorpay uses placeholder keys, so `/billing/orders/{id}/mock-pay` powers the upgrade flow until real keys are added to `.env`.
 - Alembic migrations are set up structurally but the app currently uses `Base.metadata.create_all` for schema bootstrap.
-EOF

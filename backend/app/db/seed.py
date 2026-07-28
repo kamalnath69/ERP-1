@@ -69,11 +69,6 @@ PERMISSION_CATALOGUE: dict[str, list[tuple[str, str]]] = {
     ],
     "settings": [
         ("settings.manage", "Manage organization settings"),
-        ("audit.view", "View audit logs"),
-    ],
-    "notifications": [
-        ("notifications.view", "View notifications"),
-        ("notifications.send", "Send notifications"),
     ],
 }
 
@@ -87,25 +82,25 @@ DEFAULT_ROLES: dict[str, list[str]] = {
         "marks.view", "marks.publish",
         "academic.view", "departments.manage", "subjects.manage",
         "reports.view", "reports.export", "analytics.view",
-        "ai.use", "ai.scopes.manage", "notifications.view", "notifications.send",
+        "ai.use", "ai.scopes.manage",
     ],
     "Faculty": [
         "students.view", "attendance.view", "attendance.mark", "attendance.edit",
         "marks.view", "marks.enter", "marks.edit",
-        "academic.view", "reports.view", "ai.use", "notifications.view",
+        "academic.view", "reports.view", "ai.use",
     ],
     "Class Advisor": [
         "students.view", "students.edit",
         "attendance.view", "attendance.mark", "attendance.edit", "attendance.approve",
         "marks.view", "marks.enter", "marks.edit",
         "academic.view", "reports.view", "analytics.view",
-        "ai.use", "notifications.view", "notifications.send",
+        "ai.use",
     ],
     "Student": [
-        "students.view", "attendance.view", "marks.view", "ai.use", "notifications.view",
+        "students.view", "attendance.view", "marks.view", "ai.use",
     ],
     "Parent": [
-        "students.view", "attendance.view", "marks.view", "notifications.view",
+        "students.view", "attendance.view", "marks.view",
     ],
 }
 

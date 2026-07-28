@@ -8,7 +8,7 @@ import time
 import pytest
 import requests
 
-BASE = os.environ.get("REACT_APP_BACKEND_URL", "https://sidebar-lock-1.preview.emergentagent.com").rstrip("/")
+BASE = os.environ.get("REACT_APP_BACKEND_URL", "http://localhost:8000").rstrip("/")
 API = f"{BASE}/api"
 
 PRINCIPAL = {"email": "principal@demo-college.edu", "password": "Principal@123"}

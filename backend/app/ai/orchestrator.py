@@ -1,6 +1,6 @@
 """Multi-provider LLM orchestrator with tool calling.
 
-Uses the OpenAI and Google Generative AI SDKs directly (via Emergent proxy key when possible)
+Uses the OpenAI and Google Generative AI SDKs directly
 so we get real function-calling semantics rather than a text-only chat.
 """
 import json
@@ -93,12 +93,11 @@ async def run_chat(
 async def _run_openai(db, user, conversation, history_msgs, user_message):
     from openai import AsyncOpenAI
 
-    # Emergent LLM key acts as OpenAI-compatible; base_url routed by SDK when using default endpoint.
-    api_key = settings.EMERGENT_LLM_KEY or os.environ.get("OPENAI_API_KEY", "")
-    base_url = os.environ.get("EMERGENT_LLM_BASE_URL") or None
+    api_key = settings.AI_API_KEY or os.environ.get("OPENAI_API_KEY", "")
+    base_url = settings.OPENAI_BASE_URL or None
     client = AsyncOpenAI(
         api_key=api_key,
-        base_url=base_url or "https://integrations.emergentagent.com/llm/openai",
+        base_url=base_url,
     )
 
     messages: list[dict] = [{"role": "system", "content": _build_system_prompt(db, user)}]
@@ -157,10 +156,10 @@ async def _run_gemini(db, user, conversation, history_msgs, user_message):
     except Exception:
         return await _run_openai(db, user, conversation, history_msgs, user_message)
 
-    api_key = settings.EMERGENT_LLM_KEY or os.environ.get("GEMINI_API_KEY", "")
+    api_key = settings.AI_API_KEY or os.environ.get("GEMINI_API_KEY", "")
     client = AsyncOpenAI(
         api_key=api_key,
-        base_url=os.environ.get("EMERGENT_LLM_BASE_URL") or "https://integrations.emergentagent.com/llm/gemini",
+        base_url=settings.GEMINI_BASE_URL or None,
     )
 
     messages: list[dict] = [{"role": "system", "content": _build_system_prompt(db, user)}]
