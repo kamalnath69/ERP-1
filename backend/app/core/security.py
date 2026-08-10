@@ -42,8 +42,8 @@ def create_access_token(subject: str, tenant_id: str | None, extra: dict | None 
     return _encode(payload, timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES), "access")
 
 
-def create_refresh_token(subject: str, tenant_id: str | None) -> str:
-    return _encode({"sub": subject, "tid": tenant_id}, timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS), "refresh")
+def create_refresh_token(subject: str, tenant_id: str | None, extra: dict | None = None) -> str:
+    return _encode({"sub": subject, "tid": tenant_id, **(extra or {})}, timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS), "refresh")
 
 
 def decode_token(token: str) -> dict[str, Any]:

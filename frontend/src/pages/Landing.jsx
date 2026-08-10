@@ -1,244 +1,196 @@
 import React from "react";
 import { Link } from "react-router-dom";
-import { Button } from "@/components/ui/button";
 import {
-  ArrowUpRight, Buildings, Sparkle, ShieldCheck, ChartLineUp, GraduationCap,
-  Users, Quotes, Star,
+  ArrowRight, Barbell, CalendarCheck, ChartLineUp, CheckCircle, CirclesFour,
+  Command, Cube, GraduationCap, LockKey, Scissors, Sparkle, Stethoscope, UsersThree,
 } from "@phosphor-icons/react";
 
-const HERO_IMG = "https://images.pexels.com/photos/21415155/pexels-photo-21415155.jpeg";
-const FEATURE_IMG_1 = "https://images.pexels.com/photos/15316912/pexels-photo-15316912.jpeg";
-const FEATURE_IMG_2 = "https://images.pexels.com/photos/6209565/pexels-photo-6209565.jpeg";
+const industries = [
+  {
+    icon: Barbell,
+    title: "Gym and fitness",
+    copy: "Memberships, check-ins, coaching, classes, progress, diets, and equipment in one client workspace.",
+    accent: "bg-[hsl(var(--chart-2)/.12)] text-[hsl(var(--chart-2))]",
+  },
+  {
+    icon: Scissors,
+    title: "Salon and spa",
+    copy: "Bookings, walk-ins, preferences, service history, checkout, follow-ups, and staff performance.",
+    accent: "bg-[hsl(var(--chart-4)/.12)] text-[hsl(var(--chart-4))]",
+  },
+  {
+    icon: Stethoscope,
+    title: "Outpatient clinic",
+    copy: "Patient queue, encounters, prescriptions, labs, pharmacy, documents, and permission-separated care records.",
+    accent: "bg-[hsl(var(--chart-1)/.12)] text-[hsl(var(--chart-1))]",
+  },
+  {
+    icon: GraduationCap,
+    title: "College and higher education",
+    copy: "Admissions, programs, cohorts, course allocation, attendance, assessments, student fees, and academic operations.",
+    accent: "bg-[hsl(var(--chart-3)/.12)] text-[hsl(var(--chart-3))]",
+  },
+];
+
+const capabilities = [
+  [UsersThree, "Client intelligence", "Know the relationship, history, progress, balance, and next action before every interaction."],
+  [CalendarCheck, "Connected operations", "Appointments, work queues, sales, stock, and team responsibilities stay in context."],
+  [Sparkle, "Grounded business AI", "Ask in English, Tamil, or Tanglish and receive answers from records you are allowed to access."],
+  [LockKey, "Access by responsibility", "Roles control actions while location and client scopes control which records each person can see."],
+];
 
 export default function Landing() {
-  return (
-    <div className="min-h-screen bg-background text-foreground" data-testid="landing-page">
-      {/* NAV */}
-      <nav className="border-b border-border">
-        <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
-          <Link to="/" className="flex items-baseline gap-2" data-testid="brand-link">
-            <span className="text-2xl font-display font-bold tracking-tight">Athena</span>
-            <span className="overline">Education OS</span>
-          </Link>
-          <div className="flex items-center gap-3">
-            <a href="#features" className="text-sm text-muted-foreground hover:text-foreground hidden md:inline">Platform</a>
-            <a href="#pricing" className="text-sm text-muted-foreground hover:text-foreground hidden md:inline">Pricing</a>
-            <Link to="/login" className="text-sm text-muted-foreground hover:text-foreground" data-testid="nav-login">Sign in</Link>
-            <Link to="/register"><Button className="rounded-sm" data-testid="nav-register">Start free trial</Button></Link>
-          </div>
+  return <div className="marketing-site min-h-screen overflow-hidden bg-background text-foreground">
+    <header className="sticky top-0 z-50 border-b bg-background/82 backdrop-blur-xl">
+      <div className="mx-auto flex h-16 max-w-[1440px] items-center justify-between px-4 sm:px-6 lg:px-8">
+        <Link to="/" className="flex items-center gap-2.5" aria-label="Edvatiq home">
+          <span className="grid h-9 w-9 place-items-center rounded-xl bg-accent text-sm font-bold text-accent-foreground shadow-sm">E</span>
+          <span className="font-marketing text-xl font-semibold">Edvatiq</span>
+        </Link>
+        <nav className="hidden items-center gap-7 text-sm font-medium text-muted-foreground md:flex" aria-label="Primary navigation">
+          <a className="transition-colors hover:text-foreground" href="#platform">Platform</a>
+          <a className="transition-colors hover:text-foreground" href="#industries">Industries</a>
+          <a className="transition-colors hover:text-foreground" href="#ai">Business AI</a>
+        </nav>
+        <div className="flex items-center gap-1 sm:gap-2">
+          <Link to="/login" className="rounded-xl px-3 py-2 text-sm font-semibold transition-colors hover:bg-secondary sm:px-4">Sign in</Link>
+          <Link to="/register" className="rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground shadow-sm transition-transform hover:-translate-y-0.5 sm:px-5">Start free</Link>
         </div>
-      </nav>
+      </div>
+    </header>
 
-      {/* HERO */}
-      <section className="relative overflow-hidden border-b border-border">
-        <div className="absolute inset-0 grid-lines-bg opacity-40" />
-        <div className="relative max-w-7xl mx-auto px-6 py-16 md:py-20 grid md:grid-cols-12 gap-8 items-center">
-          <div className="md:col-span-7">
-            <div className="overline mb-6 text-accent">Enterprise · Multi-tenant · AI-native</div>
-            <h1 className="text-4xl sm:text-5xl lg:text-6xl font-display font-bold leading-none tracking-tight">
-              The Education <span className="accent-underline">Operating System</span> your school or college deserves.
+    <main>
+      <section className="soft-glow relative border-b">
+        <div className="paper-grid absolute inset-0 opacity-[0.32] [mask-image:linear-gradient(to_bottom,black,transparent_88%)]" />
+        <div className="relative mx-auto grid min-h-[calc(100dvh-4rem)] max-w-[1440px] items-center gap-12 px-4 py-16 sm:px-6 lg:grid-cols-12 lg:px-8 lg:py-20">
+          <div className="lg:col-span-6 xl:col-span-5">
+            <div className="inline-flex items-center gap-2 rounded-full border bg-card px-3 py-1.5 text-xs font-semibold shadow-sm">
+              <Sparkle className="text-accent" weight="fill" />
+              Operations OS for growing teams
+            </div>
+            <h1 className="mt-7 max-w-3xl text-[clamp(3.15rem,6.2vw,6.25rem)] font-semibold leading-[0.94] tracking-[-0.055em]">
+              Run the work.<br /><span className="text-accent">Know every relationship.</span>
             </h1>
-            <p className="mt-8 text-base leading-relaxed max-w-xl text-muted-foreground">
-              One codebase for K-12 and higher-ed. Roles, permissions, attendance, marks, analytics, and a ChatGPT-grade
-              assistant that actually queries your data. Built for principals, not for pitch decks.
+            <p className="mt-7 max-w-xl text-base leading-7 text-muted-foreground sm:text-lg">
+              Edvatiq connects people, schedules, finance, operations, teams, and grounded AI in one calm workspace built for Indian organizations.
             </p>
-            <div className="mt-10 flex flex-wrap gap-3">
-              <Link to="/register">
-                <Button size="lg" className="rounded-sm" data-testid="hero-cta-primary">
-                  Start free · No credit card <ArrowUpRight size={16} className="ml-2" />
-                </Button>
+            <div className="mt-8 flex flex-wrap gap-3">
+              <Link to="/register" className="inline-flex h-12 items-center gap-2 rounded-xl bg-primary px-6 text-sm font-semibold text-primary-foreground shadow-lg shadow-primary/10 transition-transform hover:-translate-y-0.5">
+                Create your workspace <ArrowRight />
               </Link>
-              <Link to="/login">
-                <Button size="lg" variant="outline" className="rounded-sm" data-testid="hero-cta-secondary">
-                  Sign in to demo
-                </Button>
+              <Link to="/login" className="inline-flex h-12 items-center rounded-xl border bg-card px-6 text-sm font-semibold shadow-sm transition-colors hover:bg-secondary">
+                Sign in to Edvatiq
               </Link>
             </div>
-            <div className="mt-10 flex flex-wrap gap-6 items-center text-xs font-mono uppercase tracking-widest text-muted-foreground">
-              <span>ISO 27001 ready</span><span>·</span><span>SOC2 pathway</span><span>·</span><span>Deployed to K-12 & higher-ed</span>
+            <div className="mt-9 flex flex-wrap gap-x-6 gap-y-3 text-xs font-medium text-muted-foreground">
+              {['30-day trial', 'No card required', 'Gym, Salon, Clinic, and College'].map((item) => <span key={item} className="inline-flex items-center gap-2"><CheckCircle className="text-positive" weight="fill" />{item}</span>)}
             </div>
           </div>
-          <div className="md:col-span-5 relative">
-            <div className="relative overflow-hidden border border-border bg-secondary">
-              <img src={HERO_IMG} alt="Modern campus" className="w-full h-[420px] object-cover" />
-              <div className="absolute inset-0 bg-gradient-to-t from-black via-black/40 to-transparent" />
-              <div className="absolute bottom-0 left-0 right-0 p-6 text-white">
-                <div className="text-[10px] uppercase tracking-widest opacity-70">Live snapshot · Demo College</div>
-                <div className="mt-2 flex items-end justify-between">
-                  <div>
-                    <div className="font-display text-3xl">92.4%</div>
-                    <div className="text-xs opacity-70">Attendance · last 30d</div>
-                  </div>
-                  <div>
-                    <div className="font-display text-3xl">1,284</div>
-                    <div className="text-xs opacity-70">Active students</div>
-                  </div>
-                </div>
+
+          <ProductPreview />
+        </div>
+      </section>
+
+      <section id="platform" className="mx-auto max-w-[1440px] px-4 py-20 sm:px-6 lg:px-8 lg:py-28">
+        <div className="grid gap-10 lg:grid-cols-12 lg:items-end">
+          <div className="lg:col-span-5">
+            <div className="overline">One connected workspace</div>
+            <h2 className="mt-3 text-4xl font-semibold leading-tight sm:text-5xl">Less switching. More context.</h2>
+          </div>
+          <p className="max-w-2xl text-base leading-7 text-muted-foreground lg:col-span-6 lg:col-start-7">Every screen is shaped by the user’s role, permitted locations, and business type. Your front desk sees today’s work; owners see performance; specialists see the people assigned to them.</p>
+        </div>
+        <div className="mt-12 grid overflow-hidden rounded-2xl border bg-border md:grid-cols-2 xl:grid-cols-4">
+          {capabilities.map(([Icon, title, copy]) => <article key={title} className="bg-card p-6 md:p-7">
+            <span className="grid h-10 w-10 place-items-center rounded-xl bg-secondary text-primary"><Icon size={20} /></span>
+            <h3 className="mt-6 text-xl font-semibold">{title}</h3>
+            <p className="mt-3 text-sm leading-6 text-muted-foreground">{copy}</p>
+          </article>)}
+        </div>
+      </section>
+
+      <section id="industries" className="border-y bg-primary text-primary-foreground">
+        <div className="mx-auto max-w-[1440px] px-4 py-20 sm:px-6 lg:px-8 lg:py-28">
+          <div className="grid gap-8 lg:grid-cols-12 lg:items-end">
+            <div className="lg:col-span-7"><div className="overline !text-primary-foreground/50">Industry-aware by design</div><h2 className="mt-3 text-4xl font-semibold leading-tight sm:text-5xl">The same quality of platform, shaped around different work.</h2></div>
+            <p className="text-sm leading-6 text-primary-foreground/60 lg:col-span-4 lg:col-start-9">Shared foundations with purpose-built operational spaces and no generic module clutter.</p>
+          </div>
+          <div className="mt-12 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+            {industries.map(({ icon: Icon, title, copy, accent }) => <article key={title} className="group rounded-2xl border border-primary-foreground/12 bg-primary-foreground/[0.045] p-6 transition-transform hover:-translate-y-1 sm:p-8">
+              <span className={`grid h-11 w-11 place-items-center rounded-xl ${accent}`}><Icon size={23} weight="duotone" /></span>
+              <h3 className="mt-8 text-2xl font-semibold">{title}</h3>
+              <p className="mt-3 text-sm leading-6 text-primary-foreground/58">{copy}</p>
+              <div className="mt-8 flex items-center gap-2 text-xs font-semibold text-accent">Explore the workflow <ArrowRight className="transition-transform group-hover:translate-x-1" /></div>
+            </article>)}
+          </div>
+        </div>
+      </section>
+
+      <section id="ai" className="mx-auto grid max-w-[1440px] gap-12 px-4 py-20 sm:px-6 lg:grid-cols-12 lg:px-8 lg:py-28">
+        <div className="lg:col-span-5">
+          <div className="overline">Edvatiq AI</div>
+          <h2 className="mt-3 text-4xl font-semibold leading-tight sm:text-5xl">Answers grounded in the business you actually run.</h2>
+          <p className="mt-5 text-base leading-7 text-muted-foreground">Ask naturally, inspect the records behind an answer, and review important actions before anything changes.</p>
+        </div>
+        <div className="lg:col-span-6 lg:col-start-7">
+          <div className="surface-card overflow-hidden p-2 shadow-xl shadow-primary/5">
+            <div className="rounded-xl bg-primary p-5 text-primary-foreground sm:p-7">
+              <div className="flex items-center justify-between"><span className="inline-flex items-center gap-2 text-sm font-semibold"><Sparkle className="text-accent" weight="fill" />Ask Edvatiq</span><span className="rounded-full border border-primary-foreground/15 px-2.5 py-1 text-[10px] text-primary-foreground/55">Permission scoped</span></div>
+              <div className="mt-8 rounded-xl border border-primary-foreground/12 bg-primary-foreground/[0.06] p-4 text-sm text-primary-foreground/72">Which clients need my attention today?</div>
+              <div className="mt-3 rounded-xl bg-card p-5 text-foreground shadow-sm">
+                <div className="flex items-center gap-2 text-sm font-semibold"><CirclesFour className="text-accent" />Live business records</div>
+                <div className="mt-4 space-y-3">{["Evidence-linked insights", "Authorized profile actions", "English, Tamil, and Tanglish"].map((item) => <div key={item} className="flex items-center gap-3 rounded-lg bg-secondary px-3 py-2.5 text-xs"><CheckCircle className="text-positive" weight="fill" />{item}</div>)}</div>
               </div>
             </div>
           </div>
         </div>
       </section>
 
-      {/* STATS BAR */}
-      <section className="border-b border-border bg-secondary/30">
-        <div className="max-w-7xl mx-auto px-6 py-10 grid grid-cols-2 md:grid-cols-4 gap-6">
-          {[
-            { k: "1,200+", l: "Institutions onboarded" },
-            { k: "3.4M", l: "Students under management" },
-            { k: "99.99%", l: "Uptime SLA" },
-            { k: "42M+", l: "AI answers served" },
-          ].map((s) => (
-            <div key={s.l} className="border-l-2 border-accent pl-4">
-              <div className="font-display text-3xl md:text-4xl font-bold tracking-tight">{s.k}</div>
-              <div className="text-xs text-muted-foreground mt-1">{s.l}</div>
-            </div>
-          ))}
+      <section className="px-4 pb-20 sm:px-6 lg:px-8 lg:pb-28">
+        <div className="relative mx-auto flex max-w-[1400px] flex-col items-start justify-between gap-8 overflow-hidden rounded-3xl bg-accent p-8 text-accent-foreground sm:p-12 lg:flex-row lg:items-end lg:p-16">
+          <div className="paper-grid absolute inset-0 opacity-15" />
+          <div className="relative max-w-3xl"><div className="overline !text-accent-foreground/55">Start with your real workflow</div><h2 className="mt-3 text-4xl font-semibold leading-tight sm:text-5xl">Give your team one place to run the day.</h2></div>
+          <Link to="/register" className="relative inline-flex h-12 shrink-0 items-center gap-2 rounded-xl bg-primary px-6 text-sm font-semibold text-primary-foreground shadow-lg transition-transform hover:-translate-y-0.5">Start free <ArrowRight /></Link>
         </div>
       </section>
+    </main>
 
-      {/* FEATURES */}
-      <section id="features" className="border-b border-border">
-        <div className="max-w-7xl mx-auto px-6 py-16 md:py-20">
-          <div className="max-w-3xl">
-            <div className="overline text-muted-foreground">What ships on day one</div>
-            <h2 className="mt-3 text-2xl sm:text-3xl lg:text-4xl font-display font-bold tracking-tight">
-              A control room for the entire institution.
-            </h2>
-          </div>
-          <div className="mt-12 grid md:grid-cols-12 gap-6">
-            <FeatureCard className="md:col-span-6 md:row-span-2" icon={Sparkle} title="Athena AI Assistant"
-              desc="Ask anything in natural language. It calls the right tool, respects your permissions, and never fabricates.">
-              <pre className="mt-4 text-xs font-mono bg-secondary p-3 border border-border overflow-x-auto">
-{`> who is at risk in year 2 CSE?
-[tool] search_students → 6 matches
-[tool] risk_prediction  → 2 flagged
-Suresh Kumar, Priya Reddy — low attendance / failed CS201`}
-              </pre>
-            </FeatureCard>
-            <FeatureCard className="md:col-span-6" icon={ShieldCheck} title="Dynamic Roles & Permissions"
-              desc="Build any role. Assign fine-grained scopes across campus, department, section, subject. No hardcoding." />
-            <FeatureCard className="md:col-span-3" icon={Buildings} title="Multi-tenant" desc="One deployment, thousands of institutions, zero cross-tenant leakage." />
-            <FeatureCard className="md:col-span-3" icon={ChartLineUp} title="Live Analytics" desc="Attendance, marks, at-risk cohorts. Board-ready dashboards." />
-            <FeatureCard className="md:col-span-8" icon={GraduationCap} title="Students · Faculty · Parents"
-              desc="Full lifecycle — admissions to alumni. Every stakeholder in one system.">
-              <div className="mt-4 grid grid-cols-3 gap-4">
-                <img src={FEATURE_IMG_2} alt="students" className="h-32 w-full object-cover border border-border" />
-                <img src={FEATURE_IMG_1} alt="campus" className="h-32 w-full object-cover border border-border" />
-                <div className="h-32 border border-border bg-secondary p-3 flex flex-col justify-between">
-                  <div className="overline">Section 2A · CSE</div>
-                  <div>
-                    <div className="text-3xl font-display">42</div>
-                    <div className="text-xs text-muted-foreground">enrolled</div>
-                  </div>
-                </div>
-              </div>
-            </FeatureCard>
-            <FeatureCard className="md:col-span-4" icon={Users} title="School or College — same code" desc="Generic academic hierarchy adapts to your terminology." />
-          </div>
-        </div>
-      </section>
-
-      {/* TESTIMONIALS */}
-      <section id="testimonials" className="border-b border-border bg-secondary/20">
-        <div className="max-w-7xl mx-auto px-6 py-16 md:py-20">
-          <div className="max-w-3xl">
-            <div className="overline text-muted-foreground">What principals say</div>
-            <h2 className="mt-3 text-2xl sm:text-3xl lg:text-4xl font-display font-bold tracking-tight">
-              Loved by leaders across schools & colleges.
-            </h2>
-          </div>
-          <div className="mt-12 grid md:grid-cols-3 gap-6">
-            {[
-              {
-                quote:
-                  "Athena replaced four disconnected tools. Attendance to marks to placements — one login, one truth. Our HODs got their weekends back.",
-                name: "Dr. Priya Reddy",
-                role: "Principal · Vasavi College of Engineering",
-                rating: 5,
-              },
-              {
-                quote:
-                  "Ask Athena is the killer feature. Our accounts team simply asks 'who has pending fees for year 2 CSE' and gets a clean list. No SQL, no spreadsheets.",
-                name: "S. Kumaresh",
-                role: "Administrator · Chennai Public School",
-                rating: 5,
-              },
-              {
-                quote:
-                  "Rollout took eleven days for 12 branches. Multi-tenant done right — every campus feels like its own ERP. The audit log alone paid for the year.",
-                name: "Meera Iyer",
-                role: "Group CTO · Kaveri Group of Schools",
-                rating: 5,
-              },
-            ].map((t) => (
-              <div key={t.name} className="border border-border bg-card p-6 flex flex-col">
-                <Quotes size={24} weight="fill" className="text-accent" />
-                <p className="mt-4 text-sm leading-relaxed">{t.quote}</p>
-                <div className="mt-6 pt-4 border-t border-border">
-                  <div className="flex items-center gap-1">
-                    {Array.from({ length: t.rating }).map((_, i) => (
-                      <Star key={i} size={12} weight="fill" className="text-accent" />
-                    ))}
-                  </div>
-                  <div className="mt-2 font-medium text-sm">{t.name}</div>
-                  <div className="text-xs text-muted-foreground">{t.role}</div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      {/* PRICING */}
-      <section id="pricing" className="border-b border-border">
-        <div className="max-w-7xl mx-auto px-6 py-16 md:py-20">
-          <div className="max-w-3xl">
-            <div className="overline text-muted-foreground">Pricing</div>
-            <h2 className="mt-3 text-2xl sm:text-3xl lg:text-4xl font-display font-bold tracking-tight">Simple monthly plans, powered by Razorpay.</h2>
-          </div>
-          <div className="mt-12 grid md:grid-cols-3 gap-6">
-            {[
-              { name: "Starter", price: "₹4,999", desc: "Up to 500 students · core ERP", features: ["Students & Faculty", "Attendance & Marks", "3 admin seats"] },
-              { name: "Pro", price: "₹14,999", desc: "Up to 5,000 students · full suite + AI", features: ["Everything in Starter", "Athena AI Assistant", "Analytics & Reports", "Unlimited seats"], featured: true },
-              { name: "Enterprise", price: "₹49,999", desc: "Unlimited, multi-campus, SLA", features: ["Everything in Pro", "Multi-campus", "SSO / Custom SLA", "Priority support"] },
-            ].map((p) => (
-              <div key={p.name} className={`border ${p.featured ? "border-accent" : "border-border"} p-6 bg-card`}>
-                <div className="flex items-baseline justify-between">
-                  <h3 className="text-lg font-display font-semibold">{p.name}</h3>
-                  {p.featured && <span className="overline text-accent">Popular</span>}
-                </div>
-                <div className="mt-4 text-4xl font-display font-bold">{p.price}<span className="text-sm text-muted-foreground font-sans">/mo</span></div>
-                <p className="mt-2 text-sm text-muted-foreground">{p.desc}</p>
-                <ul className="mt-6 space-y-2 text-sm">
-                  {p.features.map((f) => <li key={f} className="flex gap-2"><span className="text-accent">•</span>{f}</li>)}
-                </ul>
-                <Link to="/register" className="mt-8 block">
-                  <Button className="w-full rounded-sm" variant={p.featured ? "default" : "outline"} data-testid={`plan-cta-${p.name.toLowerCase()}`}>
-                    Start with {p.name}
-                  </Button>
-                </Link>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      <footer className="max-w-7xl mx-auto px-6 py-10 text-xs text-muted-foreground flex flex-wrap justify-between gap-4">
-        <div>© {new Date().getFullYear()} Athena Education OS · Built for institutions that mean it.</div>
-        <div className="font-mono uppercase tracking-widest">v1.0 · Multi-tenant · AI-first</div>
-      </footer>
-    </div>
-  );
+    <footer className="border-t">
+      <div className="mx-auto flex max-w-[1440px] flex-col gap-4 px-4 py-8 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between sm:px-6 lg:px-8">
+        <span>© 2026 Edvatiq Business OS</span>
+        <span>Built for local businesses in India.</span>
+      </div>
+    </footer>
+  </div>;
 }
 
-function FeatureCard({ icon: Icon, title, desc, children, className = "" }) {
-  return (
-    <div className={`border border-border p-6 bg-card ${className}`}>
-      <Icon size={20} weight="bold" />
-      <h3 className="mt-4 text-lg font-display font-semibold tracking-tight">{title}</h3>
-      <p className="mt-2 text-sm text-muted-foreground leading-relaxed">{desc}</p>
-      {children}
+function ProductPreview() {
+  return <div className="relative lg:col-span-6 lg:col-start-7 xl:col-span-7">
+    <div className="absolute -inset-8 rounded-full bg-accent/8 blur-3xl" />
+    <div className="relative overflow-hidden rounded-[1.6rem] border bg-card p-2 shadow-[0_32px_90px_hsl(var(--shadow-color)/.14)]">
+      <div className="flex h-12 items-center gap-3 rounded-t-[1.15rem] border-b bg-surface-subtle px-4">
+        <span className="grid h-7 w-7 place-items-center rounded-lg bg-primary text-[10px] font-bold text-primary-foreground">E</span>
+        <span className="text-xs font-semibold">Business workspace</span>
+        <div className="ml-auto hidden h-8 w-44 items-center gap-2 rounded-lg border bg-card px-3 text-[10px] text-muted-foreground sm:flex"><Command size={12} />Search or open</div>
+        <span className="h-7 w-7 rounded-full bg-accent/18" />
+      </div>
+      <div className="grid min-h-[440px] sm:grid-cols-[9rem_1fr]">
+        <aside className="hidden border-r bg-surface-subtle p-3 sm:block">
+          <div className="space-y-1">{[[CirclesFour, "Home"], [UsersThree, "Clients"], [CalendarCheck, "Calendar"], [ChartLineUp, "Sales"], [Cube, "Inventory"]].map(([Icon, label], index) => <div key={label} className={`flex items-center gap-2 rounded-lg px-2.5 py-2 text-[10px] font-semibold ${index === 0 ? "bg-card text-foreground shadow-sm" : "text-muted-foreground"}`}><Icon size={14} />{label}</div>)}</div>
+          <div className="mt-36 rounded-xl border bg-card p-3"><div className="h-1.5 w-10 rounded-full bg-accent" /><div className="mt-2 h-1.5 w-full rounded-full bg-secondary" /><div className="mt-1.5 h-1.5 w-2/3 rounded-full bg-secondary" /></div>
+        </aside>
+        <div className="min-w-0 p-4 sm:p-5">
+          <div className="flex items-end justify-between"><div><div className="h-2 w-20 rounded-full bg-accent/55" /><div className="mt-3 h-5 w-36 rounded-md bg-foreground/85" /></div><div className="h-8 w-20 rounded-lg border bg-card" /></div>
+          <div className="mt-5 grid grid-cols-2 gap-2.5 lg:grid-cols-4">{[1, 2, 3, 4].map((item) => <div key={item} className="rounded-xl border bg-card p-3"><div className="h-1.5 w-12 rounded-full bg-muted-foreground/25" /><div className="mt-3 h-5 w-16 rounded-md bg-foreground/80" /><div className="mt-3 h-1.5 w-10 rounded-full bg-positive/35" /></div>)}</div>
+          <div className="mt-3 grid gap-3 lg:grid-cols-12">
+            <div className="rounded-xl border bg-card p-4 lg:col-span-8">
+              <div className="flex justify-between"><div><div className="h-2 w-24 rounded-full bg-foreground/75" /><div className="mt-2 h-1.5 w-36 rounded-full bg-muted-foreground/20" /></div><div className="h-6 w-16 rounded-lg bg-secondary" /></div>
+              <div className="mt-8 flex h-32 items-end gap-2">{[42, 63, 48, 78, 57, 88, 70, 92, 76, 84].map((height, index) => <div key={`${height}-${index}`} className="flex-1 rounded-t-md bg-[hsl(var(--chart-2)/.2)]" style={{ height: `${height}%` }}><div className="h-full rounded-t-md bg-[hsl(var(--chart-2))]" style={{ opacity: 0.35 + index * 0.05 }} /></div>)}</div>
+            </div>
+            <div className="rounded-xl border bg-card p-4 lg:col-span-4"><div className="h-2 w-20 rounded-full bg-foreground/75" />{[1, 2, 3].map((item) => <div key={item} className="mt-4 flex items-center gap-2"><span className="h-7 w-7 rounded-lg bg-secondary" /><span className="flex-1"><span className="block h-1.5 w-full rounded bg-muted-foreground/20" /><span className="mt-1.5 block h-1.5 w-2/3 rounded bg-muted-foreground/12" /></span></div>)}</div>
+          </div>
+          <div className="mt-3 rounded-xl border bg-card p-4"><div className="flex items-center gap-2"><div className="h-2 w-24 rounded-full bg-foreground/75" /><div className="ml-auto h-6 w-14 rounded-md bg-secondary" /></div><div className="mt-4 grid grid-cols-3 gap-3">{[1, 2, 3].map((item) => <div key={item}><div className="h-1.5 w-full rounded bg-muted-foreground/16" /><div className="mt-2 h-1.5 w-2/3 rounded bg-muted-foreground/10" /></div>)}</div></div>
+        </div>
+      </div>
     </div>
-  );
+  </div>;
 }

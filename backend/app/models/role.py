@@ -1,5 +1,5 @@
 """Roles, permissions, and access scopes (RBAC + ABAC)."""
-from sqlalchemy import Boolean, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -33,6 +33,7 @@ class Role(TimestampMixin, Base):
     description: Mapped[str | None] = mapped_column(Text)
     is_system: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
 
 class RolePermission(Base):
@@ -70,13 +71,13 @@ class UserPermissionOverride(TimestampMixin, Base):
 
 
 class AccessScope(TimestampMixin, Base):
-    """ABAC scopes: WHICH data a user can act on."""
+    """ABAC scopes for locations and assigned business entities."""
 
     __tablename__ = "access_scopes"
 
     id: Mapped[str] = uuid_pk()
     organization_id: Mapped[str] = tenant_fk()
     user_id: Mapped[str] = mapped_column(UUID_STR, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    scope_type: Mapped[str] = mapped_column(String(50), nullable=False)  # campus/department/class/section/subject/batch
+    scope_type: Mapped[str] = mapped_column(String(50), nullable=False)  # location/client/employee/assigned
     scope_value: Mapped[str] = mapped_column(String(200), nullable=False)  # id or slug of target
     meta: Mapped[dict | None] = mapped_column(JSONB, default=dict)

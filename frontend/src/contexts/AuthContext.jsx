@@ -1,6 +1,5 @@
 import React, { createContext, useContext, useEffect, useCallback } from "react";
 import { useDispatch, useSelector } from "react-redux";
-import { tokenStore } from "@/lib/api";
 import {
   fetchMe,
   loginThunk,
@@ -20,19 +19,15 @@ export function AuthProvider({ children }) {
   }, [dispatch]);
 
   useEffect(() => {
-    // Bootstrap: always try fetchMe once; it will resolve loading=false either way.
-    if (tokenStore.get()) {
-      dispatch(fetchMe());
-    } else {
-      dispatch(fetchMe()); // will 401 -> reducer clears loading
-    }
+    // The browser sends the HttpOnly access cookie automatically.
+    dispatch(fetchMe());
   }, [dispatch]);
 
-  const login = async (email, password) => {
-    const result = await dispatch(loginThunk({ email, password }));
+  const login = async (email, password, orgSlug, mfaCode) => {
+    const result = await dispatch(loginThunk({ email, password, org_slug: orgSlug, mfa_code: mfaCode }));
     if (loginThunk.rejected.match(result)) {
       const err = new Error(result.payload?.detail || "Login failed");
-      err.response = { data: result.payload };
+      err.response = { data: result.payload, status: result.payload?.status };
       throw err;
     }
     return result.payload;

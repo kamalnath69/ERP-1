@@ -1,7 +1,10 @@
 """Audit logging helper."""
+from contextvars import ContextVar
 from sqlalchemy.orm import Session
 
 from app.models import AuditLog
+
+platform_audit_context: ContextVar[dict | None] = ContextVar("platform_audit_context", default=None)
 
 
 def log_action(
@@ -20,7 +23,10 @@ def log_action(
     duration_ms: int | None = None,
     meta: dict | None = None,
     rows_affected: int | None = None,
+    changes: dict | None = None,
 ) -> None:
+    support_context = platform_audit_context.get() or {}
+    merged_meta = {**(meta or {}), **support_context, **({"changes": changes} if changes is not None else {})}
     entry = AuditLog(
         organization_id=organization_id,
         user_id=user_id,
@@ -34,7 +40,7 @@ def log_action(
         device=device,
         duration_ms=duration_ms,
         rows_affected=rows_affected,
-        meta=meta or {},
+        meta=merged_meta,
     )
     db.add(entry)
     db.flush()

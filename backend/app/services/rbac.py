@@ -28,7 +28,8 @@ def get_user_permissions(db: Session, user: User) -> set[str]:
         select(Permission.code)
         .join(RolePermission, RolePermission.permission_id == Permission.id)
         .join(UserRole, UserRole.role_id == RolePermission.role_id)
-        .where(UserRole.user_id == user.id)
+        .join(Role, Role.id == UserRole.role_id)
+        .where(UserRole.user_id == user.id, Role.is_active.is_(True))
     )
     codes = set(db.execute(stmt).scalars().all())
 
@@ -53,5 +54,5 @@ def user_has_permissions(db: Session, user: User, required: list[str]) -> bool:
 
 
 def get_user_roles(db: Session, user: User) -> list[Role]:
-    stmt = select(Role).join(UserRole, UserRole.role_id == Role.id).where(UserRole.user_id == user.id)
+    stmt = select(Role).join(UserRole, UserRole.role_id == Role.id).where(UserRole.user_id == user.id, Role.is_active.is_(True))
     return list(db.execute(stmt).scalars().all())

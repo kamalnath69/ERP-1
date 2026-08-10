@@ -41,6 +41,7 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 dump.rdb
+backend/logs/
 
 # System files
 .DS_Store
@@ -85,6 +86,7 @@ frontend/node_modules/.cache/default-development/2.pack
 .env
 .env.*
 *.env
+!backend/.env.example
 credentials.json
 *.key
 .credentials

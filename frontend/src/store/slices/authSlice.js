@@ -1,51 +1,48 @@
 import { createSlice, createAsyncThunk } from "@reduxjs/toolkit";
-import api, { tokenStore } from "@/lib/api";
-import { invalidateTerminology, resetTerminology } from "@/hooks/useTerminology";
+import api from "@/lib/api";
+import { baseApi } from "@/store/api/baseApi";
+import { clearTenantPreferences } from "@/store/slices/preferencesSlice";
 
 export const fetchMe = createAsyncThunk("auth/fetchMe", async (_, { rejectWithValue }) => {
   try {
-    const { data } = await api.get("/auth/me");
+    // A missing session during app startup is normal on public pages. The route
+    // guard decides whether sign-in is required after this silent check.
+    const { data } = await api.get("/auth/me", { suppressAuthRedirect: true });
     return data;
   } catch (e) {
     return rejectWithValue(e?.response?.data || { detail: "Not authenticated" });
   }
 });
 
-export const loginThunk = createAsyncThunk("auth/login", async ({ email, password }, { dispatch, rejectWithValue }) => {
+export const loginThunk = createAsyncThunk("auth/login", async ({ email, password, org_slug, mfa_code }, { dispatch, rejectWithValue }) => {
   try {
-    const { data } = await api.post("/auth/login", { email, password });
-    tokenStore.set(data.access_token);
-    tokenStore.setRefresh(data.refresh_token);
+    const { data } = await api.post("/auth/login", { email, password, org_slug: org_slug || null, mfa_code: mfa_code || null });
+    dispatch(baseApi.util.resetApiState());
+    dispatch(clearTenantPreferences());
     await dispatch(fetchMe());
-    // Refresh tenant-specific caches so the new user never sees the previous tenant's data.
-    try { await invalidateTerminology(); } catch {}
     return data.user;
   } catch (e) {
-    return rejectWithValue(e?.response?.data || { detail: "Login failed" });
+    return rejectWithValue({ ...(e?.response?.data || { detail: "Login failed" }), status: e?.response?.status });
   }
 });
 
-export const registerOrgThunk = createAsyncThunk("auth/registerOrg", async (payload, { dispatch, rejectWithValue }) => {
+export const registerOrgThunk = createAsyncThunk("auth/registerOrg", async (payload, { rejectWithValue }) => {
   try {
     const { data } = await api.post("/auth/register", payload);
-    tokenStore.set(data.access_token);
-    tokenStore.setRefresh(data.refresh_token);
-    await dispatch(fetchMe());
-    try { await invalidateTerminology(); } catch {}
-    return data.user;
+    return data;
   } catch (e) {
     return rejectWithValue(e?.response?.data || { detail: "Registration failed" });
   }
 });
 
-export const logoutThunk = createAsyncThunk("auth/logout", async () => {
+export const logoutThunk = createAsyncThunk("auth/logout", async (_, { dispatch }) => {
   try {
-    await api.post("/auth/logout", { refresh_token: tokenStore.getRefresh() });
+    await api.post("/auth/logout");
   } catch {}
-  tokenStore.clear();
+  dispatch(baseApi.util.resetApiState());
+  dispatch(clearTenantPreferences());
   // Reset (no fetch — user is unauthenticated) so the login page & subsequent
   // login from a different tenant doesn't briefly show the old terminology.
-  try { resetTerminology(); } catch {}
 });
 
 const initialState = {

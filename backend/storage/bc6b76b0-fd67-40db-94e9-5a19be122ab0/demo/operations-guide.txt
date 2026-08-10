@@ -1,0 +1,5 @@
+Malar Studio Demo Operations Guide
+
+Opening checklist: review today's appointments, unresolved client signals, and low stock.
+Customer follow-ups must respect recorded communication consent. Financial and clinical actions require explicit approval.
+Escalate unresolved complaints to the manager and record the agreed commitment in the client workspace.

@@ -38,4 +38,6 @@ class Notification(TimestampMixin, Base):
     body: Mapped[str | None] = mapped_column(Text)
     is_read: Mapped[bool] = mapped_column(Boolean, default=False)
     kind: Mapped[str] = mapped_column(String(60), default="info")  # info / warning / success / error
+    category: Mapped[str] = mapped_column(String(40), default="general", nullable=False)
     link: Mapped[str | None] = mapped_column(String(500))
+    destination: Mapped[dict | None] = mapped_column(JSONB)

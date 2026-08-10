@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "dependencies": {
+    "@fontsource/dm-mono": "^5.3.0",
+    "@fontsource/fraunces": "^5.3.0",
+    "@fontsource/manrope": "^5.3.0",
     "@phosphor-icons/react": "^2.1.10",
     "@radix-ui/react-accordion": "1.2.8",
     "@radix-ui/react-alert-dialog": "1.1.11",
@@ -32,11 +35,11 @@
     "@radix-ui/react-toggle-group": "1.1.7",
     "@radix-ui/react-tooltip": "1.2.4",
     "@reduxjs/toolkit": "^2.12.0",
-    "@tanstack/react-query": "5.56.2",
     "axios": "1.16.0",
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",
     "cmdk": "1.1.1",
+    "echarts": "6.0.0",
     "embla-carousel-react": "8.6.0",
     "input-otp": "1.4.2",
     "lucide-react": "0.516.0",
@@ -49,7 +52,6 @@
     "react-resizable-panels": "3.0.1",
     "react-router-dom": "7.15.0",
     "react-scripts": "5.0.1",
-    "recharts": "3.6.0",
     "sonner": "2.0.3",
     "tailwind-merge": "3.2.0",
     "tailwindcss-animate": "1.0.7",
@@ -59,6 +61,16 @@
     "start": "craco start",
     "build": "craco build",
     "test": "craco test"
+  },
+  "jest": {
+    "moduleNameMapper": {
+      "^react-router-dom$": "<rootDir>/node_modules/react-router-dom/dist/index.js",
+      "^react-router/dom$": "<rootDir>/node_modules/react-router/dist/development/dom-export.js",
+      "^@/(.*)$": "<rootDir>/src/$1"
+    },
+    "transformIgnorePatterns": [
+      "node_modules/(?!(@standard-schema/utils|echarts|zrender)/)"
+    ]
   },
   "browserslist": {
     "production": [

@@ -1,61 +1,59 @@
-import axios from "axios";
+import { baseApi } from "@/store/api/baseApi";
+import http, { API_BASE, apiErrorMessage } from "@/lib/http";
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-export const API_BASE = `${BACKEND_URL}/api`;
+let dispatchApi = null;
 
-const api = axios.create({ baseURL: API_BASE });
+export function bindApiDispatch(dispatch) {
+  dispatchApi = dispatch;
+}
 
-const TOKEN_KEY = "athena.access_token";
-const REFRESH_KEY = "athena.refresh_token";
+function axiosCompatibleError(error) {
+  const message = error?.data?.detail || error?.message || "The request could not be completed";
+  const converted = new Error(message);
+  converted.code = error?.code || (error?.status === "CANCELLED" ? "ERR_CANCELED" : undefined);
+  converted.response = {
+    status: typeof error?.status === "number" ? error.status : 0,
+    data: error?.data || { detail: message },
+  };
+  return converted;
+}
 
-export const tokenStore = {
-  get: () => localStorage.getItem(TOKEN_KEY),
-  set: (t) => localStorage.setItem(TOKEN_KEY, t),
-  getRefresh: () => localStorage.getItem(REFRESH_KEY),
-  setRefresh: (t) => localStorage.setItem(REFRESH_KEY, t),
-  clear: () => {
-    localStorage.removeItem(TOKEN_KEY);
-    localStorage.removeItem(REFRESH_KEY);
-  },
+async function reduxRequest(method, url, data, config = {}) {
+  // Binary data is deliberately not placed in Redux's serializable cache.
+  if (!dispatchApi || (config.responseType && config.responseType !== "json")) {
+    return http.request({ ...config, method, url, data });
+  }
+
+  const { signal, forceRefetch, ...requestConfig } = config;
+  const args = { ...requestConfig, method, url, data };
+  const isQuery = method === "GET";
+  const endpoint = isQuery ? baseApi.endpoints.get : baseApi.endpoints.mutate;
+  const pending = dispatchApi(endpoint.initiate(args, isQuery ? { subscribe: false, forceRefetch: Boolean(forceRefetch) } : undefined));
+
+  const abort = () => pending.abort();
+  if (signal?.aborted) abort();
+  else signal?.addEventListener("abort", abort, { once: true });
+
+  try {
+    const result = await pending.unwrap();
+    return { ...result, config: { ...config, method, url } };
+  } catch (error) {
+    throw axiosCompatibleError(error);
+  } finally {
+    signal?.removeEventListener("abort", abort);
+    if (isQuery) pending.unsubscribe();
+    else pending.reset();
+  }
+}
+
+const api = {
+  get: (url, config) => reduxRequest("GET", url, undefined, config),
+  delete: (url, config = {}) => reduxRequest("DELETE", url, config.data, config),
+  post: (url, data, config) => reduxRequest("POST", url, data, config),
+  put: (url, data, config) => reduxRequest("PUT", url, data, config),
+  patch: (url, data, config) => reduxRequest("PATCH", url, data, config),
+  invalidate: (...resources) => dispatchApi?.(baseApi.util.invalidateTags(resources.map((id) => ({ type: "Resource", id })))),
 };
 
-api.interceptors.request.use((config) => {
-  const t = tokenStore.get();
-  if (t) config.headers.Authorization = `Bearer ${t}`;
-  return config;
-});
-
-let refreshing = null;
-
-api.interceptors.response.use(
-  (r) => r,
-  async (err) => {
-    const original = err.config || {};
-    if (err.response?.status === 401 && !original._retry && tokenStore.getRefresh()) {
-      original._retry = true;
-      try {
-        refreshing =
-          refreshing ||
-          axios
-            .post(`${API_BASE}/auth/refresh`, { refresh_token: tokenStore.getRefresh() })
-            .then((res) => {
-              tokenStore.set(res.data.access_token);
-              tokenStore.setRefresh(res.data.refresh_token);
-              return res.data.access_token;
-            })
-            .finally(() => {
-              refreshing = null;
-            });
-        const newToken = await refreshing;
-        original.headers.Authorization = `Bearer ${newToken}`;
-        return api(original);
-      } catch (e) {
-        tokenStore.clear();
-        window.location.href = "/login";
-      }
-    }
-    return Promise.reject(err);
-  }
-);
-
+export { API_BASE, apiErrorMessage };
 export default api;
