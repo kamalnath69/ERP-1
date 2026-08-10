@@ -9,11 +9,16 @@ function storedJSON(key, fallback) {
   try { return JSON.parse(stored(key, JSON.stringify(fallback))); } catch { return fallback; }
 }
 
+function storedAppearance() {
+  const value = stored("edvatiq.appearance", "light");
+  return ["light", "dark", "system"].includes(value) ? value : "light";
+}
+
 const initialState = {
   locationId: stored("edvatiq.location"),
   sidebarCompact: stored("edvatiq.sidebar") === "compact",
   aiSidebarCollapsed: stored("edvatiq.ai.sidebar") === "collapsed",
-  appearance: stored("edvatiq.appearance", "system"),
+  appearance: storedAppearance(),
   dashboardLayouts: storedJSON("edvatiq.dashboard.layouts", {}),
 };
 
@@ -25,7 +30,7 @@ const preferencesSlice = createSlice({
     setSidebarCompact: (state, action) => { state.sidebarCompact = Boolean(action.payload); },
     setAISidebarCollapsed: (state, action) => { state.aiSidebarCollapsed = Boolean(action.payload); },
     setAppearance: (state, action) => {
-      state.appearance = ["light", "dark", "system"].includes(action.payload) ? action.payload : "system";
+      state.appearance = ["light", "dark", "system"].includes(action.payload) ? action.payload : "light";
     },
     setDashboardLayout: (state, action) => {
       const { key = "default", layout = [] } = action.payload || {};

@@ -52,6 +52,9 @@ test("shows live paid pricing and paid-onboarding guidance when Trial is disable
   expect(view.container.textContent).toContain("Growth");
   expect(view.container.textContent).toContain("Choose Growth");
   expect(view.container.textContent).not.toContain("30-day trial");
+  expect(view.container.textContent).toContain("Book a working session");
+  expect(view.container.querySelector("#contact")).not.toBeNull();
+  expect(view.container.querySelector('a[href^="mailto:sales@edvatiq.com"]')).not.toBeNull();
   const growthLink = [...view.container.querySelectorAll("a")].find((link) => link.textContent.includes("Choose Growth"));
   expect(growthLink?.getAttribute("href")).toContain("plan=growth");
   expect(growthLink?.getAttribute("href")).toContain("interval=monthly");

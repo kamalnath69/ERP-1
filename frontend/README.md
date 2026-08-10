@@ -15,6 +15,8 @@ The development server runs at `http://localhost:3000`. `yarn start` is retained
 
 Set `VITE_BACKEND_URL` to the backend origin. The existing `REACT_APP_BACKEND_URL` name remains supported during deployment migration.
 
+Optionally set `VITE_DEMO_BOOKING_URL` to a public HTTPS scheduling page. When it is omitted, landing-page demo actions open a pre-addressed email to `sales@edvatiq.com`.
+
 Set `ENABLE_HEALTH_CHECK=true` to expose `/health`, `/health/simple`, `/health/ready`, `/health/live`, `/health/errors`, and `/health/stats` on the development server.
 
 ## Verification

@@ -42,6 +42,25 @@ const capabilities = [
   [LockKey, "Responsible access", "Roles, location scope, confirmations, and audit history protect important data and actions."],
 ];
 
+const journeySteps = [
+  ["01", "Bring the right records", "Connect existing systems, import structured data, or begin with focused local records. Edvatiq does not force a disruptive rip-and-replace rollout."],
+  ["02", "See priorities clearly", "Role-aware dashboards surface the people, evidence, deadlines, and operational risks that deserve attention now."],
+  ["03", "Act with confidence", "Use grounded AI and connected workflows to take the next step, with permissions and confirmations protecting sensitive actions."],
+];
+
+const demoBookingUrl = (import.meta.env.VITE_DEMO_BOOKING_URL || "").trim()
+  || "mailto:sales@edvatiq.com?subject=Book%20an%20Edvatiq%20demo&body=Hi%20Edvatiq%20team%2C%0A%0AI%27d%20like%20to%20book%20a%20demo.%0A%0AOrganization%3A%0AIndustry%3A%0ATeam%20size%3A%0A";
+const opensNewWindow = /^https?:\/\//i.test(demoBookingUrl);
+
+function DemoLink({ children, className = "" }) {
+  return <a
+    href={demoBookingUrl}
+    className={className}
+    target={opensNewWindow ? "_blank" : undefined}
+    rel={opensNewWindow ? "noreferrer" : undefined}
+  >{children}</a>;
+}
+
 const money = (paise) => new Intl.NumberFormat("en-IN", {
   style: "currency",
   currency: "INR",
@@ -74,13 +93,14 @@ export default function Landing() {
       <div className="mx-auto flex h-16 max-w-[1440px] items-center justify-between px-4 sm:px-6 lg:px-8">
         <Link to="/" className="flex items-center gap-2.5" aria-label="Edvatiq home">
           <span className="grid h-9 w-9 place-items-center rounded-xl bg-primary text-sm font-bold text-primary-foreground shadow-sm">E</span>
-          <span className="font-marketing text-xl font-semibold">Edvatiq</span>
+          <span className="hidden font-marketing text-xl font-semibold min-[360px]:inline">Edvatiq</span>
         </Link>
-        <nav className="hidden items-center gap-7 text-sm font-medium text-muted-foreground md:flex" aria-label="Primary navigation">
+        <nav className="hidden items-center gap-6 text-sm font-medium text-muted-foreground lg:flex" aria-label="Primary navigation">
           <a className="transition-colors hover:text-foreground" href="#platform">Platform</a>
           <a className="transition-colors hover:text-foreground" href="#industries">Industries</a>
           <a className="transition-colors hover:text-foreground" href="#ai">Edvatiq AI</a>
           <a className="transition-colors hover:text-foreground" href="#pricing">Pricing</a>
+          <a className="transition-colors hover:text-foreground" href="#contact">Book a demo</a>
         </nav>
         <div className="flex items-center gap-1 sm:gap-2">
           <Link to="/login" className="rounded-xl px-3 py-2 text-sm font-semibold transition-colors hover:bg-secondary sm:px-4">Sign in</Link>
@@ -98,9 +118,9 @@ export default function Landing() {
           <div className="lg:col-span-6 xl:col-span-5">
             <div className="inline-flex items-center gap-2 rounded-full border bg-card px-3 py-1.5 text-xs font-semibold shadow-sm">
               <Sparkle className="text-accent" weight="fill" />
-              Operations and placement intelligence
+              Operations, placement intelligence, and grounded AI
             </div>
-            <h1 className="mt-7 max-w-3xl text-[clamp(3.05rem,6vw,6.1rem)] font-semibold leading-[0.94] tracking-[-0.055em]">
+            <h1 className="mt-7 max-w-3xl text-[clamp(3rem,5.4vw,5.6rem)] font-semibold leading-[0.95] tracking-[-0.052em]">
               See what matters.<br /><span className="text-accent">Move work forward.</span>
             </h1>
             <p className="mt-7 max-w-xl text-base leading-7 text-muted-foreground sm:text-lg">
@@ -110,13 +130,19 @@ export default function Landing() {
               {trialEnabled
                 ? <Link to="/register?plan=trial" className="inline-flex h-12 items-center justify-center gap-2 rounded-xl bg-primary px-6 text-sm font-semibold text-primary-foreground shadow-lg shadow-primary/10 transition-transform hover:-translate-y-0.5">Create your workspace <ArrowRight /></Link>
                 : <a href="#pricing" className="inline-flex h-12 items-center justify-center gap-2 rounded-xl bg-primary px-6 text-sm font-semibold text-primary-foreground shadow-lg shadow-primary/10 transition-transform hover:-translate-y-0.5">Choose your plan <ArrowRight /></a>}
-              <a href="#platform" className="inline-flex h-12 items-center justify-center rounded-xl border bg-card px-6 text-sm font-semibold shadow-sm transition-colors hover:bg-secondary">Explore the platform</a>
+              <DemoLink className="inline-flex h-12 items-center justify-center rounded-xl border bg-card px-6 text-sm font-semibold shadow-sm transition-colors hover:bg-secondary">Book a demo</DemoLink>
             </div>
             <div className="mt-9 flex flex-wrap gap-x-6 gap-y-3 text-xs font-medium text-muted-foreground">
               {[trialEnabled ? "30-day trial" : "Secure paid onboarding", "GST-ready pricing", "Gym, Salon, Clinic, and College"].map((item) => <span key={item} className="inline-flex items-center gap-2"><CheckCircle className="text-positive" weight="fill" />{item}</span>)}
             </div>
           </div>
           <ProductPreview />
+        </div>
+      </section>
+
+      <section className="border-b bg-card" aria-label="Platform principles">
+        <div className="mx-auto grid max-w-[1440px] grid-cols-2 px-4 sm:px-6 lg:grid-cols-4 lg:px-8">
+          {["Works with existing systems", "Permission-scoped by design", "Evidence-linked AI answers", "Built for Indian organizations"].map((item, index) => <div key={item} className={`flex min-h-20 items-center gap-2.5 py-4 text-xs font-semibold sm:text-sm ${index % 2 ? "pl-4" : "pr-4"} lg:border-l lg:px-5 lg:first:border-l-0`}><CheckCircle className="shrink-0 text-positive" weight="fill" />{item}</div>)}
         </div>
       </section>
 
@@ -139,6 +165,19 @@ export default function Landing() {
         </div>
       </section>
 
+      <section id="workflow" className="border-b bg-surface-subtle">
+        <div className="mx-auto grid max-w-[1440px] gap-12 px-4 py-20 sm:px-6 lg:grid-cols-12 lg:px-8 lg:py-28">
+          <div className="lg:col-span-4">
+            <div className="overline">A practical rollout</div>
+            <h2 className="mt-3 text-4xl font-semibold leading-tight sm:text-5xl">Useful before everything is perfect.</h2>
+            <p className="mt-5 max-w-md text-base leading-7 text-muted-foreground">Start with one valuable workflow, keep existing systems where they belong, and expand when your team is ready.</p>
+          </div>
+          <div className="divide-y overflow-hidden rounded-2xl border bg-card lg:col-span-7 lg:col-start-6">
+            {journeySteps.map(([number, title, copy]) => <article key={number} className="grid gap-4 p-5 sm:grid-cols-[3.5rem_1fr] sm:p-7"><span className="font-mono text-xs font-semibold text-accent">{number}</span><div><h3 className="text-xl font-semibold">{title}</h3><p className="mt-2 text-sm leading-6 text-muted-foreground">{copy}</p></div></article>)}
+          </div>
+        </div>
+      </section>
+
       <section id="ai" className="mx-auto grid max-w-[1440px] gap-12 px-4 py-20 sm:px-6 lg:grid-cols-12 lg:px-8 lg:py-28">
         <div className="lg:col-span-5"><div className="overline">Edvatiq AI</div><h2 className="mt-3 text-4xl font-semibold leading-tight sm:text-5xl">An assistant that can show its work.</h2><p className="mt-5 text-base leading-7 text-muted-foreground">Ask naturally, inspect the supporting records, and confirm sensitive actions before anything changes. Personalize tone and detail without weakening permissions or accuracy.</p></div>
         <div className="lg:col-span-6 lg:col-start-7"><div className="surface-card overflow-hidden p-2 shadow-xl shadow-primary/5"><div className="rounded-xl bg-primary p-5 text-primary-foreground sm:p-7"><div className="flex items-center justify-between"><span className="inline-flex items-center gap-2 text-sm font-semibold"><Sparkle className="text-accent" weight="fill" />Ask Edvatiq</span><span className="rounded-full border border-primary-foreground/15 px-2.5 py-1 text-[10px] text-primary-foreground/55">Permission scoped</span></div><div className="mt-8 rounded-xl border border-primary-foreground/12 bg-primary-foreground/[0.06] p-4 text-sm text-primary-foreground/72">Who needs support before the next placement drive?</div><div className="mt-3 rounded-xl bg-card p-5 text-foreground shadow-sm"><div className="flex items-center gap-2 text-sm font-semibold"><CirclesFour className="text-accent" />Evidence-linked answer</div><div className="mt-4 space-y-3">{["Readiness and missing evidence", "Authorized student or client records", "English, Tamil, and Tanglish"].map((item) => <div key={item} className="flex items-center gap-3 rounded-lg bg-secondary px-3 py-2.5 text-xs"><CheckCircle className="text-positive" weight="fill" />{item}</div>)}</div></div></div></div></div>
@@ -146,12 +185,33 @@ export default function Landing() {
 
       <Pricing catalog={catalog} error={error} retry={retry} />
 
-      <section className="px-4 pb-20 sm:px-6 lg:px-8 lg:pb-28">
-        <div className="relative mx-auto flex max-w-[1400px] flex-col items-start justify-between gap-8 overflow-hidden rounded-3xl bg-accent p-8 text-accent-foreground sm:p-12 lg:flex-row lg:items-end lg:p-16"><div className="paper-grid absolute inset-0 opacity-15" /><div className="relative max-w-3xl"><div className="overline !text-accent-foreground/55">Start with your real workflow</div><h2 className="mt-3 text-4xl font-semibold leading-tight sm:text-5xl">Turn scattered records into the next right action.</h2></div><a href="#pricing" className="relative inline-flex h-12 shrink-0 items-center gap-2 rounded-xl bg-primary px-6 text-sm font-semibold text-primary-foreground shadow-lg transition-transform hover:-translate-y-0.5">View plans <ArrowRight /></a></div>
+      <section id="contact" className="px-4 py-20 sm:px-6 lg:px-8 lg:py-28">
+        <div className="relative mx-auto grid max-w-[1400px] overflow-hidden rounded-[2rem] bg-primary text-primary-foreground shadow-[0_30px_80px_hsl(var(--shadow-color)/.16)] lg:grid-cols-12">
+          <div className="paper-grid pointer-events-none absolute inset-0 opacity-[0.06]" />
+          <div className="relative p-7 sm:p-10 lg:col-span-7 lg:p-14 xl:p-16">
+            <div className="overline !text-primary-foreground/50">Book a working session</div>
+            <h2 className="mt-3 max-w-3xl text-4xl font-semibold leading-tight sm:text-5xl">See Edvatiq around your real workflow.</h2>
+            <p className="mt-5 max-w-2xl text-sm leading-7 text-primary-foreground/65 sm:text-base">Tell us what your team manages today. We will show the relevant workspace, answer integration questions, and map a sensible first rollout without forcing a generic sales presentation.</p>
+            <div className="mt-8 flex flex-col gap-3 sm:flex-row">
+              <DemoLink className="inline-flex h-12 items-center justify-center gap-2 rounded-xl bg-accent px-6 text-sm font-semibold text-accent-foreground shadow-lg transition-transform hover:-translate-y-0.5">Book a demo <ArrowRight /></DemoLink>
+              <a href="mailto:sales@edvatiq.com" className="inline-flex h-12 items-center justify-center rounded-xl border border-primary-foreground/20 px-6 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary-foreground/10">sales@edvatiq.com</a>
+            </div>
+          </div>
+          <aside className="relative border-t border-primary-foreground/12 bg-primary-foreground/[0.055] p-7 sm:p-10 lg:col-span-5 lg:border-l lg:border-t-0 lg:p-12">
+            <div className="text-sm font-semibold">What the conversation covers</div>
+            <div className="mt-6 space-y-5">
+              {[
+                [CalendarCheck, "Your highest-value workflow", "A focused walkthrough for your industry and team roles."],
+                [UsersThree, "Data and rollout fit", "Imports, existing systems, permissions, and practical onboarding."],
+                [LockKey, "A clear commercial path", "The right plan, payment path, and next steps with no hidden setup."],
+              ].map(([Icon, title, copy]) => <div key={title} className="flex gap-3.5"><span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-primary-foreground/10 text-accent"><Icon size={18} /></span><div><div className="text-sm font-semibold">{title}</div><p className="mt-1 text-xs leading-5 text-primary-foreground/55">{copy}</p></div></div>)}
+            </div>
+          </aside>
+        </div>
       </section>
     </main>
 
-    <footer className="border-t"><div className="mx-auto flex max-w-[1440px] flex-col gap-4 px-4 py-8 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between sm:px-6 lg:px-8"><span>Copyright 2026 Edvatiq</span><span>Operations and placement intelligence for Indian organizations.</span></div></footer>
+    <SiteFooter />
   </div>;
 }
 
@@ -188,11 +248,51 @@ function PlanCard({ plan, interval, paymentAvailable }) {
     <div className="my-6 h-px bg-border" />
     <ul className="space-y-3 text-xs">{points.map((point) => <li key={point} className="flex gap-2.5"><Check className="mt-0.5 shrink-0 text-positive" weight="bold" />{point}</li>)}</ul>
     <div className="mt-auto pt-7">{isContact
-      ? <a href="mailto:sales@edvatiq.com?subject=Edvatiq%20Enterprise" className="flex h-11 items-center justify-center rounded-xl border text-sm font-semibold hover:bg-secondary">Contact sales</a>
+      ? <DemoLink className="flex h-11 items-center justify-center rounded-xl border text-sm font-semibold hover:bg-secondary">Talk to sales</DemoLink>
       : !isTrial && !paymentAvailable
         ? <button type="button" disabled className="h-11 w-full rounded-xl border bg-secondary text-sm font-semibold text-muted-foreground">Checkout unavailable</button>
         : <Link to={path} className={`flex h-11 items-center justify-center gap-2 rounded-xl text-sm font-semibold ${plan.recommended ? "bg-primary text-primary-foreground" : "border hover:bg-secondary"}`}>{isTrial ? "Start free" : `Choose ${plan.name}`} <ArrowRight /></Link>}</div>
   </article>;
+}
+
+function SiteFooter() {
+  return <footer className="bg-primary text-primary-foreground">
+    <div className="mx-auto max-w-[1440px] px-4 pb-8 pt-14 sm:px-6 lg:px-8 lg:pt-16">
+      <div className="grid gap-10 border-b border-primary-foreground/12 pb-12 sm:grid-cols-2 lg:grid-cols-12">
+        <div className="sm:col-span-2 lg:col-span-5">
+          <Link to="/" className="inline-flex items-center gap-2.5" aria-label="Edvatiq home">
+            <span className="grid h-10 w-10 place-items-center rounded-xl bg-primary-foreground text-sm font-bold text-primary">E</span>
+            <span className="font-marketing text-2xl font-semibold">Edvatiq</span>
+          </Link>
+          <p className="mt-5 max-w-md text-sm leading-7 text-primary-foreground/58">Calm operations, placement intelligence, and evidence-backed AI for teams that need clarity before more software.</p>
+          <a href="mailto:sales@edvatiq.com" className="mt-5 inline-flex text-sm font-semibold text-accent hover:underline">sales@edvatiq.com</a>
+        </div>
+        <FooterGroup title="Product" links={[["Platform", "#platform"], ["Edvatiq AI", "#ai"], ["Plans", "#pricing"], ["How it works", "#workflow"]]} />
+        <FooterGroup title="Solutions" links={[["Gym and fitness", "#industries"], ["Salon and spa", "#industries"], ["Outpatient clinic", "#industries"], ["College placement", "#industries"]]} />
+        <div className="lg:col-span-2">
+          <div className="text-xs font-semibold uppercase tracking-[0.15em] text-primary-foreground/40">Get started</div>
+          <div className="mt-5 flex flex-col items-start gap-3 text-sm text-primary-foreground/70">
+            <DemoLink className="hover:text-primary-foreground">Book a demo</DemoLink>
+            <a href="#pricing" className="hover:text-primary-foreground">View plans</a>
+            <Link to="/login" className="hover:text-primary-foreground">Sign in</Link>
+          </div>
+        </div>
+      </div>
+      <div className="flex flex-col gap-3 pt-7 text-xs text-primary-foreground/45 sm:flex-row sm:items-center sm:justify-between">
+        <span>Copyright {new Date().getFullYear()} Edvatiq. All rights reserved.</span>
+        <span>Operations and placement intelligence for Indian organizations.</span>
+      </div>
+    </div>
+  </footer>;
+}
+
+function FooterGroup({ title, links }) {
+  return <nav className="lg:col-span-2" aria-label={`${title} links`}>
+    <div className="text-xs font-semibold uppercase tracking-[0.15em] text-primary-foreground/40">{title}</div>
+    <div className="mt-5 flex flex-col items-start gap-3 text-sm text-primary-foreground/70">
+      {links.map(([label, href]) => <a key={label} href={href} className="hover:text-primary-foreground">{label}</a>)}
+    </div>
+  </nav>;
 }
 
 function ProductPreview() {

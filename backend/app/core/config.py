@@ -28,6 +28,12 @@ def _database_url() -> str:
     return raw
 
 
+def _cors_origins() -> list[str]:
+    configured = os.environ.get("CORS_ORIGINS", "http://localhost:3000").split(",")
+    origins = ["https://edvatiq.app", *configured]
+    return list(dict.fromkeys(origin.strip().rstrip("/") for origin in origins if origin.strip()))
+
+
 class Settings:
     ENVIRONMENT: str = os.environ.get("ENVIRONMENT", "development").strip().lower()
     DATABASE_URL: str = _database_url()
@@ -126,7 +132,7 @@ class Settings:
             self.RAZORPAY_LIVE_WEBHOOK_SECRET or (self.RAZORPAY_WEBHOOK_SECRET if legacy_matches else ""),
         )
 
-    CORS_ORIGINS: list[str] = [origin.strip() for origin in os.environ.get("CORS_ORIGINS", "http://localhost:3000").split(",") if origin.strip()]
+    CORS_ORIGINS: list[str] = _cors_origins()
 
 
 @lru_cache

@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#123a2e" />
+    <meta name="theme-color" content="#f3f6f5" />
     <meta
       name="description"
       content="Edvatiq operations platform for gyms, salons, clinics, and colleges"
@@ -12,7 +12,10 @@
     <script>
       (function () {
         try {
-          var value = localStorage.getItem("edvatiq.appearance") || "system";
+          var storedValue = localStorage.getItem("edvatiq.appearance") || "light";
+          var value = ["light", "dark", "system"].indexOf(storedValue) >= 0
+            ? storedValue
+            : "light";
           var dark =
             value === "dark" ||
             (value === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
