@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#123a2e" />
+    <meta
+      name="description"
+      content="Edvatiq operations platform for gyms, salons, clinics, and colleges"
+    />
+    <title>Edvatiq Business OS</title>
+    <script>
+      (function () {
+        try {
+          var value = localStorage.getItem("edvatiq.appearance") || "system";
+          var dark =
+            value === "dark" ||
+            (value === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+          document.documentElement.classList.toggle("dark", dark);
+          document.documentElement.dataset.appearance = value;
+          document.documentElement.style.colorScheme = dark ? "dark" : "light";
+        } catch (_) {}
+      })();
+    </script>
+    <script>
+      window.addEventListener(
+        "error",
+        function (event) {
+          if (
+            event.error instanceof DOMException &&
+            event.error.name === "DataCloneError" &&
+            event.message &&
+            event.message.includes("PerformanceServerTiming")
+          ) {
+            event.stopImmediatePropagation();
+            event.preventDefault();
+          }
+        },
+        true,
+      );
+    </script>
+  </head>
+  <body>
+    <noscript>You need to enable JavaScript to run this app.</noscript>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

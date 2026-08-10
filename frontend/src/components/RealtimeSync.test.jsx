@@ -8,7 +8,7 @@ class FakeEventSource {
 
   constructor() {
     this.listeners = {};
-    this.close = jest.fn();
+    this.close = vi.fn();
     FakeEventSource.instance = this;
   }
 
@@ -27,7 +27,7 @@ class FakeEventSource {
 }
 
 const makeStore = () => ({
-  dispatch: jest.fn(),
+  dispatch: vi.fn(),
   getState: () => ({}),
   subscribe: () => () => {},
 });
@@ -37,7 +37,7 @@ describe("RealtimeSync", () => {
   let root;
 
   beforeEach(() => {
-    jest.useFakeTimers();
+    vi.useFakeTimers();
     global.EventSource = FakeEventSource;
     global.IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement("div");
@@ -48,7 +48,7 @@ describe("RealtimeSync", () => {
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
-    jest.useRealTimers();
+    vi.useRealTimers();
     delete global.EventSource;
     delete global.IS_REACT_ACT_ENVIRONMENT;
   });
@@ -62,7 +62,7 @@ describe("RealtimeSync", () => {
     renderSync(store);
 
     act(() => FakeEventSource.instance.emit("open"));
-    act(() => jest.advanceTimersByTime(REALTIME_FALLBACK_MS * 2));
+    act(() => vi.advanceTimersByTime(REALTIME_FALLBACK_MS * 2));
 
     expect(store.dispatch).not.toHaveBeenCalled();
   });
@@ -72,13 +72,13 @@ describe("RealtimeSync", () => {
     renderSync(store);
     act(() => FakeEventSource.instance.emit("open"));
     act(() => FakeEventSource.instance.emit("error"));
-    act(() => jest.advanceTimersByTime(REALTIME_FALLBACK_MS));
+    act(() => vi.advanceTimersByTime(REALTIME_FALLBACK_MS));
 
     expect(store.dispatch).toHaveBeenCalledTimes(1);
 
     act(() => FakeEventSource.instance.emit("open"));
     store.dispatch.mockClear();
-    act(() => jest.advanceTimersByTime(REALTIME_FALLBACK_MS));
+    act(() => vi.advanceTimersByTime(REALTIME_FALLBACK_MS));
     expect(store.dispatch).not.toHaveBeenCalled();
   });
 });

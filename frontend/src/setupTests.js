@@ -1,4 +1,4 @@
-const { TextDecoder, TextEncoder } = require("util");
+import { TextDecoder, TextEncoder } from "node:util";
 
-global.TextDecoder ??= TextDecoder;
-global.TextEncoder ??= TextEncoder;
+globalThis.TextDecoder ??= TextDecoder;
+globalThis.TextEncoder ??= TextEncoder;

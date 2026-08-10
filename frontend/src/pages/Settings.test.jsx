@@ -48,23 +48,23 @@ const mockSettingsData = {
 };
 
 const mockPermissions = new Set(["roles.manage", "billing.view"]);
-const mockRefetch = jest.fn();
-const mockSaveSection = jest.fn();
+const mockRefetch = vi.fn();
+const mockSaveSection = vi.fn();
 
-jest.mock("@/contexts/AuthContext", () => ({
+vi.mock("@/contexts/AuthContext", () => ({
   useAuth: () => ({ can: (code) => mockPermissions.has(code) }),
 }));
 
-jest.mock("@/contexts/BusinessContext", () => ({
-  useBusiness: () => ({ refresh: jest.fn() }),
+vi.mock("@/contexts/BusinessContext", () => ({
+  useBusiness: () => ({ refresh: vi.fn() }),
 }));
 
-jest.mock("@/features/settings/settingsApi", () => ({
+vi.mock("@/features/settings/settingsApi", () => ({
   useGetSettingsWorkspaceQuery: () => ({ data: mockSettingsData, isLoading: false, error: null, refetch: mockRefetch }),
   useUpdateSettingsSectionMutation: () => [mockSaveSection, { isLoading: false }],
-  useCreateLocationMutation: () => [jest.fn(), { isLoading: false }],
-  useUpdateLocationMutation: () => [jest.fn(), { isLoading: false }],
-  useRequestIndustryMigrationMutation: () => [jest.fn(), { isLoading: false }],
+  useCreateLocationMutation: () => [vi.fn(), { isLoading: false }],
+  useUpdateLocationMutation: () => [vi.fn(), { isLoading: false }],
+  useRequestIndustryMigrationMutation: () => [vi.fn(), { isLoading: false }],
 }));
 
 afterEach(() => {
@@ -74,7 +74,7 @@ afterEach(() => {
   mockPermissions.add("roles.manage");
   mockPermissions.add("billing.view");
   window.sessionStorage.clear();
-  jest.clearAllMocks();
+  vi.clearAllMocks();
 });
 
 test("renders the restrained settings console and omits non-operational pages", () => {

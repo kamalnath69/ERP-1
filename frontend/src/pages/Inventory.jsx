@@ -1,4 +1,4 @@
-import React, { useDeferredValue, useEffect, useMemo, useState } from "react";
+import React, { useDeferredValue, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { ArrowDown, ArrowUp, ArrowsLeftRight, MagnifyingGlass, Package, Warning } from "@phosphor-icons/react";
 import { toast } from "sonner";
@@ -111,10 +111,8 @@ function TransferDrawer({ open, onOpenChange, activeLocationId, locations, onCom
   useEffect(() => {
     setForm((current) => current.source_location_id ? current : { ...current, source_location_id: activeLocationId || "" });
   }, [activeLocationId]);
-  const uniqueLevels = useMemo(() => {
-    const rows = itemPaging.items.length ? itemPaging.items : itemQuery.data?.items || [];
-    return [...new Map(rows.map((row) => [row.item.id, row])).values()];
-  }, [itemPaging.items, itemQuery.data?.items]);
+  const itemLevels = itemPaging.items.length ? itemPaging.items : itemQuery.data?.items || [];
+  const uniqueLevels = [...new Map(itemLevels.map((row) => [row.item.id, row])).values()];
   const [transfer, result] = useTransferStockMutation();
   const reset = () => {
     setForm({ item_id: "", source_location_id: activeLocationId || "", destination_location_id: "", quantity: "", batch_number: "", reason: "Location transfer" });

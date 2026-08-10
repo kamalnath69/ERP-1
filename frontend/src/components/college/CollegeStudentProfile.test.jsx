@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import CollegeStudentProfile from "./CollegeStudentProfile";
 
 
-jest.mock("@/components/charts/BusinessChart", () => ({
+vi.mock("@/components/charts/BusinessChart", () => ({
   __esModule: true,
   default: ({ ariaLabel }) => ariaLabel || "Business chart",
 }));
@@ -59,7 +59,7 @@ test("renders readiness coverage and active student interventions", () => {
   const html = renderToStaticMarkup(<CollegeStudentProfile
     query={studentQuery}
     canReviewFees
-    onReviewFees={jest.fn()}
+    onReviewFees={vi.fn()}
   />);
 
   expect(html).toContain("Evidence-backed readiness");
@@ -76,7 +76,7 @@ test("keeps internship clearance focused in placements", () => {
     query={studentQuery}
     defaultTab="placements"
     canReviewFees
-    onReviewFees={jest.fn()}
+    onReviewFees={vi.fn()}
   />);
 
   expect(html).toContain("Internship prerequisite");

@@ -3,16 +3,16 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { BusinessProvider, useBusiness } from "./BusinessContext";
 
-jest.mock("react-redux", () => ({
-  useDispatch: () => jest.fn(),
+vi.mock("react-redux", () => ({
+  useDispatch: () => vi.fn(),
   useSelector: () => "campus-1",
 }));
 
-jest.mock("@/contexts/AuthContext", () => ({
+vi.mock("@/contexts/AuthContext", () => ({
   useAuth: () => ({ user: { id: "user-1", is_super_admin: false } }),
 }));
 
-jest.mock("@/store/api/baseApi", () => ({
+vi.mock("@/store/api/baseApi", () => ({
   useGetQuery: () => ({
     data: {
       data: {
@@ -25,7 +25,7 @@ jest.mock("@/store/api/baseApi", () => ({
     isLoading: false,
     isFetching: false,
     error: null,
-    refetch: jest.fn(),
+    refetch: vi.fn(),
   }),
 }));
 

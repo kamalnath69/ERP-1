@@ -3,15 +3,15 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import Billing from "./Billing";
 
-jest.mock("@/contexts/AuthContext", () => ({
+vi.mock("@/contexts/AuthContext", () => ({
   useAuth: () => ({
     organization: { plan: "starter" },
     user: { first_name: "Kamal", email: "kamal@example.com" },
-    refreshMe: jest.fn(),
+    refreshMe: vi.fn(),
   }),
 }));
 
-jest.mock("@/store/api/billingApi", () => {
+vi.mock("@/store/api/billingApi", () => {
   const invoices = Array.from({ length: 6 }, (_, index) => ({
     id: `invoice-${index + 1}`,
     invoice_number: `EDV-202608-${index + 1}`,
@@ -66,7 +66,7 @@ jest.mock("@/store/api/billingApi", () => {
     isLoading: false,
     isFetching: false,
     error: null,
-    refetch: jest.fn(),
+    refetch: vi.fn(),
   }),
   useGetBillingInvoicesQuery: () => ({
     data: {
@@ -78,14 +78,14 @@ jest.mock("@/store/api/billingApi", () => {
     isLoading: false,
     isFetching: false,
     isError: false,
-    refetch: jest.fn(),
+    refetch: vi.fn(),
   }),
-  usePreviewPlanCheckoutMutation: () => [jest.fn()],
-  useCreatePlanCheckoutMutation: () => [jest.fn()],
-  useCreatePackCheckoutMutation: () => [jest.fn()],
-  useVerifyBillingPaymentMutation: () => [jest.fn()],
-  useMockPayInvoiceMutation: () => [jest.fn()],
-  useSchedulePlanChangeMutation: () => [jest.fn()],
+  usePreviewPlanCheckoutMutation: () => [vi.fn()],
+  useCreatePlanCheckoutMutation: () => [vi.fn()],
+  useCreatePackCheckoutMutation: () => [vi.fn()],
+  useVerifyBillingPaymentMutation: () => [vi.fn()],
+  useMockPayInvoiceMutation: () => [vi.fn()],
+  useSchedulePlanChangeMutation: () => [vi.fn()],
   };
 });
 

@@ -5,26 +5,26 @@ import { MemoryRouter } from "react-router-dom";
 import CollegeWorkspace from "./CollegeWorkspace";
 
 
-jest.mock("@/contexts/AuthContext", () => ({
+vi.mock("@/contexts/AuthContext", () => ({
   useAuth: () => ({ can: () => true }),
 }));
 
-jest.mock("@/features/college/collegeApi", () => {
-  const emptyResult = { data: { items: [], next_cursor: null, has_more: false }, isLoading: false, isFetching: false, isError: false, refetch: jest.fn() };
+vi.mock("@/features/college/collegeApi", () => {
+  const emptyResult = { data: { items: [], next_cursor: null, has_more: false }, isLoading: false, isFetching: false, isError: false, refetch: vi.fn() };
   const emptyPage = () => emptyResult;
-  const mutation = () => [jest.fn(), { isLoading: false }];
+  const mutation = () => [vi.fn(), { isLoading: false }];
   const applicationsResult = {
     data: { items: [{ id: "app-1", version: 1, current_stage_id: "stage-1", eligibility_status: "eligible", updated_at: "2026-08-10T10:00:00Z", student: { name: "Asha Raman", admission_number: "ADM-001" }, opportunity: { title: "Graduate Engineer" }, company: { name: "Northstar" }, stage: { name: "Applied", slug: "applied" } }], next_cursor: null, has_more: false },
-    isLoading: false, isFetching: false, isError: false, refetch: jest.fn(),
+    isLoading: false, isFetching: false, isError: false, refetch: vi.fn(),
   };
   const clearanceResult = {
     data: { items: [{ id: "student-1", student_name: "Asha Raman", admission_number: "ADM-001", program_name: "B.Tech CSE", cohort_name: "Class of 2027", clearance_status: "pending", source_updated_at: "2026-08-10T10:00:00Z" }], next_cursor: null, has_more: false },
-    isLoading: false, isFetching: false, isError: false, refetch: jest.fn(),
+    isLoading: false, isFetching: false, isError: false, refetch: vi.fn(),
   };
   const stagesResult = { data: { items: [{ id: "stage-1", name: "Applied", slug: "applied", is_enabled: true }] } };
   const referencesResult = { data: { offerings: [], programs: [], cohorts: [], courses: [] } };
   const leaderboardsResult = { data: { readiness: [], coding: [], academics: [], improvement: [] }, isLoading: false };
-  const policyResult = { data: { name: "Placement readiness", weights: { academics: 25 }, minimum_coverage_percent: 60 }, isError: false, refetch: jest.fn() };
+  const policyResult = { data: { name: "Placement readiness", weights: { academics: 25 }, minimum_coverage_percent: 60 }, isError: false, refetch: vi.fn() };
   return {
     useGetCollegeApplicationsQuery: () => applicationsResult,
     useGetCollegePipelineStagesQuery: () => stagesResult,

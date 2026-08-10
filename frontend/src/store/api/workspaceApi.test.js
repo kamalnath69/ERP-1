@@ -3,9 +3,9 @@ import http from "../../lib/http";
 import { baseApi } from "./baseApi";
 import { workspaceApi } from "./workspaceApi";
 
-jest.mock("../../lib/http", () => ({
+vi.mock("../../lib/http", () => ({
   __esModule: true,
-  default: { request: jest.fn() },
+  default: { request: vi.fn() },
 }));
 
 function testStore() {
@@ -21,7 +21,9 @@ const failure = (message) => Object.assign(new Error(message), {
 });
 
 describe("resilient workspace queries", () => {
-  beforeEach(() => http.request.mockReset());
+  beforeEach(() => {
+    http.request.mockReset();
+  });
 
   test("returns usable data and identifies a failed dependency", async () => {
     http.request.mockImplementation(({ url }) => url === "/appointments"

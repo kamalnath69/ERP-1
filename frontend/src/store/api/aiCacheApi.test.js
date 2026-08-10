@@ -3,9 +3,9 @@ import http from "../../lib/http";
 import { baseApi } from "./baseApi";
 import { aiCacheApi } from "./aiCacheApi";
 
-jest.mock("../../lib/http", () => ({
+vi.mock("../../lib/http", () => ({
   __esModule: true,
-  default: { request: jest.fn() },
+  default: { request: vi.fn() },
 }));
 
 function testStore() {

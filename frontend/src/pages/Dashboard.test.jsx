@@ -4,17 +4,17 @@ import { MemoryRouter } from "react-router-dom";
 
 import Dashboard from "./Dashboard";
 
-jest.mock("react-redux", () => ({
-  useDispatch: () => jest.fn(),
+vi.mock("react-redux", () => ({
+  useDispatch: () => vi.fn(),
   useSelector: (selector) => selector({ preferences: { dashboardLayouts: {} } }),
-  useStore: () => ({ dispatch: jest.fn(), getState: () => ({ preferences: { dashboardLayouts: {} } }), subscribe: jest.fn() }),
+  useStore: () => ({ dispatch: vi.fn(), getState: () => ({ preferences: { dashboardLayouts: {} } }), subscribe: vi.fn() }),
 }));
 
-jest.mock("@/contexts/AuthContext", () => ({
+vi.mock("@/contexts/AuthContext", () => ({
   useAuth: () => ({ user: { first_name: "Kamal" } }),
 }));
 
-jest.mock("@/contexts/BusinessContext", () => ({
+vi.mock("@/contexts/BusinessContext", () => ({
   useBusiness: () => ({
     organization: { name: "Pulse Fitness", industry: "gym" },
     locationId: "location-1",
@@ -22,7 +22,7 @@ jest.mock("@/contexts/BusinessContext", () => ({
   }),
 }));
 
-jest.mock("@/store/api/workspaceApi", () => ({
+vi.mock("@/store/api/workspaceApi", () => ({
   useGetDashboardWorkspaceQuery: () => ({
     data: {
       industry: "gym",
@@ -56,9 +56,9 @@ jest.mock("@/store/api/workspaceApi", () => ({
     isError: false,
     isFetching: false,
     error: null,
-    refetch: jest.fn(),
+    refetch: vi.fn(),
   }),
-  useSaveMyPreferenceMutation: () => [jest.fn()],
+  useSaveMyPreferenceMutation: () => [vi.fn()],
 }));
 
 test("uses a compact metric ribbon before the balanced analytics grid", () => {
