@@ -30,7 +30,7 @@ def _database_url() -> str:
 
 def _cors_origins() -> list[str]:
     configured = os.environ.get("CORS_ORIGINS", "http://localhost:3000").split(",")
-    origins = ["https://edvatiq.app", *configured]
+    origins = ["https://edvatiq.app", "https://www.edvatiq.app", *configured]
     return list(dict.fromkeys(origin.strip().rstrip("/") for origin in origins if origin.strip()))
 
 
