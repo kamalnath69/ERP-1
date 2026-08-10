@@ -132,3 +132,14 @@ Run the durable document and notification worker separately:
 cd backend
 python -m app.worker
 ```
+
+## Vercel frontend deployment
+
+Deploy only the `frontend` directory to Vercel and keep FastAPI, PostgreSQL, and workers on persistent infrastructure. In the Vercel project:
+
+1. Set **Root Directory** to `frontend`.
+2. Add `EDVATIQ_API_ORIGIN=https://your-api-domain.example` to Production and Preview.
+3. Leave `VITE_BACKEND_URL` unset so `/api/*` uses the authenticated same-origin proxy.
+4. Add the final frontend URL to the backend `APP_URL` and `CORS_ORIGINS`, enable secure cookies, then redeploy both services.
+
+The frontend Vercel configuration preserves React Router deep links, proxies API and streaming requests, and applies immutable caching only to hashed static assets.
