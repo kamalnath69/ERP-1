@@ -1,9 +1,11 @@
-"""Secure cookie authentication, email verification, recovery, and sessions."""
+"""Secure cookie authentication, payment-first registration, recovery, and sessions."""
+import hashlib
+import hmac
 import secrets
 import re
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
@@ -13,14 +15,25 @@ from app.core.database import get_db
 from app.core.deps import get_current_user
 from app.core.security import create_access_token, create_refresh_token, decode_token, hash_password, verify_password
 from app.db.seed import seed_organization_defaults
-from app.models import AuthAttempt, IndustryEnum, Location, Organization, RefreshToken, User
-from app.schemas import CodeRequest, LoginRequest, LoginResponse, RegisterOrgRequest, ResetPasswordRequest, UserOut, VerifyEmailRequest, validate_strong_password
+from app.models import AuthAttempt, IndustryEnum, Location, Organization, RefreshToken, SignupCheckout, User
+from app.schemas import (
+    CodeRequest, LoginRequest, LoginResponse, PaidSignupAccessRequest,
+    PaidSignupCheckoutRequest, PaidSignupVerifyRequest, RegisterOrgRequest,
+    ResetPasswordRequest, UserOut, VerifyEmailRequest, validate_strong_password,
+)
 from app.services.audit import log_action
 from app.services.auth_security import (
     clear_auth_cookies, client_ip, consume_auth_code, create_auth_code, identifier_hash,
     new_csrf_token, set_auth_cookies, token_hash,
 )
 from app.services.email import send_auth_code_email
+from app.services.billing import payment_config, plan_price, provider_error
+from app.services.razorpay_provider import razorpay_provider
+from app.services.signup import (
+    ACTIVE_CHECKOUT_STATUSES, CHECKOUT_TTL, checkout_response, expire_stale_checkouts,
+    finalize_signup, hash_signup_password, organization_modules, public_plan_pair,
+    public_tax_quote, trial_signup_available, valid_checkout_token, lock_organization_slug,
+)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 DUMMY_PASSWORD_HASH = hash_password("NotARealPassword123")
@@ -124,46 +137,326 @@ def _ensure_login_not_throttled(db: Session, request: Request, email: str, org_s
         raise HTTPException(429, "Too many sign-in attempts. Please wait 15 minutes")
 
 
+def _ensure_signup_not_throttled(db: Session, request: Request, email: str) -> None:
+    since = datetime.now(timezone.utc) - timedelta(minutes=15)
+    identity = identifier_hash(email)
+    ip = client_ip(request)
+    attempts = db.scalar(select(func.count(AuthAttempt.id)).where(
+        AuthAttempt.kind == "signup_checkout",
+        AuthAttempt.created_at >= since,
+        or_(AuthAttempt.identifier_hash == identity, AuthAttempt.ip_address == ip) if ip else AuthAttempt.identifier_hash == identity,
+    )) or 0
+    if attempts >= 5:
+        raise HTTPException(429, "Too many checkout attempts. Please wait 15 minutes")
+
+
 @router.get("/organization-id/availability")
 def organization_id_availability(value: str, db: Session = Depends(get_db)):
     business_id = value.strip().lower()
     if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", business_id) or not 2 <= len(business_id) <= 80:
         return {"value": business_id, "available": False, "valid": False, "message": "Use lowercase letters, numbers, and single hyphens", "suggestions": []}
+    expire_stale_checkouts(db)
+    now = datetime.now(timezone.utc)
     exists = db.execute(select(Organization.id).where(Organization.slug == business_id)).first() is not None
+    reserved = db.execute(select(SignupCheckout.id).where(
+        SignupCheckout.organization_slug == business_id,
+        SignupCheckout.status.in_(ACTIVE_CHECKOUT_STATUSES),
+        SignupCheckout.expires_at > now,
+    )).first() is not None
+    unavailable = exists or reserved
     suggestions = []
-    if exists:
+    if unavailable:
         candidates = [f"{business_id}-hq", f"{business_id}-india", f"{business_id}-2"]
         used = set(db.execute(select(Organization.slug).where(Organization.slug.in_(candidates))).scalars())
-        suggestions = [candidate for candidate in candidates if candidate not in used]
-    return {"value": business_id, "available": not exists, "valid": True, "message": "Available" if not exists else "Already used by another business", "suggestions": suggestions}
+        reserved_candidates = set(db.execute(select(SignupCheckout.organization_slug).where(
+            SignupCheckout.organization_slug.in_(candidates),
+            SignupCheckout.status.in_(ACTIVE_CHECKOUT_STATUSES),
+            SignupCheckout.expires_at > now,
+        )).scalars())
+        suggestions = [candidate for candidate in candidates if candidate not in used | reserved_candidates]
+    db.commit()
+    return {"value": business_id, "available": not unavailable, "valid": True, "message": "Available" if not unavailable else "Already used or reserved by another business", "suggestions": suggestions}
 
 
 @router.post("/register", status_code=201)
 def register_organization(body: RegisterOrgRequest, request: Request, db: Session = Depends(get_db)):
+    expire_stale_checkouts(db)
+    if not trial_signup_available(db):
+        db.commit()
+        raise HTTPException(status.HTTP_409_CONFLICT, "Free trial is unavailable. Choose a paid plan to create your workspace")
     slug = body.organization_slug.strip().lower()
+    lock_organization_slug(db, slug)
     if db.execute(select(Organization).where(Organization.slug == slug)).scalar_one_or_none():
         raise HTTPException(status.HTTP_409_CONFLICT, "Organization slug already exists")
+    if db.execute(select(SignupCheckout.id).where(
+        SignupCheckout.organization_slug == slug,
+        SignupCheckout.status.in_(ACTIVE_CHECKOUT_STATUSES),
+        SignupCheckout.expires_at > datetime.now(timezone.utc),
+    )).first():
+        raise HTTPException(status.HTTP_409_CONFLICT, "Organization slug is reserved by a pending checkout")
     try: industry = IndustryEnum(body.industry)
     except ValueError: raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid industry")
-    module_map = {
-        "gym": ["clients", "employees", "catalog", "inventory", "sales", "appointments", "gym", "ai"],
-        "salon": ["clients", "employees", "catalog", "inventory", "sales", "appointments", "salon", "ai"],
-        "clinic": ["clients", "employees", "catalog", "inventory", "sales", "appointments", "clinic", "documents", "ai"],
-        "college": ["clients", "employees", "sales", "college", "documents", "reports", "notifications", "ai"],
-    }
-    org = Organization(name=body.organization_name, slug=slug, industry=industry, enabled_modules=module_map[industry.value], contact_email=body.admin_email.lower())
+    org = Organization(name=body.organization_name, slug=slug, industry=industry, enabled_modules=organization_modules(industry.value), contact_email=body.admin_email.lower())
     db.add(org); db.flush()
     admin = User(
         organization_id=org.id, email=body.admin_email.lower(), hashed_password=hash_password(body.admin_password),
         first_name=body.admin_first_name, last_name=body.admin_last_name, is_active=True, email_verified=False,
     )
     db.add(admin); db.flush()
-    location = Location(organization_id=org.id, name=body.location_name, code="MAIN", city=body.city, is_primary=True)
+    location = Location(organization_id=org.id, name=body.location_name, code="MAIN", city=body.city, state=body.state, is_primary=True)
     db.add(location); db.flush(); seed_organization_defaults(db, org, admin, location)
     log_action(db, organization_id=org.id, user_id=admin.id, action="organization.register", resource_type="organization", resource_id=org.id, ip_address=client_ip(request))
     db.commit()
     sent, test_code = _deliver_code(db, admin, "email_verification", request)
     return {"requires_verification": True, "email": admin.email, "organization_slug": org.slug, "email_sent": sent, **({"test_code": test_code} if test_code else {})}
+
+
+def _authorized_checkout(db: Session, checkout_id: str, checkout_token: str, *, lock: bool = False) -> SignupCheckout:
+    statement = select(SignupCheckout).where(SignupCheckout.id == checkout_id)
+    if lock:
+        statement = statement.with_for_update()
+    checkout = db.execute(statement).scalar_one_or_none()
+    if not checkout or not valid_checkout_token(checkout, checkout_token):
+        raise HTTPException(404, "Signup checkout not found")
+    return checkout
+
+
+def _send_signup_verification(
+    db: Session,
+    checkout: SignupCheckout,
+    owner: User,
+    request: Request,
+) -> tuple[bool, str | None]:
+    if checkout.verification_sent_at:
+        return True, None
+    sent, test_code = _deliver_code(db, owner, "email_verification", request)
+    checkout = db.get(SignupCheckout, checkout.id)
+    checkout.verification_sent_at = datetime.now(timezone.utc)
+    db.commit()
+    return sent, test_code
+
+
+@router.post("/registration/checkout", status_code=201)
+def create_registration_checkout(
+    body: PaidSignupCheckoutRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    expire_stale_checkouts(db)
+    existing = db.execute(select(SignupCheckout).where(
+        SignupCheckout.idempotency_key == body.idempotency_key,
+    )).scalar_one_or_none()
+    if existing:
+        if body.checkout_token and valid_checkout_token(existing, body.checkout_token) and existing.status in {"ready", "completed"}:
+            key_id = payment_config()[1] or None if existing.status == "ready" else None
+            db.commit()
+            return checkout_response(existing, body.checkout_token, key_id)
+        db.commit()
+        raise HTTPException(409, "This checkout request cannot be reused. Start a new checkout")
+
+    slug = body.organization_slug.strip().lower()
+    lock_organization_slug(db, slug)
+    now = datetime.now(timezone.utc)
+    if db.execute(select(Organization.id).where(Organization.slug == slug)).first():
+        raise HTTPException(409, "Organization slug already exists")
+    if db.execute(select(SignupCheckout.id).where(
+        SignupCheckout.organization_slug == slug,
+        SignupCheckout.status.in_(ACTIVE_CHECKOUT_STATUSES),
+        SignupCheckout.expires_at > now,
+    )).first():
+        raise HTTPException(409, "Organization slug is reserved by a pending checkout")
+    try:
+        industry = IndustryEnum(body.industry)
+        organization_modules(industry.value)
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(400, "Invalid industry") from exc
+
+    definition, version = public_plan_pair(db, body.plan)
+    if definition.slug == "trial":
+        raise HTTPException(400, "Use free registration for the Trial plan")
+    subtotal = plan_price(version, body.billing_interval)
+    quote = public_tax_quote(
+        subtotal,
+        tax_enabled=version.tax_enabled,
+        gst_rate_bps=version.gst_rate_bps,
+    )
+    if quote["tax_enabled"] and not (body.state or "").strip():
+        raise HTTPException(400, "State is required to create a GST invoice")
+    _ensure_signup_not_throttled(db, request, str(body.admin_email))
+    mode, key_id, key_secret, _webhook_secret = payment_config()
+    access_token = secrets.token_urlsafe(36)
+    checkout = SignupCheckout(
+        status="creating",
+        idempotency_key=body.idempotency_key,
+        access_token_hash=token_hash(access_token),
+        organization_name=body.organization_name.strip(),
+        organization_slug=slug,
+        industry=industry.value,
+        admin_email=str(body.admin_email).strip().lower(),
+        admin_password_hash=hash_signup_password(body.admin_password),
+        admin_first_name=body.admin_first_name.strip(),
+        admin_last_name=body.admin_last_name.strip(),
+        location_name=body.location_name.strip(),
+        city=body.city.strip() if body.city else None,
+        state=body.state.strip() if body.state else None,
+        plan_version_id=version.id,
+        plan_snapshot={
+            "slug": definition.slug,
+            "name": definition.name,
+            "version": version.version,
+            "plan_version_id": version.id,
+            "ai_credits": version.included_ai_credits,
+        },
+        billing_interval=body.billing_interval,
+        subtotal_paise=quote["subtotal_paise"],
+        tax_paise=quote["tax_paise"],
+        total_paise=quote["total_paise"],
+        tax_enabled=quote["tax_enabled"],
+        gst_rate_bps=quote["gst_rate_bps"],
+        currency=quote["currency"],
+        provider_mode=mode,
+        expires_at=now + CHECKOUT_TTL,
+    )
+    db.add(checkout)
+    db.add(AuthAttempt(
+        identifier_hash=identifier_hash(str(body.admin_email)),
+        ip_address=client_ip(request),
+        kind="signup_checkout",
+        succeeded=True,
+    ))
+    db.flush()
+    if mode == "mock":
+        checkout.provider_order_id = f"mock-signup-{checkout.id}"
+    else:
+        try:
+            order = razorpay_provider(key_id, key_secret).create_order({
+                "amount": int(checkout.total_paise),
+                "currency": checkout.currency,
+                "receipt": checkout.id[:40],
+                "notes": {
+                    "signup_checkout_id": checkout.id,
+                    "plan": definition.slug,
+                    "billing_interval": checkout.billing_interval,
+                    "mode": mode,
+                },
+            })
+            checkout.provider_order_id = order["id"]
+        except Exception as exc:
+            code, message = provider_error(exc, "signup_order")
+            checkout.status = "failed"
+            checkout.last_error = code
+            checkout.admin_password_hash = None
+            db.commit()
+            raise HTTPException(502, message) from exc
+    checkout.status = "ready"
+    db.commit()
+    db.refresh(checkout)
+    return checkout_response(checkout, access_token, key_id or None)
+
+
+@router.get("/registration/checkouts/{checkout_id}")
+def registration_checkout_status(
+    checkout_id: str,
+    response: Response,
+    checkout_token: str = Header(alias="X-Signup-Token", min_length=20, max_length=200),
+    db: Session = Depends(get_db),
+):
+    response.headers["Cache-Control"] = "no-store"
+    checkout = _authorized_checkout(db, checkout_id, checkout_token, lock=True)
+    if checkout.status in ACTIVE_CHECKOUT_STATUSES and checkout.expires_at <= datetime.now(timezone.utc):
+        checkout.status = "expired"
+        db.commit()
+    key_id = payment_config()[1] or None if checkout.status == "ready" else None
+    return checkout_response(checkout, key_id=key_id)
+
+
+@router.post("/registration/checkouts/{checkout_id}/mock-pay")
+def mock_registration_payment(
+    checkout_id: str,
+    body: PaidSignupAccessRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    if settings.RAZORPAY_MODE != "mock" or settings.ENVIRONMENT == "production":
+        raise HTTPException(404, "Not available")
+    checkout = _authorized_checkout(db, checkout_id, body.checkout_token, lock=True)
+    if checkout.status != "completed" and checkout.expires_at <= datetime.now(timezone.utc):
+        checkout.status = "expired"
+        db.commit()
+        raise HTTPException(409, "This signup checkout has expired")
+    if checkout.status != "completed":
+        checkout.status = "paid"
+    organization, owner, created = finalize_signup(
+        db,
+        checkout,
+        f"mock-payment-{checkout.id}",
+        ip_address=client_ip(request),
+    )
+    db.commit()
+    sent, test_code = _send_signup_verification(db, checkout, owner, request) if created else (True, None)
+    return {
+        "ok": True,
+        "status": "completed",
+        "requires_verification": True,
+        "email": owner.email,
+        "organization_slug": organization.slug,
+        "email_sent": sent,
+        **({"test_code": test_code} if test_code else {}),
+    }
+
+
+@router.post("/registration/payment/verify")
+def verify_registration_payment(
+    body: PaidSignupVerifyRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    mode, key_id, key_secret, _webhook_secret = payment_config()
+    if mode == "mock":
+        raise HTTPException(404, "Not available")
+    checkout = _authorized_checkout(db, body.checkout_id, body.checkout_token, lock=True)
+    if checkout.provider_mode != mode or checkout.provider_order_id != body.razorpay_order_id:
+        raise HTTPException(409, "Payment does not match this signup checkout")
+    expected = hmac.new(
+        key_secret.encode(),
+        f"{checkout.provider_order_id}|{body.razorpay_payment_id}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(expected, body.razorpay_signature):
+        raise HTTPException(400, "Payment verification failed")
+    try:
+        payment = razorpay_provider(key_id, key_secret).fetch_payment(body.razorpay_payment_id)
+    except Exception as exc:
+        provider_error(exc, "signup_payment_fetch")
+        raise HTTPException(502, "Payment is being confirmed. Please check again shortly") from exc
+    if (
+        payment.get("order_id") != checkout.provider_order_id
+        or int(payment.get("amount", 0)) != int(checkout.total_paise)
+        or payment.get("currency") != checkout.currency
+    ):
+        raise HTTPException(409, "Payment details do not match this signup checkout")
+    if payment.get("status") != "captured":
+        return {"ok": True, "status": payment.get("status", "pending")}
+
+    if checkout.status != "completed":
+        checkout.status = "paid"
+    organization, owner, created = finalize_signup(
+        db,
+        checkout,
+        body.razorpay_payment_id,
+        ip_address=client_ip(request),
+    )
+    db.commit()
+    sent, test_code = _send_signup_verification(db, checkout, owner, request) if created else (True, None)
+    return {
+        "ok": True,
+        "status": "completed",
+        "requires_verification": True,
+        "email": owner.email,
+        "organization_slug": organization.slug,
+        "email_sent": sent,
+        **({"test_code": test_code} if test_code else {}),
+    }
 
 
 @router.post("/email/request-code")

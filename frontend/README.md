@@ -29,15 +29,9 @@ Production output is written to `build/` to preserve the existing deployment con
 
 ## Vercel
 
-Create one Vercel project for the frontend and set its **Root Directory** to `frontend`. The checked-in `vercel.mjs` selects Vite, builds to `build/`, supports React Router deep links, and proxies `/api/*` to the separately hosted backend.
+Create one Vercel project for the frontend and set its **Root Directory** to `frontend`. The checked-in `vercel.json` selects Vite, builds to `build/`, supports React Router deep links, and proxies `/api/*` to the separately hosted backend.
 
-Add this Vercel environment variable for Production and Preview:
-
-```dotenv
-EDVATIQ_API_ORIGIN=https://api.example.com
-```
-
-Use only the origin, with no trailing `/api` path. Do not set `VITE_BACKEND_URL` in Vercel; keeping it unset makes browser requests use the same-origin `/api` proxy, which preserves authentication and CSRF cookies.
+Do not set `VITE_BACKEND_URL`, `REACT_APP_BACKEND_URL`, or `EDVATIQ_API_ORIGIN` in Vercel. Browser requests use the same-origin `/api` proxy defined in `vercel.json`, which preserves authentication and CSRF cookies.
 
 Configure the external backend for the deployed frontend URL:
 

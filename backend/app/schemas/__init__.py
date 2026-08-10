@@ -28,11 +28,31 @@ class RegisterOrgRequest(BaseModel):
     admin_last_name: str = ""
     location_name: str = "Main Location"
     city: str | None = None
+    state: str | None = Field(default=None, max_length=100)
 
     @field_validator("admin_password")
     @classmethod
     def strong_password(cls, value: str) -> str:
         return validate_strong_password(value)
+
+
+class PaidSignupCheckoutRequest(RegisterOrgRequest):
+    plan: str = Field(min_length=2, max_length=60, pattern=r"^[a-z0-9-]+$")
+    billing_interval: str = Field(default="monthly", pattern=r"^(monthly|annual)$")
+    idempotency_key: str = Field(min_length=8, max_length=160)
+    checkout_token: str | None = Field(default=None, min_length=20, max_length=200)
+
+
+class PaidSignupVerifyRequest(BaseModel):
+    checkout_id: str
+    checkout_token: str = Field(min_length=20, max_length=200)
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+
+
+class PaidSignupAccessRequest(BaseModel):
+    checkout_token: str = Field(min_length=20, max_length=200)
 
 
 class LoginRequest(BaseModel):

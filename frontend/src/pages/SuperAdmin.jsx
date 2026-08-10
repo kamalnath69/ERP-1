@@ -115,9 +115,84 @@ function PlanAssignmentPanel({ organization, subscription, refresh }) {
 
 function Plans() {
   const { data, loading, error, reload } = useLoad("/super-admin/plans", []);
-  const features = useLoad("/super-admin/features", []); const [editing, setEditing] = useState(null);
+  const features = useLoad("/super-admin/features", []);
+  const [editing, setEditing] = useState(null);
+  const [updating, setUpdating] = useState("");
+  const clone = async (plan) => {
+    const latest = plan.versions?.[0];
+    try {
+      await api.post(`/super-admin/plans/${plan.id}/versions`, {
+        monthly_price_paise: latest?.monthly_price_paise,
+        annual_price_paise: latest?.annual_price_paise,
+        annual_discount_bps: latest?.annual_discount_bps || 0,
+        tax_enabled: latest?.tax_enabled ?? true,
+        gst_rate_bps: latest?.gst_rate_bps || 1800,
+        included_ai_credits: latest?.included_ai_credits || 0,
+        support_level: latest?.support_level || "standard",
+        ai_tier: latest?.ai_tier || "basic",
+        entitlements: latest?.entitlements || {},
+      });
+      toast.success("Draft version created"); reload();
+    } catch (error) { toast.error(message(error)); }
+  };
+  const publish = async (version) => {
+    if (!window.confirm("Publish this plan version? Existing customers stay on their purchased version.")) return;
+    try {
+      await api.post(`/super-admin/plans/versions/${version.id}/publish`, { version_lock: version.version_lock, idempotency_key: crypto.randomUUID() });
+      toast.success("Plan version published"); reload();
+    } catch (error) { toast.error(message(error)); }
+  };
+  const setAvailability = async (plan, field, value) => {
+    if (plan.slug === "trial" && value === false && !window.confirm("Disable Trial for new accounts? Existing trial workspaces are not affected, but new users must pay before an account is created.")) return;
+    setUpdating(`${plan.id}:${field}`);
+    try {
+      await api.patch(`/super-admin/plans/${plan.id}`, { [field]: value });
+      api.invalidate("billing");
+      toast.success(plan.slug === "trial" && value === false ? "Trial disabled for new accounts" : "Plan availability updated");
+      reload();
+    } catch (error) { toast.error(message(error)); }
+    finally { setUpdating(""); }
+  };
+  if (loading) return <PageSkeleton />;
+  if (error) return <LoadError retry={reload} />;
+  return <div className="space-y-6">
+    <PageIntro eyebrow="Plans & Features" title="Build offers without breaking promises" text="Control which plans new customers can see and purchase. Published versions remain unchanged for existing subscribers." />
+    <div className="grid gap-5 xl:grid-cols-2">{data.map((plan) => {
+      const latest = plan.versions?.[0];
+      return <div key={plan.id} className="rounded-2xl border bg-card p-5">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div><div className="flex items-center gap-2"><div className="font-display text-2xl font-bold">{plan.name}</div><State value={plan.is_active && plan.is_public ? "live" : "hidden"} /></div><p className="mt-1 text-sm text-muted-foreground">{plan.description}</p></div>
+          <Button variant="outline" onClick={() => clone(plan)}>New version</Button>
+        </div>
+        <PlanAvailabilityControls plan={plan} updating={updating} setAvailability={setAvailability} />
+        <div className="mt-5 grid grid-cols-2 gap-3"><SmallMetric label="Monthly" value={latest?.monthly_price_paise == null ? "Custom" : money(latest.monthly_price_paise)} /><SmallMetric label="Annual" value={latest?.annual_price_paise == null ? "Custom" : money(latest.annual_price_paise)} /><SmallMetric label="AI credits" value={format(latest?.included_ai_credits)} /><SmallMetric label="Support" value={title(latest?.support_level)} /></div>
+        <div className="mt-4 space-y-2">{plan.versions?.slice(0, 4).map((version) => <div key={version.id} className="flex items-center justify-between rounded-xl bg-surface-subtle px-3 py-2"><div className="text-sm">Version {version.version} <State value={version.status} /></div>{version.status === "draft" && <div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => setEditing({ plan, version })}>Edit</Button><Button size="sm" onClick={() => publish(version)}>Publish</Button></div>}</div>)}</div>
+      </div>;
+    })}</div>
+    {editing && <Drawer title={`${editing.plan.name} / Version ${editing.version.version}`} close={() => setEditing(null)}><PlanEditor version={editing.version} features={features.data} onSaved={() => { setEditing(null); reload(); }} /></Drawer>}
+  </div>;
+}
+
+function PlanAvailabilityControls({ plan, updating, setAvailability }) {
+  const control = (field, titleText, help) => <label className="flex items-center justify-between gap-3 rounded-lg bg-card px-3 py-2.5 text-sm"><span><span className="block font-medium">{titleText}</span><span className="block text-xs text-muted-foreground">{help}</span></span><input aria-label={`${plan.name} ${titleText.toLowerCase()}`} type="checkbox" className="h-5 w-5 accent-[hsl(var(--primary))]" checked={plan[field]} disabled={updating === `${plan.id}:${field}`} onChange={(event) => setAvailability(plan, field, event.target.checked)} /></label>;
+  return <><div className="mt-4 grid gap-2 rounded-xl border bg-surface-subtle p-3 sm:grid-cols-2">{control("is_active", "New signups", "Allow new accounts on this plan")}{control("is_public", "Public pricing", "Show on the landing page")}</div>{plan.slug === "trial" && (!plan.is_active || !plan.is_public) && <div className="mt-3 rounded-lg bg-warning/10 px-3 py-2 text-xs text-foreground">Paid checkout is required before any new workspace account is created.</div>}</>;
+}
+
+function LegacyPlans() {
+  const { data, loading, error, reload } = useLoad("/super-admin/plans", []);
+  const features = useLoad("/super-admin/features", []); const [editing, setEditing] = useState(null); const [updating, setUpdating] = useState("");
   const clone = async (plan) => { const latest = plan.versions?.[0]; try { await api.post(`/super-admin/plans/${plan.id}/versions`, { monthly_price_paise: latest?.monthly_price_paise, annual_price_paise: latest?.annual_price_paise, annual_discount_bps: latest?.annual_discount_bps || 0, tax_enabled: latest?.tax_enabled ?? true, gst_rate_bps: latest?.gst_rate_bps || 1800, included_ai_credits: latest?.included_ai_credits || 0, support_level: latest?.support_level || "standard", ai_tier: latest?.ai_tier || "basic", entitlements: latest?.entitlements || {} }); toast.success("Draft version created"); reload(); } catch (error) { toast.error(message(error)); } };
   const publish = async (version) => { if (!window.confirm("Publish this plan version? Existing clients will stay on their purchased version.")) return; try { await api.post(`/super-admin/plans/versions/${version.id}/publish`, { version_lock: version.version_lock, idempotency_key: crypto.randomUUID() }); toast.success("Plan version published"); reload(); } catch (error) { toast.error(message(error)); } };
+  const setAvailability = async (plan, field, value) => {
+    if (plan.slug === "trial" && value === false && !window.confirm("Disable Trial for new accounts? Existing trial workspaces are not affected, but new users must pay before an account is created.")) return;
+    setUpdating(`${plan.id}:${field}`);
+    try {
+      await api.patch(`/super-admin/plans/${plan.id}`, { [field]: value });
+      toast.success(plan.slug === "trial" && value === false ? "Trial disabled for new accounts" : "Plan availability updated");
+      reload();
+    } catch (error) { toast.error(message(error)); }
+    finally { setUpdating(""); }
+  };
   if (loading) return <PageSkeleton />; if (error) return <LoadError retry={reload} />;
   return <div className="space-y-6"><PageIntro eyebrow="Plans & Features" title="Build offers without breaking promises" text="Published versions stay unchanged for existing subscribers. New versions can be prepared safely as drafts." /><div className="grid gap-5 xl:grid-cols-2">{data.map((plan) => { const latest = plan.versions?.[0]; return <div key={plan.id} className="rounded-2xl border bg-card p-5"><div className="flex justify-between"><div><div className="font-display text-2xl font-bold">{plan.name}</div><p className="mt-1 text-sm text-muted-foreground">{plan.description}</p></div><Button variant="outline" onClick={() => clone(plan)}>New version</Button></div><div className="mt-5 grid grid-cols-2 gap-3"><SmallMetric label="Monthly" value={latest?.monthly_price_paise == null ? "Custom" : money(latest.monthly_price_paise)} /><SmallMetric label="Annual" value={latest?.annual_price_paise == null ? "Custom" : money(latest.annual_price_paise)} /><SmallMetric label="AI credits" value={format(latest?.included_ai_credits)} /><SmallMetric label="Support" value={title(latest?.support_level)} /></div><div className="mt-4 space-y-2">{plan.versions?.slice(0, 4).map((version) => <div key={version.id} className="flex items-center justify-between rounded-xl bg-surface-subtle px-3 py-2"><div className="text-sm">Version {version.version} <State value={version.status} /></div>{version.status === "draft" && <div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => setEditing({ plan, version })}>Edit</Button><Button size="sm" onClick={() => publish(version)}>Publish</Button></div>}</div>)}</div></div>; })}</div>{editing && <Drawer title={`${editing.plan.name} · Version ${editing.version.version}`} close={() => setEditing(null)}><PlanEditor version={editing.version} features={features.data} onSaved={() => { setEditing(null); reload(); }} /></Drawer>}</div>;
 }

@@ -25,6 +25,8 @@ def payment_config(require_webhook: bool = False) -> tuple[str, str, str, str]:
     mode = settings.RAZORPAY_MODE
     key_id, key_secret, webhook_secret = settings.razorpay_credentials()
     if mode == "mock":
+        if settings.ENVIRONMENT == "production":
+            raise HTTPException(503, "Online payments are not configured")
         return mode, "", "", ""
     expected_prefix = f"rzp_{mode}_"
     if not key_id or not key_secret:

@@ -19,8 +19,8 @@ import {
   useVerifyBillingPaymentMutation,
 } from "@/store/api/billingApi";
 import useCursorPagination from "@/hooks/useCursorPagination";
+import { loadRazorpayCheckout } from "@/lib/razorpay";
 
-let checkoutLoader;
 const AI_COMPARISON_CODES = new Set([
   "documents.knowledge",
   "ai.actions",
@@ -33,20 +33,6 @@ const AI_TIER_LABELS = {
   actions: "AI with actions",
   enterprise: "Enterprise AI",
 };
-
-function loadCheckout() {
-  if (window.Razorpay) return Promise.resolve();
-  if (checkoutLoader) return checkoutLoader;
-  checkoutLoader = new Promise((resolve, reject) => {
-    const script = document.createElement("script");
-    script.src = "https://checkout.razorpay.com/v1/checkout.js";
-    script.async = true;
-    script.onload = resolve;
-    script.onerror = () => reject(new Error("The payment window could not be loaded"));
-    document.body.appendChild(script);
-  });
-  return checkoutLoader;
-}
 
 export default function Billing() {
   const { organization, user, refreshMe } = useAuth();
@@ -148,7 +134,7 @@ export default function Billing() {
       await refreshMe(); refetch(); setReview(null); setWorking(false);
       return;
     }
-    await loadCheckout();
+    await loadRazorpayCheckout();
     const options = checkoutOptions(label);
     if (checkout.checkout_type === "subscription") {
       const modal = new window.Razorpay({

@@ -1,0 +1,125 @@
+"""Public plan visibility and payment-first workspace creation."""
+from uuid import uuid4
+
+from fastapi.testclient import TestClient
+from sqlalchemy import select
+
+from app.core.config import settings
+from app.core.database import SessionLocal
+from app.models import Invoice, Organization, PlanDefinition, PlatformPayment, SignupCheckout, Subscription, User
+from server import app
+
+
+client = TestClient(app, raise_server_exceptions=True)
+
+
+def registration_body(slug: str, **overrides) -> dict:
+    body = {
+        "organization_name": "Northstar Fitness",
+        "organization_slug": slug,
+        "industry": "gym",
+        "admin_email": f"owner-{slug}@example.com",
+        "admin_password": "StrongPass123",
+        "admin_first_name": "Kavya",
+        "admin_last_name": "Raman",
+        "location_name": "Main Location",
+        "city": "Chennai",
+        "state": "Tamil Nadu",
+    }
+    body.update(overrides)
+    return body
+
+
+def test_public_catalog_contains_only_available_published_plans():
+    response = client.get("/api/billing/public/plans")
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["currency"] == "INR"
+    assert payload["trial_enabled"] == any(plan["id"] == "trial" for plan in payload["plans"])
+    assert all(plan["monthly_quote"] is None or "total_paise" in plan["monthly_quote"] for plan in payload["plans"])
+    assert all("version_id" in plan for plan in payload["plans"])
+
+
+def test_disabled_trial_blocks_free_account_creation():
+    slug = f"paid-only-{uuid4().hex[:10]}"
+    with SessionLocal() as db:
+        trial = db.execute(select(PlanDefinition).where(PlanDefinition.slug == "trial")).scalar_one()
+        original = (trial.is_active, trial.is_public)
+        trial.is_active = False
+        db.commit()
+    try:
+        response = client.post("/api/auth/register", json=registration_body(slug))
+        assert response.status_code == 409, response.text
+        assert "paid plan" in response.json()["detail"].lower()
+        with SessionLocal() as db:
+            assert not db.execute(select(Organization.id).where(Organization.slug == slug)).first()
+    finally:
+        with SessionLocal() as db:
+            trial = db.execute(select(PlanDefinition).where(PlanDefinition.slug == "trial")).scalar_one()
+            trial.is_active, trial.is_public = original
+            db.commit()
+
+
+def test_mock_payment_creates_account_only_after_completion(monkeypatch):
+    monkeypatch.setattr(settings, "RAZORPAY_MODE", "mock")
+    slug = f"paid-signup-{uuid4().hex[:10]}"
+    checkout_id = None
+    organization_id = None
+    try:
+        response = client.post("/api/auth/registration/checkout", json={
+            **registration_body(slug),
+            "plan": "growth",
+            "billing_interval": "monthly",
+            "idempotency_key": str(uuid4()),
+        })
+        assert response.status_code == 201, response.text
+        checkout = response.json()
+        checkout_id = checkout["checkout_id"]
+        assert checkout["status"] == "ready"
+        assert checkout["mock_mode"] is True
+
+        with SessionLocal() as db:
+            assert not db.execute(select(Organization.id).where(Organization.slug == slug)).first()
+            pending = db.get(SignupCheckout, checkout_id)
+            assert pending.admin_password_hash and pending.organization_id is None
+
+        completed = client.post(
+            f"/api/auth/registration/checkouts/{checkout_id}/mock-pay",
+            json={"checkout_token": checkout["checkout_token"]},
+        )
+        assert completed.status_code == 200, completed.text
+        assert completed.json()["requires_verification"] is True
+
+        with SessionLocal() as db:
+            organization = db.execute(select(Organization).where(Organization.slug == slug)).scalar_one()
+            organization_id = organization.id
+            owner = db.execute(select(User).where(User.organization_id == organization.id)).scalar_one()
+            subscription = db.execute(select(Subscription).where(Subscription.organization_id == organization.id)).scalar_one()
+            invoice = db.execute(select(Invoice).where(Invoice.organization_id == organization.id)).scalar_one()
+            pending = db.get(SignupCheckout, checkout_id)
+            assert owner.email_verified is False
+            assert subscription.plan == "growth" and subscription.status == "active"
+            assert invoice.status == "paid" and invoice.fulfillment_status == "fulfilled"
+            assert pending.status == "completed" and pending.admin_password_hash is None
+
+        repeated = client.post(
+            f"/api/auth/registration/checkouts/{checkout_id}/mock-pay",
+            json={"checkout_token": checkout["checkout_token"]},
+        )
+        assert repeated.status_code == 200, repeated.text
+        with SessionLocal() as db:
+            assert len(db.execute(select(Organization.id).where(Organization.slug == slug)).all()) == 1
+            assert len(db.execute(select(Invoice).where(Invoice.organization_id == organization_id)).scalars().all()) == 1
+    finally:
+        with SessionLocal() as db:
+            if checkout_id:
+                row = db.get(SignupCheckout, checkout_id)
+                if row:
+                    db.delete(row)
+                    db.flush()
+            if organization_id:
+                db.query(PlatformPayment).filter(PlatformPayment.organization_id == organization_id).delete()
+                organization = db.get(Organization, organization_id)
+                if organization:
+                    db.delete(organization)
+            db.commit()

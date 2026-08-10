@@ -54,6 +54,11 @@ class PlanDraftBody(BaseModel):
     version_lock: int | None = None
 
 
+class PlanAvailabilityBody(BaseModel):
+    is_active: bool | None = None
+    is_public: bool | None = None
+
+
 class RechargePackBody(BaseModel):
     name: str = Field(min_length=2, max_length=100)
     credits: int = Field(gt=0, le=10_000_000)
@@ -395,6 +400,31 @@ def plans(actor=Depends(require_platform_permission("plans.view")), db: Session 
             "provider_plans": [serialize(mapping) for mapping in db.execute(select(ProviderPlanMapping).where(ProviderPlanMapping.plan_version_id == version.id)).scalars()],
         } for version in versions]})
     return result
+
+
+@router.patch("/plans/{plan_id}")
+def update_plan_availability(
+    plan_id: str,
+    body: PlanAvailabilityBody,
+    actor=Depends(require_platform_permission("plans.manage")),
+    db: Session = Depends(get_db),
+):
+    if not body.model_fields_set:
+        raise HTTPException(400, "Choose an availability setting to update")
+    if any(value is None for value in body.model_dump(exclude_unset=True).values()):
+        raise HTTPException(400, "Plan availability must be true or false")
+    plan = db.get(PlanDefinition, plan_id)
+    if not plan:
+        raise HTTPException(404, "Plan not found")
+    before = {"is_active": plan.is_active, "is_public": plan.is_public}
+    if "is_active" in body.model_fields_set:
+        plan.is_active = bool(body.is_active)
+    if "is_public" in body.model_fields_set:
+        plan.is_public = bool(body.is_public)
+    changes = {"before": before, "after": {"is_active": plan.is_active, "is_public": plan.is_public}}
+    _audit(db, actor, "platform.plan_availability_updated", "plan", plan.id, changes=changes)
+    db.commit()
+    return serialize(plan)
 
 
 @router.post("/plans/{plan_id}/versions")

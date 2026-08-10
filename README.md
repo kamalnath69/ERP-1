@@ -116,7 +116,9 @@ RAZORPAY_LIVE_KEY_SECRET=
 RAZORPAY_LIVE_WEBHOOK_SECRET=
 ```
 
-Use `RAZORPAY_MODE=mock` for local payments without Razorpay, `test` for Razorpay's simulated payment flow, and `live` only after live credentials and the live webhook are configured. Existing `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, and `RAZORPAY_WEBHOOK_SECRET` values remain supported when their key prefix matches the selected mode.
+Use `RAZORPAY_MODE=mock` for local payments without Razorpay, `test` for Razorpay's simulated payment flow, and `live` only after live credentials and the live webhook are configured. Production fails closed when mock mode is selected. Existing `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, and `RAZORPAY_WEBHOOK_SECRET` values remain supported when their key prefix matches the selected mode.
+
+Public signup prices come from active, public, published plan versions. If Super Admin disables Trial, `/api/auth/register` is blocked and a workspace is provisioned only after the initial paid-plan order is verified as captured.
 
 Configure the active Razorpay dashboard webhook as:
 
@@ -138,8 +140,7 @@ python -m app.worker
 Deploy only the `frontend` directory to Vercel and keep FastAPI, PostgreSQL, and workers on persistent infrastructure. In the Vercel project:
 
 1. Set **Root Directory** to `frontend`.
-2. Add `EDVATIQ_API_ORIGIN=https://your-api-domain.example` to Production and Preview.
-3. Leave `VITE_BACKEND_URL` unset so `/api/*` uses the authenticated same-origin proxy.
-4. Add the final frontend URL to the backend `APP_URL` and `CORS_ORIGINS`, enable secure cookies, then redeploy both services.
+2. Leave `VITE_BACKEND_URL`, `REACT_APP_BACKEND_URL`, and `EDVATIQ_API_ORIGIN` unset so `/api/*` uses the authenticated same-origin proxy configured in `frontend/vercel.json`.
+3. Add the final frontend URL to the backend `APP_URL` and `CORS_ORIGINS`, enable secure cookies, then redeploy both services.
 
 The frontend Vercel configuration preserves React Router deep links, proxies API and streaming requests, and applies immutable caching only to hashed static assets.

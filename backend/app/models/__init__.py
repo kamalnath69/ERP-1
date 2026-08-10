@@ -56,7 +56,7 @@ from app.models.platform import (
     OrganizationEntitlementOverride, PlanDefinition, PlanEntitlement, PlanVersion,
     PlatformMFADevice, PlatformPayment, PlatformPermission, PlatformRecoveryCode,
     PlatformRefund, PlatformRole, PlatformRolePermission, PlatformSetting, PlatformSettlement,
-    PlatformUserRole, RechargePack, RetentionArchive, SupportSession, WalletLedger,
+    PlatformUserRole, RechargePack, RetentionArchive, SignupCheckout, SupportSession, WalletLedger,
     WalletCreditGrant, WalletReservation,
 )
 

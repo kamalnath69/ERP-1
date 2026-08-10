@@ -276,7 +276,14 @@ def sync_granular_role_permissions(db: Session, permissions: list[Permission]) -
                 existing.add((role.id, permission.id))
 
 
-def seed_organization_defaults(db: Session, org: Organization, owner: User, primary_location: Location) -> None:
+def seed_organization_defaults(
+    db: Session,
+    org: Organization,
+    owner: User,
+    primary_location: Location,
+    *,
+    create_trial: bool = True,
+) -> None:
     permissions = ensure_permissions(db)
     by_code = {p.code: p for p in permissions}
     role_specs = {
@@ -330,17 +337,18 @@ def seed_organization_defaults(db: Session, org: Organization, owner: User, prim
     db.add(employee)
     db.flush()
     db.add(EmployeeLocation(employee_id=employee.id, location_id=primary_location.id, is_primary=True))
-    trial_version = db.execute(
-        select(PlanVersion).join(PlanDefinition, PlanDefinition.id == PlanVersion.plan_id)
-        .where(PlanDefinition.slug == "trial", PlanVersion.status == "published")
-        .order_by(PlanVersion.version.desc())
-    ).scalars().first()
-    from app.services.subscriptions import start_trial
-    subscription = Subscription(
-        organization_id=org.id, plan="trial", status="trialing", seats=5,
-        plan_version_id=trial_version.id if trial_version else None,
-    )
-    db.add(start_trial(subscription))
+    if create_trial:
+        trial_version = db.execute(
+            select(PlanVersion).join(PlanDefinition, PlanDefinition.id == PlanVersion.plan_id)
+            .where(PlanDefinition.slug == "trial", PlanVersion.status == "published")
+            .order_by(PlanVersion.version.desc())
+        ).scalars().first()
+        from app.services.subscriptions import start_trial
+        subscription = Subscription(
+            organization_id=org.id, plan="trial", status="trialing", seats=5,
+            plan_version_id=trial_version.id if trial_version else None,
+        )
+        db.add(start_trial(subscription))
     from datetime import datetime, timezone
     db.add(Job(organization_id=org.id, kind="refresh_client_signals", payload={"organization_id": org.id}, run_at=datetime.now(timezone.utc), idempotency_key="client-signals-bootstrap"))
     for module in org.enabled_modules:

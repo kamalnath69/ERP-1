@@ -167,6 +167,24 @@ export default defineConfig(({ mode }) => {
       outDir: "build",
       emptyOutDir: true,
       sourcemap: env.GENERATE_SOURCEMAP !== "false",
+      rolldownOptions: {
+        output: {
+          codeSplitting: {
+            groups: [
+              {
+                name: "zrender-vendor",
+                test: /node_modules[\\/]zrender[\\/]/,
+                priority: 30,
+              },
+              {
+                name: "echarts-vendor",
+                test: /node_modules[\\/]echarts[\\/]/,
+                priority: 20,
+              },
+            ],
+          },
+        },
+      },
     },
     test: {
       globals: true,

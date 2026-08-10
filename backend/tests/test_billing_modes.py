@@ -61,3 +61,11 @@ def test_mock_mode_never_loads_credentials(monkeypatch):
         live=("rzp_live_example", "live-secret", "live-webhook"),
     )
     assert _payment_config() == ("mock", "", "", "")
+
+
+def test_production_never_accepts_mock_payments(monkeypatch):
+    set_credentials(monkeypatch, mode="mock")
+    monkeypatch.setattr(settings, "ENVIRONMENT", "production")
+    with pytest.raises(HTTPException) as error:
+        _payment_config()
+    assert error.value.status_code == 503

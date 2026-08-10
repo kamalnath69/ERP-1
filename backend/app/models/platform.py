@@ -1,7 +1,7 @@
 """Platform control-plane models for plans, billing, wallet, security, and support."""
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -53,6 +53,52 @@ class PlanVersion(TimestampMixin, Base):
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     published_by_user_id: Mapped[str | None] = mapped_column(UUID_STR, ForeignKey("users.id", ondelete="SET NULL"))
     version_lock: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+
+
+class SignupCheckout(TimestampMixin, Base):
+    """Short-lived paid signup state; this is not an organization account."""
+
+    __tablename__ = "signup_checkouts"
+    __table_args__ = (
+        Index("ix_signup_checkouts_slug_status_expiry", "organization_slug", "status", "expires_at"),
+        Index("ix_signup_checkouts_status_expiry", "status", "expires_at"),
+    )
+
+    id: Mapped[str] = uuid_pk()
+    status: Mapped[str] = mapped_column(String(30), default="creating", nullable=False, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(160), unique=True, nullable=False)
+    access_token_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    organization_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    organization_slug: Mapped[str] = mapped_column(String(80), nullable=False)
+    industry: Mapped[str] = mapped_column(String(30), nullable=False)
+    admin_email: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    admin_password_hash: Mapped[str | None] = mapped_column(String(300))
+    admin_first_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    admin_last_name: Mapped[str] = mapped_column(String(100), default="", nullable=False)
+    location_name: Mapped[str] = mapped_column(String(200), default="Main Location", nullable=False)
+    city: Mapped[str | None] = mapped_column(String(100))
+    state: Mapped[str | None] = mapped_column(String(100))
+    plan_version_id: Mapped[str | None] = mapped_column(
+        UUID_STR, ForeignKey("plan_versions.id", ondelete="SET NULL"), index=True
+    )
+    plan_snapshot: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    billing_interval: Mapped[str] = mapped_column(String(20), nullable=False)
+    subtotal_paise: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    tax_paise: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    total_paise: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    tax_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    gst_rate_bps: Mapped[int] = mapped_column(Integer, default=1800, nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), default="INR", nullable=False)
+    provider_mode: Mapped[str] = mapped_column(String(20), nullable=False)
+    provider_order_id: Mapped[str | None] = mapped_column(String(140), unique=True, index=True)
+    provider_payment_id: Mapped[str | None] = mapped_column(String(140), unique=True, index=True)
+    organization_id: Mapped[str | None] = mapped_column(
+        UUID_STR, ForeignKey("organizations.id", ondelete="SET NULL"), index=True
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    verification_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(String(240))
 
 
 class PlanEntitlement(Base):

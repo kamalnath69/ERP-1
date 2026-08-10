@@ -5,7 +5,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.orm import Session
@@ -16,7 +16,7 @@ from app.core.deps import require_permissions
 from app.models import (
     AIWallet, BillingCheckoutAttempt, FeatureDefinition, Invoice, Job, Organization,
     PaymentEvent, PlanDefinition, PlanEntitlement, PlanVersion, PlatformPayment,
-    ProviderPlanMapping, RechargePack, Subscription, SubscriptionSchedule,
+    ProviderPlanMapping, RechargePack, SignupCheckout, Subscription, SubscriptionSchedule,
     WalletCreditGrant,
 )
 from app.schemas import CreateOrderRequest, VerifyRazorpayPaymentRequest
@@ -29,6 +29,8 @@ from app.services.billing import (
 from app.services.wallet import ensure_wallet, wallet_summary
 from app.services.subscriptions import effective_subscription_status, start_trial
 from app.services.cursor_pagination import decode_cursor, encode_cursor, page_size
+from app.services.signup import finalize_signup, public_plan_payload, public_plan_rows
+from app.services.auth_security import client_ip
 
 router = APIRouter(prefix="/billing", tags=["billing"])
 
@@ -121,6 +123,21 @@ def _plan_payload(db: Session, organization: Organization, definition: PlanDefin
         "client_limit": entitlements.get("limits.clients"), "location_limit": entitlements.get("limits.locations"),
         "storage_limit_mb": entitlements.get("limits.storage_mb"), "entitlements": entitlements,
         "features": included, "feature_names": [item["name"] for item in included],
+    }
+
+
+@router.get("/public/plans")
+def public_plans(response: Response, db: Session = Depends(get_db)):
+    response.headers["Cache-Control"] = "no-store"
+    payload = [public_plan_payload(db, definition, version) for definition, version in public_plan_rows(db)]
+    mode = settings.RAZORPAY_MODE
+    key_id, key_secret, _webhook_secret = settings.razorpay_credentials()
+    payment_available = (mode == "mock" and settings.ENVIRONMENT != "production") or bool(key_id and key_secret and key_id.startswith(f"rzp_{mode}_"))
+    return {
+        "plans": payload,
+        "trial_enabled": any(plan["id"] == "trial" for plan in payload),
+        "payment_available": payment_available,
+        "currency": "INR",
     }
 
 
@@ -490,7 +507,7 @@ def create_order(body: CreateOrderRequest, user=Depends(require_permissions("bil
 
 @router.post("/orders/{invoice_id}/mock-pay")
 def mock_pay(invoice_id: str, user=Depends(require_permissions("billing.manage")), db: Session = Depends(get_db)):
-    if settings.RAZORPAY_MODE != "mock":
+    if settings.RAZORPAY_MODE != "mock" or settings.ENVIRONMENT == "production":
         raise HTTPException(404, "Not available")
     invoice = db.get(Invoice, invoice_id)
     if not invoice or invoice.organization_id != user.organization_id:
@@ -567,20 +584,55 @@ async def webhook(request: Request, db: Session = Depends(get_db)):
                 activate_subscription_schedule(db, linked_subscription, period_start=period_start, period_end=period_end)
     order_id = payment.get("order_id") or order.get("id")
     invoice = db.execute(select(Invoice).where(Invoice.razorpay_order_id == order_id, Invoice.provider_mode == mode)).scalar_one_or_none() if order_id else None
+    signup_checkout = db.execute(select(SignupCheckout).where(
+        SignupCheckout.provider_order_id == order_id,
+        SignupCheckout.provider_mode == mode,
+    ).with_for_update()).scalar_one_or_none() if order_id and not invoice else None
+    signup_owner = None
+    signup_created = False
+    signup_review_error = None
     payment_id = payment.get("id")
     if invoice and event_type in {"payment.captured", "order.paid"}:
         received = int(payment.get("amount") or order.get("amount_paid") or 0)
         currency = payment.get("currency") or order.get("currency")
         if received == int(invoice.amount_paise) and currency == invoice.currency:
             fulfill_invoice(db, invoice, payment_id)
+    elif signup_checkout and payment_id and event_type in {"payment.captured", "order.paid"}:
+        received = int(payment.get("amount") or order.get("amount_paid") or 0)
+        currency = payment.get("currency") or order.get("currency")
+        if received == int(signup_checkout.total_paise) and currency == signup_checkout.currency:
+            if signup_checkout.status != "completed":
+                signup_checkout.status = "paid"
+            try:
+                _organization, signup_owner, signup_created = finalize_signup(
+                    db,
+                    signup_checkout,
+                    payment_id,
+                    ip_address=client_ip(request),
+                )
+            except HTTPException as exc:
+                if signup_checkout.status != "manual_review":
+                    raise
+                signup_review_error = str(exc.detail)
     elif invoice and event_type == "payment.failed" and invoice.status != "paid":
         invoice.status = "failed"
+    elif signup_checkout and event_type == "payment.failed" and signup_checkout.status == "ready":
+        signup_checkout.last_error = "payment_failed"
     elif payment_id and linked_subscription and event_type == "payment.captured" and not db.execute(select(PlatformPayment).where(PlatformPayment.provider_payment_id == payment_id)).scalar_one_or_none():
         db.add(PlatformPayment(organization_id=linked_subscription.organization_id, provider_payment_id=payment_id, provider_order_id=order_id, mode=mode, amount_paise=int(payment.get("amount") or 0), currency=payment.get("currency") or "INR", status="captured", captured_at=datetime.now(timezone.utc), meta={"subscription_id": linked_subscription.id}))
     db.add(PaymentEvent(
-        organization_id=invoice.organization_id if invoice else (linked_subscription.organization_id if linked_subscription else None),
+        organization_id=invoice.organization_id if invoice else (
+            signup_checkout.organization_id if signup_checkout else (
+                linked_subscription.organization_id if linked_subscription else None
+            )
+        ),
         event_type=event_type, provider_event_id=provider_event_id, provider_mode=mode,
+        status="needs_review" if signup_review_error else "processed",
+        error=signup_review_error,
         processed_at=datetime.now(timezone.utc), payload={**data, "edvatiq_payment_mode": mode},
     ))
     db.commit()
-    return {"ok": True}
+    if signup_created and signup_owner:
+        from app.api.v1.auth import _send_signup_verification
+        _send_signup_verification(db, signup_checkout, signup_owner, request)
+    return {"ok": True, **({"needs_review": True} if signup_review_error else {})}
