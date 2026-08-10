@@ -1,6 +1,9 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "vite",
+  "git": {
+    "deploymentEnabled": false
+  },
   "buildCommand": "yarn build",
   "outputDirectory": "build",
   "rewrites": [
