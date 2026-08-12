@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.middleware.cors import CORSMiddleware
 
@@ -13,6 +14,7 @@ from app.core.config import settings
 from app.core.database import SessionLocal
 from app.services.auth_security import valid_csrf_token
 from app.services.realtime import publish_change
+from app.core.validation_errors import ValidationProblem
 import app.models  # noqa: F401
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s - %(message)s")
@@ -129,7 +131,59 @@ def health(): return {"status": "ok"}
 
 @app.exception_handler(HTTPException)
 async def http_error(_request: Request, exc: HTTPException):
-    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail, "error": {"code": f"http_{exc.status_code}", "message": exc.detail}})
+    message = exc.detail if isinstance(exc.detail, str) else (
+        exc.detail.get("message", "The request could not be completed")
+        if isinstance(exc.detail, dict) else "The request could not be completed"
+    )
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail, "error": {"code": f"http_{exc.status_code}", "message": message}})
+
+
+def _validation_payload(errors: list[dict]) -> dict:
+    sanitized = []
+    field_errors: dict[str, list[str]] = {}
+    form_errors: list[str] = []
+    for item in errors:
+        location = [str(part) if not isinstance(part, int) else part for part in item.get("loc", ())]
+        message = str(item.get("msg") or "Invalid value")
+        error_type = str(item.get("type") or "value_error")
+        sanitized.append({"loc": location, "type": error_type, "msg": message})
+        path = ".".join(str(part) for part in location if str(part) not in {"body", "query", "path", "header"})
+        if path:
+            field_errors.setdefault(path, []).append(message)
+        else:
+            form_errors.append(message)
+    return {
+        "detail": sanitized,
+        "error": {
+            "code": "validation_error",
+            "message": "Please correct the highlighted fields.",
+            "field_errors": field_errors,
+            "form_errors": form_errors,
+        },
+    }
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_error(_request: Request, exc: RequestValidationError):
+    return JSONResponse(status_code=422, content=_validation_payload(exc.errors()))
+
+
+@app.exception_handler(ValidationProblem)
+async def domain_validation_error(_request: Request, exc: ValidationProblem):
+    detail = []
+    for path, messages in exc.field_errors.items():
+        for message in messages:
+            detail.append({"loc": ["body", *path.split(".")], "type": "value_error", "msg": message})
+    detail.extend({"loc": ["body"], "type": "value_error", "msg": message} for message in exc.form_errors)
+    return JSONResponse(status_code=exc.status_code, content={
+        "detail": detail,
+        "error": {
+            "code": "validation_error",
+            "message": exc.message,
+            "field_errors": exc.field_errors,
+            "form_errors": exc.form_errors,
+        },
+    })
 
 
 app.include_router(api)

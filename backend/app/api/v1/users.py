@@ -1,12 +1,13 @@
 """User management endpoints (tenant admin) + self profile + permission overrides."""
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.deps import CurrentUser, require_permissions
 from app.core.security import hash_password, verify_password
+from app.schemas.validation import RequestModel
 from app.models import (
     Permission,
     Role,
@@ -35,7 +36,7 @@ from app.ai.personalization import normalize_assistant_preferences
 router = APIRouter(prefix="/users", tags=["users"])
 
 
-class PreferenceUpdate(BaseModel):
+class PreferenceUpdate(RequestModel):
     value: dict
     version: int | None = Field(default=None, ge=1)
 
@@ -43,16 +44,16 @@ class PreferenceUpdate(BaseModel):
 PREFERENCE_NAMESPACES = {"appearance", "assistant", "dashboard", "navigation", "notifications"}
 
 
-class MFAStartBody(BaseModel):
-    current_password: str
+class MFAStartBody(RequestModel):
+    current_password: str = Field(min_length=1, max_length=128)
 
 
-class MFACodeBody(BaseModel):
-    code: str = Field(min_length=6, max_length=12)
+class MFACodeBody(RequestModel):
+    code: str = Field(min_length=6, max_length=64)
 
 
 class MFASensitiveBody(MFACodeBody):
-    current_password: str
+    current_password: str = Field(min_length=1, max_length=128)
 
 
 # ---------- Self profile (no explicit permission required) ---------- #
@@ -64,7 +65,7 @@ def my_profile(user: CurrentUser):
 
 @router.patch("/me/profile", response_model=UserOut)
 def update_my_profile(body: ProfileUpdate, user: CurrentUser, db: Session = Depends(get_db)):
-    for k, v in body.model_dump(exclude_none=True).items():
+    for k, v in body.model_dump(exclude_unset=True).items():
         setattr(user, k, v)
     db.commit()
     db.refresh(user)

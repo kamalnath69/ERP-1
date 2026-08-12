@@ -1,4 +1,6 @@
 import React, { useEffect, useState } from "react";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { useForm } from "react-hook-form";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   ArrowClockwise, ArrowLeft, Barbell, CalendarBlank, Camera, CaretRight, CheckCircle,
@@ -14,6 +16,7 @@ import {
   CursorListFooter, DrawerForm, EmptyState, ErrorState, PageShell, StatusBadge, Surface, formatMetric,
 } from "@/components/system";
 import { Button } from "@/components/ui/button";
+import { FieldError, FormRootError } from "@/components/ui/form";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator,
   DropdownMenuTrigger,
@@ -42,6 +45,12 @@ import CollegeStudentProfile from "@/components/college/CollegeStudentProfile";
 import { useGetCollegeStudentPlacementProfileQuery } from "@/features/college/collegeApi";
 import { QUERY_POLICIES, withSkip } from "@/store/api/queryPolicies";
 import useCursorPagination from "@/hooks/useCursorPagination";
+import { usePendingAction, useStableIdempotencyKey } from "@/hooks/usePendingAction";
+import {
+  applyApiErrors, cancellationSchema, clientCommitmentSchema, clientMeasurementSchema,
+  clientMemorySchema, clientProfileEditSchema, FORM_OPTIONS, membershipSchema,
+  profileFreezeSchema, validateFile,
+} from "@/lib/validation";
 
 
 const EMPTY_ACTION = { type: "", values: {} };
@@ -61,6 +70,7 @@ export default function ClientProfile() {
   const [voiding, setVoiding] = useState(null);
   const [photoUrl, setPhotoUrl] = useState("");
   const [busy, setBusy] = useState(false);
+  const fileActions = usePendingAction();
 
   const workspaceQuery = useGetClientWorkspaceQuery({ clientId, range: "30d" }, QUERY_POLICIES.operational);
   const { data: workspace } = workspaceQuery;
@@ -185,25 +195,39 @@ export default function ClientProfile() {
       setAction(EMPTY_ACTION);
     } catch (error) {
       toast.error(errorMessage(error, "This update could not be saved"));
+      throw error;
     } finally {
       setBusy(false);
     }
   };
 
   const uploadClientFile = async (event, kind = "attachment") => {
+    const input = event.target;
     const file = event.target.files?.[0];
     if (!file) return;
-    const formData = new FormData();
-    formData.append("file", file);
-    formData.append("media_kind", kind);
-    formData.append("visibility", "team");
-    try {
-      await uploadMedia({ clientId, formData }).unwrap();
-      toast.success(kind === "profile_photo" ? "Profile photo updated" : "Private file uploaded");
-    } catch (error) {
-      toast.error(errorMessage(error, "Upload failed"));
-    }
-    event.target.value = "";
+    const profilePhoto = kind === "profile_photo";
+    const maximum = profilePhoto ? 5 * 1024 * 1024 : file.type.startsWith("video/") ? 100 * 1024 * 1024 : 20 * 1024 * 1024;
+    const validation = validateFile(file, {
+      label: profilePhoto ? "Profile photo" : "Private file",
+      maxBytes: maximum,
+      extensions: profilePhoto ? [".jpg", ".jpeg", ".png", ".webp"] : [".jpg", ".jpeg", ".png", ".webp", ".mp4", ".webm", ".pdf", ".docx", ".txt"],
+      mimeTypes: profilePhoto ? ["image/jpeg", "image/png", "image/webp"] : ["image/jpeg", "image/png", "image/webp", "video/mp4", "video/webm", "application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "text/plain"],
+    });
+    if (validation) { toast.error(validation); input.value = ""; return; }
+    await fileActions.run(`upload:${kind}`, async () => {
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("media_kind", kind);
+      formData.append("visibility", "team");
+      try {
+        await uploadMedia({ clientId, formData }).unwrap();
+        toast.success(profilePhoto ? "Profile photo updated" : "Private file uploaded");
+      } catch (error) {
+        toast.error(errorMessage(error, "Upload failed"));
+      } finally {
+        input.value = "";
+      }
+    });
   };
 
   const openPrivateFile = async (item) => {
@@ -235,7 +259,7 @@ export default function ClientProfile() {
             <div className="grid h-16 w-16 place-items-center overflow-hidden rounded-2xl border bg-secondary sm:h-20 sm:w-20">
               {photoUrl ? <img src={photoUrl} alt={fullName} className="h-full w-full object-cover" /> : <span className="font-display text-3xl">{client.first_name?.[0]}</span>}
             </div>
-            {workspace.actions.manage_media && <label className="absolute -bottom-1 -right-1 grid h-7 w-7 cursor-pointer place-items-center rounded-lg bg-accent text-accent-foreground shadow"><Camera size={15} /><input hidden type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => uploadClientFile(event, "profile_photo")} /></label>}
+            {workspace.actions.manage_media && <label aria-busy={fileActions.isPending("upload:profile_photo")} className={`absolute -bottom-1 -right-1 grid h-7 w-7 place-items-center rounded-lg bg-accent text-accent-foreground shadow ${fileActions.isPending("upload:profile_photo") ? "cursor-wait opacity-60" : "cursor-pointer"}`}><Camera size={15} /><input hidden disabled={fileActions.isPending("upload:profile_photo")} type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => uploadClientFile(event, "profile_photo")} /></label>}
           </div>
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2"><span className="overline">{identityNumber}</span><StatusBadge status={industry.profile?.status || client.status} /></div>
@@ -304,6 +328,7 @@ export default function ClientProfile() {
       workspace={workspace}
       media={mediaQuery.data}
       mediaLoading={mediaQuery.isLoading}
+      uploadPending={fileActions.isPending("upload:attachment")}
       openAction={(type, values = {}) => { setDetailsOpen(false); setAction({ type, values }); }}
       upload={uploadClientFile}
       entityLabel={singularLabel}
@@ -313,7 +338,7 @@ export default function ClientProfile() {
         catch (error) { toast.error(errorMessage(error, "File could not be removed")); }
       }}
     />
-    <ActionDrawer action={action} client={client} entityLabel={singularLabel} busy={busy} close={() => setAction(EMPTY_ACTION)} submit={submitAction} />
+    <ActionDrawer key={`${action.type}:${action.values?.id || "new"}`} action={action} client={client} entityLabel={singularLabel} busy={busy} close={() => setAction(EMPTY_ACTION)} submit={submitAction} />
     <MembershipCheckout
       checkout={checkout}
       onOpenChange={(open) => !open && setCheckout(null)}
@@ -518,7 +543,7 @@ function Progress({ data, canAdd, add }) {
 }
 
 
-function DetailsDrawer({ open, onOpenChange, workspace, media, mediaLoading, openAction, upload, openFile, removeFile, entityLabel }) {
+function DetailsDrawer({ open, onOpenChange, workspace, media, mediaLoading, uploadPending, openAction, upload, openFile, removeFile, entityLabel }) {
   const client = workspace.client;
   const isCollege = workspace.industry === "college";
   const hasContact = client.phone || client.email || client.address;
@@ -529,13 +554,13 @@ function DetailsDrawer({ open, onOpenChange, workspace, media, mediaLoading, ope
       {client.notes && <section><SectionTitle title="Profile note" /><Surface className="mt-3 p-4"><p className="whitespace-pre-wrap text-sm leading-6 text-muted-foreground">{client.notes}</p></Surface></section>}
       {(workspace.memory.length > 0 || workspace.actions.manage_memory) && <section><SectionTitle title={isCollege ? "Student notes" : "Relationship memory"} action={workspace.actions.manage_memory && <Button size="sm" variant="outline" onClick={() => openAction("memory")}><Plus />Add</Button>} />{workspace.memory.length ? <div className="mt-3 space-y-2">{workspace.memory.map((item) => <Surface key={item.id} className="p-4"><div className="overline">{sentence(item.category)}</div><div className="mt-2 font-semibold">{item.label}</div><p className="mt-1 text-sm text-muted-foreground">{item.value}</p></Surface>)}</div> : <p className="mt-3 text-sm text-muted-foreground">No {isCollege ? "student" : "relationship"} notes recorded.</p>}</section>}
       {(workspace.commitments.length > 0 || workspace.actions.manage_memory) && <section><SectionTitle title="Follow-ups" action={workspace.actions.manage_memory && <Button size="sm" variant="outline" onClick={() => openAction("commitment")}><Plus />Add</Button>} />{workspace.commitments.length ? <div className="mt-3 space-y-2">{workspace.commitments.map((item) => <Surface key={item.id} className="p-4"><div className="flex items-center justify-between gap-3"><div className="font-semibold">{item.title}</div><StatusBadge status={item.status} /></div>{item.due_at && <div className="mt-2 text-xs text-muted-foreground">Due {dateTime(item.due_at)}</div>}</Surface>)}</div> : <p className="mt-3 text-sm text-muted-foreground">No follow-ups recorded.</p>}</section>}
-      {workspace.actions.view_media && <section><SectionTitle title="Private files" action={workspace.actions.manage_media && <label className="inline-flex cursor-pointer items-center rounded-xl border px-3 py-2 text-sm"><FileArrowUp className="mr-2" />Upload<input hidden type="file" accept="image/jpeg,image/png,image/webp,video/mp4,video/webm,.pdf,.docx,.txt" onChange={upload} /></label>} />{mediaLoading ? <div className="mt-3 h-24 animate-pulse rounded-xl bg-secondary" /> : media?.length ? <div className="mt-3 space-y-2">{media.map((item) => <Surface key={item.id} className="flex items-center gap-3 p-4"><span className="state-icon shrink-0"><FileArrowUp /></span><div className="min-w-0 flex-1"><div className="truncate text-sm font-semibold">{item.caption || item.document.name}</div><div className="mt-1 text-xs text-muted-foreground">{sentence(item.media_kind)} / {Math.ceil(item.document.size_bytes / 1024)} KB</div></div><Button size="sm" variant="outline" onClick={() => openFile(item)}>Open</Button>{workspace.actions.manage_media && <Button size="sm" variant="ghost" className="text-danger" onClick={() => removeFile(item)}>Remove</Button>}</Surface>)}</div> : <p className="mt-3 text-sm text-muted-foreground">No private files uploaded.</p>}</section>}
+      {workspace.actions.view_media && <section><SectionTitle title="Private files" action={workspace.actions.manage_media && <label aria-busy={uploadPending} className={`inline-flex items-center rounded-xl border px-3 py-2 text-sm ${uploadPending ? "cursor-wait opacity-60" : "cursor-pointer"}`}><FileArrowUp className="mr-2" />{uploadPending ? "Uploading..." : "Upload"}<input hidden disabled={uploadPending} type="file" accept="image/jpeg,image/png,image/webp,video/mp4,video/webm,.pdf,.docx,.txt" onChange={upload} /></label>} />{mediaLoading ? <div className="mt-3 h-24 animate-pulse rounded-xl bg-secondary" /> : media?.length ? <div className="mt-3 space-y-2">{media.map((item) => <Surface key={item.id} className="flex items-center gap-3 p-4"><span className="state-icon shrink-0"><FileArrowUp /></span><div className="min-w-0 flex-1"><div className="truncate text-sm font-semibold">{item.caption || item.document.name}</div><div className="mt-1 text-xs text-muted-foreground">{sentence(item.media_kind)} / {Math.ceil(item.document.size_bytes / 1024)} KB</div></div><Button size="sm" variant="outline" onClick={() => openFile(item)}>Open</Button>{workspace.actions.manage_media && <Button size="sm" variant="ghost" className="text-danger" onClick={() => removeFile(item)}>Remove</Button>}</Surface>)}</div> : <p className="mt-3 text-sm text-muted-foreground">No private files uploaded.</p>}</section>}
     </div>
   </DrawerForm>;
 }
 
 
-function ActionDrawer({ action, client, entityLabel, busy, close, submit }) {
+function LegacyActionDrawer({ action, client, entityLabel, busy, close, submit }) {
   const [values, setValues] = useState({});
   useEffect(() => {
     if (!action.type) return;
@@ -559,8 +584,54 @@ function ActionDrawer({ action, client, entityLabel, busy, close, submit }) {
   </DrawerForm>;
 }
 
+function ActionDrawer({ action, client, entityLabel, busy, close, submit }) {
+  const schemas = {
+    edit: clientProfileEditSchema,
+    memory: clientMemorySchema,
+    commitment: clientCommitmentSchema,
+    measurement: clientMeasurementSchema,
+    freeze: profileFreezeSchema,
+  };
+  const defaults = {
+    edit: {
+      first_name: client?.first_name || "", last_name: client?.last_name || "", phone: client?.phone || "",
+      email: client?.email || "", address: client?.address || "", notes: client?.notes || "",
+      status: client?.status || "active", whatsapp_consent: Boolean(client?.whatsapp_consent),
+      email_consent: Boolean(client?.email_consent), version: client?.version || 1, ...action.values,
+    },
+    memory: { category: "preference", label: "", value: "", visibility: "team", ...action.values },
+    commitment: { title: "", description: "", due_at: "", ...action.values },
+    measurement: { measured_on: today(), weight_kg: "", height_cm: "", body_fat_percent: "", waist_cm: "", notes: "", ...action.values },
+    freeze: { frozen_from: today(), frozen_until: today(), ...action.values },
+  };
+  const formApi = useForm({ resolver: zodResolver(schemas[action.type] || clientMemorySchema), defaultValues: defaults[action.type] || defaults.memory, ...FORM_OPTIONS });
+  const { clearErrors, formState, handleSubmit, register, setError, setValue, watch } = formApi;
+  const values = watch();
+  const title = { edit: `Edit ${entityLabel.toLowerCase()}`, memory: `Add ${entityLabel === "Student" ? "student" : "relationship"} note`, commitment: "Add follow-up", measurement: "Add measurement", freeze: "Freeze membership" }[action.type] || "Update";
+  const save = handleSubmit(async (validated) => {
+    clearErrors("root.server");
+    try {
+      await submit(action.type, validated);
+    } catch (error) {
+      applyApiErrors(error, setError, { fallback: "This update could not be saved" });
+    }
+  });
+  const closeDrawer = (open) => { if (!open && (busy || formState.isSubmitting)) return; if (!open) close(); };
+  return <DrawerForm open={Boolean(action.type)} onOpenChange={closeDrawer} title={title} description={action.type === "freeze" ? "Check-in access pauses and the term is extended when the membership resumes." : "Save only information that is useful to the team."}>
+    <form noValidate onSubmit={save} className="space-y-5">
+      {action.type === "edit" && <><div className="grid gap-4 sm:grid-cols-2"><Field label="First name" error={formState.errors.first_name}><Input {...register("first_name")} aria-invalid={Boolean(formState.errors.first_name)} /></Field><Field label="Last name" error={formState.errors.last_name}><Input {...register("last_name")} aria-invalid={Boolean(formState.errors.last_name)} /></Field><Field label="Phone" error={formState.errors.phone}><Input inputMode="tel" {...register("phone")} aria-invalid={Boolean(formState.errors.phone)} /></Field><Field label="Email" error={formState.errors.email}><Input type="email" {...register("email")} aria-invalid={Boolean(formState.errors.email)} /></Field></div><Field label="Address" error={formState.errors.address}><Textarea {...register("address")} aria-invalid={Boolean(formState.errors.address)} /></Field><Field label="Internal profile note" error={formState.errors.notes}><Textarea {...register("notes")} aria-invalid={Boolean(formState.errors.notes)} /></Field><Field label="Status" error={formState.errors.status}><Select value={values.status || "active"} onValueChange={(status) => setValue("status", status, { shouldDirty: true, shouldValidate: true })}><SelectTrigger aria-invalid={Boolean(formState.errors.status)}><SelectValue /></SelectTrigger><SelectContent>{["active", "inactive", "blocked"].map((status) => <SelectItem key={status} value={status}>{sentence(status)}</SelectItem>)}</SelectContent></Select></Field><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={Boolean(values.whatsapp_consent)} onChange={(event) => setValue("whatsapp_consent", event.target.checked, { shouldDirty: true, shouldValidate: true })} />WhatsApp consent recorded</label><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={Boolean(values.email_consent)} onChange={(event) => setValue("email_consent", event.target.checked, { shouldDirty: true })} />Email consent recorded</label></>}
+      {action.type === "memory" && <><Field label="Type" error={formState.errors.category}><Select value={values.category} onValueChange={(category) => setValue("category", category, { shouldDirty: true, shouldValidate: true })}><SelectTrigger aria-invalid={Boolean(formState.errors.category)}><SelectValue /></SelectTrigger><SelectContent>{["preference", "goal", "language", "concern", "service_preference", "communication"].map((value) => <SelectItem key={value} value={value}>{sentence(value)}</SelectItem>)}</SelectContent></Select></Field><Field label="Short label" error={formState.errors.label}><Input {...register("label")} aria-invalid={Boolean(formState.errors.label)} /></Field><Field label="What should the team remember?" error={formState.errors.value}><Textarea rows={5} {...register("value")} aria-invalid={Boolean(formState.errors.value)} /></Field><Field label="Visibility" error={formState.errors.visibility}><Select value={values.visibility} onValueChange={(visibility) => setValue("visibility", visibility, { shouldDirty: true, shouldValidate: true })}><SelectTrigger aria-invalid={Boolean(formState.errors.visibility)}><SelectValue /></SelectTrigger><SelectContent>{["team", "managers", "assigned_staff", "author_only", "clinical"].map((value) => <SelectItem key={value} value={value}>{sentence(value)}</SelectItem>)}</SelectContent></Select></Field></>}
+      {action.type === "commitment" && <><Field label="Follow-up" error={formState.errors.title}><Input {...register("title")} aria-invalid={Boolean(formState.errors.title)} /></Field><Field label="Details" error={formState.errors.description}><Textarea {...register("description")} aria-invalid={Boolean(formState.errors.description)} /></Field><Field label="Due date and time" error={formState.errors.due_at}><Input type="datetime-local" {...register("due_at")} aria-invalid={Boolean(formState.errors.due_at)} /></Field></>}
+      {action.type === "measurement" && <><Field label="Measured on" error={formState.errors.measured_on}><Input type="date" {...register("measured_on")} aria-invalid={Boolean(formState.errors.measured_on)} /></Field><div className="grid grid-cols-2 gap-4">{[["weight_kg", "Weight kg"], ["height_cm", "Height cm"], ["body_fat_percent", "Body fat %"], ["waist_cm", "Waist cm"]].map(([key, label]) => <Field key={key} label={label} error={formState.errors[key]}><Input inputMode="decimal" {...register(key)} aria-invalid={Boolean(formState.errors[key])} /></Field>)}</div><Field label="Notes" error={formState.errors.notes}><Textarea {...register("notes")} aria-invalid={Boolean(formState.errors.notes)} /></Field></>}
+      {action.type === "freeze" && <><Field label="Freeze from" error={formState.errors.frozen_from}><Input type="date" min={today()} {...register("frozen_from")} aria-invalid={Boolean(formState.errors.frozen_from)} /></Field><Field label="Freeze until" error={formState.errors.frozen_until}><Input type="date" min={values.frozen_from || today()} {...register("frozen_until")} aria-invalid={Boolean(formState.errors.frozen_until)} /></Field></>}
+      <FormRootError error={formState.errors.root?.server} />
+      <Button type="submit" loading={busy || formState.isSubmitting} loadingText="Saving update..." className="w-full">Save update</Button>
+    </form>
+  </DrawerForm>;
+}
 
-function MembershipCheckout({ checkout, onOpenChange, client, plans, locationId }) {
+
+function LegacyMembershipCheckout({ checkout, onOpenChange, client, plans, locationId }) {
   const [form, setForm] = useState({ plan_id: "", starts_on: today(), payment_option: "", partial_amount: "", payment_method: "upi", payment_reference: "", interstate: false });
   const [createMembership, createState] = useCreateMembershipMutation();
   const [renewMembership, renewState] = useRenewMembershipMutation();
@@ -610,8 +681,76 @@ function MembershipCheckout({ checkout, onOpenChange, client, plans, locationId 
   </DrawerForm>;
 }
 
+function MembershipCheckout({ checkout, onOpenChange, client, plans, locationId }) {
+  const [createMembership, createState] = useCreateMembershipMutation();
+  const [renewMembership, renewState] = useRenewMembershipMutation();
+  const idempotency = useStableIdempotencyKey();
+  const open = Boolean(checkout);
+  const renewal = checkout?.mode === "renewal";
+  const formApi = useForm({
+    resolver: zodResolver(membershipSchema),
+    defaultValues: { client_id: client.id, plan_id: "", starts_on: today(), payment_option: "", partial_amount: "", payment_method: "upi", payment_reference: "", interstate: false },
+    ...FORM_OPTIONS,
+  });
+  const { clearErrors, formState, handleSubmit, register, reset, setError, setValue, watch } = formApi;
+  const form = watch();
+  useEffect(() => {
+    if (!open) return;
+    reset({ client_id: client.id, plan_id: checkout.membership?.plan_id || plans[0]?.id || "", starts_on: today(), payment_option: "", partial_amount: "", payment_method: "upi", payment_reference: "", interstate: false });
+    idempotency.reset();
+  }, [open, checkout?.membership?.id, plans[0]?.id, client.id]);
+  const quoteQuery = useGetMembershipQuoteQuery({ planId: form.plan_id, clientId: client.id, kind: renewal ? "renewal" : "activation", interstate: form.interstate }, { skip: !open || !form.plan_id });
+  const quote = quoteQuery.data;
+  const paymentNeeded = ["full", "partial"].includes(form.payment_option);
+  const submit = handleSubmit(async (values) => {
+    clearErrors("root.server");
+    if (!quote) {
+      setError("root.server", { type: "quote", message: "Wait for the authoritative charge to load" });
+      return;
+    }
+    if (values.payment_option === "partial" && Math.round(values.partial_amount * 100) >= Number(quote.total_paise || 0)) {
+      setError("partial_amount", { type: "maximum", message: "Partial payment must be below the invoice total" }, { shouldFocus: true });
+      return;
+    }
+    const payload = {
+      plan_id: values.plan_id,
+      payment_option: values.payment_option,
+      partial_payment_paise: values.payment_option === "partial" ? Math.round(values.partial_amount * 100) : null,
+      payment_method: values.payment_option === "later" ? null : values.payment_method,
+      payment_reference: values.payment_option === "later" ? null : values.payment_reference,
+      interstate: values.interstate,
+      idempotency_key: idempotency.current(),
+    };
+    try {
+      if (renewal) await renewMembership({ membershipId: checkout.membership.id, ...payload }).unwrap();
+      else await createMembership({ ...payload, client_id: client.id, location_id: locationId, starts_on: values.starts_on }).unwrap();
+      toast.success(renewal ? "Renewal scheduled with linked invoice" : "Membership activated with linked invoice");
+      idempotency.reset();
+      onOpenChange(false);
+    } catch (error) {
+      const normalized = applyApiErrors(error, setError, { fallback: "Membership checkout could not be completed" });
+      toast.error(normalized.message);
+    }
+  });
+  const saving = createState.isLoading || renewState.isLoading || formState.isSubmitting;
+  const close = (next) => { if (!next && saving) return; onOpenChange(next); };
+  return <DrawerForm open={open} onOpenChange={close} title={renewal ? "Renew membership" : "Activate membership"} description={renewal ? "The current term remains active. This creates the next term and its invoice." : "Review the authoritative charge and explicitly choose how payment is handled."}>
+    <form noValidate onSubmit={submit} className="space-y-6">
+      <Field label="Plan" error={formState.errors.plan_id}><Select value={form.plan_id} onValueChange={(plan_id) => setValue("plan_id", plan_id, { shouldDirty: true, shouldValidate: true })}><SelectTrigger aria-invalid={Boolean(formState.errors.plan_id)}><SelectValue placeholder="Choose plan" /></SelectTrigger><SelectContent>{plans.map((plan) => <SelectItem key={plan.id} value={plan.id}>{plan.name} / {money(plan.price_paise)}</SelectItem>)}</SelectContent></Select></Field>
+      {!renewal && <Field label="Starts on" error={formState.errors.starts_on}><Input type="date" min={today()} {...register("starts_on")} aria-invalid={Boolean(formState.errors.starts_on)} /></Field>}
+      <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={Boolean(form.interstate)} onChange={(event) => setValue("interstate", event.target.checked, { shouldDirty: true, shouldValidate: true })} />Use IGST for this invoice</label>
+      <Surface className="overflow-hidden"><div className="border-b p-4"><div className="font-semibold">Charge summary</div><div className="mt-1 text-xs text-muted-foreground">Tax settings are snapshotted onto the invoice.</div></div>{quoteQuery.isFetching ? <div className="h-36 animate-pulse bg-secondary" /> : quote ? <div className="p-4"><MoneyRow label="Base membership fee" value={quote.base_fee_paise} /><MoneyRow label="Joining fee" value={quote.joining_fee_paise} hidden={!quote.joining_fee_paise} /><MoneyRow label="Tax" value={quote.tax_paise} detail={`${quote.tax_rate_bps / 100}% ${quote.prices_include_tax ? "included" : "added"}`} /><MoneyRow label="Total" value={quote.total_paise} strong /></div> : <div className="p-4 text-sm text-muted-foreground">Choose a plan to calculate the charge.</div>}</Surface>
+      <section><div className="text-sm font-semibold">How will this invoice be paid?</div><div className="mt-3 grid gap-2 sm:grid-cols-3">{[["full", "Full payment", "Settle now"], ["partial", "Partial", "Record some now"], ["later", "Pay later", "Leave outstanding"]].map(([value, label, copy]) => <label key={value} className={`cursor-pointer rounded-xl border p-3 transition-colors ${form.payment_option === value ? "border-primary bg-primary/5" : "hover:bg-secondary"}`}><input className="sr-only" type="radio" name="payment" value={value} checked={form.payment_option === value} onChange={() => setValue("payment_option", value, { shouldDirty: true, shouldValidate: true })} /><span className="block text-sm font-semibold">{label}</span><span className="mt-1 block text-xs text-muted-foreground">{copy}</span></label>)}</div><FieldError error={formState.errors.payment_option} className="mt-2" /></section>
+      {form.payment_option === "partial" && <Field label="Amount received now (INR)" error={formState.errors.partial_amount}><Input inputMode="decimal" {...register("partial_amount")} aria-invalid={Boolean(formState.errors.partial_amount)} /></Field>}
+      {paymentNeeded && <><Field label="Payment method" error={formState.errors.payment_method}><Select value={form.payment_method || ""} onValueChange={(payment_method) => setValue("payment_method", payment_method, { shouldDirty: true, shouldValidate: true })}><SelectTrigger aria-invalid={Boolean(formState.errors.payment_method)}><SelectValue /></SelectTrigger><SelectContent>{["cash", "upi", "card", "bank"].map((method) => <SelectItem key={method} value={method}>{sentence(method)}</SelectItem>)}</SelectContent></Select></Field><Field label="Reference" error={formState.errors.payment_reference}><Input {...register("payment_reference")} placeholder="Optional transaction reference" aria-invalid={Boolean(formState.errors.payment_reference)} /></Field></>}
+      <FormRootError error={formState.errors.root?.server} />
+      <Button type="submit" loading={saving} loadingText="Completing checkout..." disabled={!quote} className="w-full">{renewal ? "Create scheduled renewal" : "Activate membership"}</Button>
+    </form>
+  </DrawerForm>;
+}
 
-function CancellationDrawer({ membership, scheduled, onOpenChange }) {
+
+function LegacyCancellationDrawer({ membership, scheduled, onOpenChange }) {
   const [form, setForm] = useState({ timing: "now", reason: "", cancel_scheduled_renewal: true });
   const [cancelMembership, state] = useCancelMembershipMutation();
   const isScheduled = membership?.status === "scheduled";
@@ -638,6 +777,40 @@ function CancellationDrawer({ membership, scheduled, onOpenChange }) {
   </DrawerForm>;
 }
 
+function CancellationDrawer({ membership, scheduled, onOpenChange }) {
+  const [cancelMembership, state] = useCancelMembershipMutation();
+  const isScheduled = membership?.status === "scheduled";
+  const formApi = useForm({ resolver: zodResolver(cancellationSchema), defaultValues: { timing: "term_end", reason: "", cancel_scheduled_renewal: true, version: 1 }, ...FORM_OPTIONS });
+  const { clearErrors, formState, handleSubmit, register, reset, setError, setValue, watch } = formApi;
+  const form = watch();
+  useEffect(() => {
+    if (membership) reset({ timing: isScheduled ? "now" : "term_end", reason: "", cancel_scheduled_renewal: true, version: membership.version });
+  }, [membership?.id, membership?.version, isScheduled]);
+  const submit = handleSubmit(async (values) => {
+    clearErrors("root.server");
+    try {
+      await cancelMembership({ membershipId: membership.id, ...values, timing: isScheduled ? "now" : values.timing }).unwrap();
+      toast.success(values.timing === "term_end" && !isScheduled ? "Cancellation scheduled" : "Membership cancelled");
+      onOpenChange(false);
+    } catch (error) {
+      const normalized = applyApiErrors(error, setError, { fallback: "Membership could not be cancelled" });
+      toast.error(normalized.message);
+    }
+  });
+  const busy = state.isLoading || formState.isSubmitting;
+  const close = (next) => { if (!next && busy) return; onOpenChange(next); };
+  return <DrawerForm open={Boolean(membership)} onOpenChange={close} title={isScheduled ? "Cancel scheduled renewal" : "Cancel membership"} description="Review the operational and financial impact before confirming.">
+    <form noValidate onSubmit={submit} className="space-y-5">
+      {!isScheduled && <Field label="When should access end?" error={formState.errors.timing}><Select value={form.timing} onValueChange={(timing) => setValue("timing", timing, { shouldDirty: true, shouldValidate: true })}><SelectTrigger aria-invalid={Boolean(formState.errors.timing)}><SelectValue /></SelectTrigger><SelectContent><SelectItem value="term_end">At term end ({dateOnly(membership?.ends_on)})</SelectItem><SelectItem value="now">Immediately</SelectItem></SelectContent></Select></Field>}
+      <Surface className="border-warning/30 bg-warning/5 p-4"><div className="flex gap-3"><WarningCircle className="mt-0.5 shrink-0 text-warning" /><div className="text-sm leading-6">{isScheduled ? "The scheduled term will be cancelled. Its fully unpaid invoice will be voided with an audit entry; a paid or partially paid renewal is blocked until refunds are supported." : form.timing === "now" ? "Check-in access ends immediately. The current term's invoice and payment history remain unchanged." : `Access remains active through ${dateOnly(membership?.ends_on)}. You can reverse this cancellation before it becomes effective.`}</div></div></Surface>
+      {scheduled && <label className="flex items-start gap-2 text-sm"><input className="mt-1" type="checkbox" checked={Boolean(form.cancel_scheduled_renewal)} onChange={(event) => setValue("cancel_scheduled_renewal", event.target.checked, { shouldDirty: true })} /><span>Also cancel the scheduled renewal and void its unpaid invoice <strong>{scheduled.invoice?.invoice_number}</strong>.</span></label>}
+      <Field label="Mandatory reason" error={formState.errors.reason}><Textarea rows={5} {...register("reason")} aria-invalid={Boolean(formState.errors.reason)} /></Field>
+      <FormRootError error={formState.errors.root?.server} />
+      <Button type="submit" loading={busy} loadingText="Cancelling membership..." className="w-full bg-danger text-white hover:bg-danger/90">Confirm cancellation</Button>
+    </form>
+  </DrawerForm>;
+}
+
 
 function PanelHeader({ title, subtitle, action }) { return <div className="flex items-start justify-between gap-4 border-b p-4 sm:p-5"><div><h2 className="font-display text-lg font-semibold sm:text-xl">{title}</h2>{subtitle && <p className="mt-1 text-xs leading-5 text-muted-foreground">{subtitle}</p>}</div>{action}</div>; }
 function ListPanel({ title, rows, render }) { return <Surface className="overflow-hidden"><PanelHeader title={title} /><div className="divide-y">{rows.map((row) => { const item = render(row); return <div key={row.id} className="p-4 sm:p-5"><div className="font-semibold">{item.title}</div>{item.meta && <div className="mt-1 text-xs text-muted-foreground">{item.meta}</div>}</div>; })}</div></Surface>; }
@@ -649,7 +822,7 @@ function operationsLabel(industry) { return industry === "gym" ? "Gym operations
 function Info({ label, value, warning }) { return <div><div className="text-[11px] text-muted-foreground">{label}</div><div className={`mt-1 text-sm font-semibold ${warning ? "text-warning" : ""}`}>{value}</div></div>; }
 function SectionTitle({ title, action }) { return <div className="flex items-center justify-between gap-3"><h3 className="font-display text-lg font-semibold">{title}</h3>{action}</div>; }
 function DetailRow({ icon: Icon, label, value }) { return <div className="flex gap-3 py-3 first:pt-0 last:pb-0"><Icon className="mt-0.5 shrink-0 text-muted-foreground" /><div><div className="text-xs text-muted-foreground">{label}</div><div className="mt-1 text-sm">{value}</div></div></div>; }
-function Field({ label, children }) { return <div className="space-y-2"><Label>{label}</Label>{children}</div>; }
+function Field({ label, children, error }) { return <div className="space-y-2"><Label>{label}</Label>{children}<FieldError error={error} /></div>; }
 function MoneyRow({ label, value, detail, strong, hidden }) { if (hidden) return null; return <div className={`flex items-center justify-between gap-4 py-2 text-sm ${strong ? "mt-2 border-t pt-4 font-display text-xl font-semibold" : ""}`}><span>{label}{detail && <span className="ml-2 text-xs font-normal text-muted-foreground">{detail}</span>}</span><span>{money(value)}</span></div>; }
 function ProfileSkeleton() { return <PageShell><div className="h-28 animate-pulse rounded-2xl bg-secondary" /><div className="h-12 w-96 max-w-full animate-pulse rounded-xl bg-secondary" /><div className="grid gap-5 xl:grid-cols-2"><div className="h-80 animate-pulse rounded-2xl bg-secondary" /><div className="h-80 animate-pulse rounded-2xl bg-secondary" /></div></PageShell>; }
 function activityIcon(type) { if (["invoice", "invoice_void", "payment"].includes(type)) return <Receipt />; if (["membership", "renewal", "cancellation", "cancellation_reversal"].includes(type)) return <Wallet />; if (type === "visit") return <CheckCircle />; return <CalendarBlank />; }

@@ -13,12 +13,13 @@ from typing import Literal
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
-from pydantic import BaseModel, Field, HttpUrl, model_validator
+from pydantic import Field, HttpUrl, model_validator
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.schemas.validation import RequestModel
 from app.core.deps import require_entitlements, require_permissions
 from app.models import (
     Client, CollegeApplicationStageEvent, CollegeAttendanceSnapshot, CollegeCareerEvidence,
@@ -41,6 +42,7 @@ from app.services.college_placement import (
 )
 from app.services.cursor_pagination import decode_cursor, encode_cursor, page_response, page_size
 from app.services.platform_security import encrypt_secret
+from app.services.upload_validation import safe_upload_name, validate_upload_signature
 
 
 def require_placement_v1(
@@ -64,7 +66,7 @@ router = APIRouter(
 )
 
 
-class ReadinessPolicyBody(BaseModel):
+class ReadinessPolicyBody(RequestModel):
     name: str = Field(default="Placement readiness", min_length=2, max_length=120)
     weights: dict[str, float]
     bands: dict[str, float]
@@ -84,7 +86,7 @@ class ReadinessPolicyBody(BaseModel):
         return self
 
 
-class CareerBody(BaseModel):
+class CareerBody(RequestModel):
     participation_status: Literal["participating", "not_participating", "on_hold"] = "participating"
     graduation_year: int | None = Field(default=None, ge=2000, le=2200)
     preferred_roles: list[str] = Field(default_factory=list, max_length=20)
@@ -97,7 +99,7 @@ class CareerBody(BaseModel):
     placement_status: Literal["seeking", "not_seeking", "placed", "joined"] = "seeking"
 
 
-class EvidenceBody(BaseModel):
+class EvidenceBody(RequestModel):
     evidence_type: Literal["skill", "project", "certification"]
     title: str = Field(min_length=1, max_length=220)
     issuer: str | None = Field(default=None, max_length=180)
@@ -110,8 +112,14 @@ class EvidenceBody(BaseModel):
     is_verified: bool = False
     details: dict = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def valid_dates(self):
+        if self.started_on and self.completed_on and self.completed_on < self.started_on:
+            raise ValueError("Completion date cannot be before the start date")
+        return self
 
-class TermResultBody(BaseModel):
+
+class TermResultBody(RequestModel):
     semester: int = Field(ge=1, le=16)
     term_id: str | None = None
     sgpa: Decimal | None = Field(default=None, ge=0, le=10)
@@ -121,8 +129,14 @@ class TermResultBody(BaseModel):
     active_backlogs: int | None = Field(default=None, ge=0, le=100)
     published_on: date | None = None
 
+    @model_validator(mode="after")
+    def valid_backlogs(self):
+        if self.active_backlogs is not None and self.total_backlogs is not None and self.active_backlogs > self.total_backlogs:
+            raise ValueError("Active backlogs cannot exceed total backlogs")
+        return self
 
-class AttendanceSnapshotBody(BaseModel):
+
+class AttendanceSnapshotBody(RequestModel):
     term_id: str | None = None
     course_id: str | None = None
     scope: str = Field(default="overall", min_length=1, max_length=180)
@@ -138,7 +152,7 @@ class AttendanceSnapshotBody(BaseModel):
         return self
 
 
-class PlacementAssessmentBody(BaseModel):
+class PlacementAssessmentBody(RequestModel):
     assessment_type: Literal["aptitude", "technical", "communication", "coding", "psychometric", "other"]
     title: str = Field(min_length=2, max_length=180)
     score_percent: Decimal | None = Field(default=None, ge=0, le=100)
@@ -147,7 +161,7 @@ class PlacementAssessmentBody(BaseModel):
     details: dict = Field(default_factory=dict)
 
 
-class PreparationBody(BaseModel):
+class PreparationBody(RequestModel):
     activity_type: str = Field(min_length=2, max_length=40)
     title: str = Field(min_length=2, max_length=180)
     status: Literal["planned", "in_progress", "completed", "cancelled"] = "completed"
@@ -157,7 +171,7 @@ class PreparationBody(BaseModel):
     details: dict = Field(default_factory=dict)
 
 
-class InterventionBody(BaseModel):
+class InterventionBody(RequestModel):
     reason_code: str = Field(min_length=2, max_length=50)
     title: str = Field(min_length=2, max_length=220)
     note: str | None = Field(default=None, max_length=3000)
@@ -166,18 +180,18 @@ class InterventionBody(BaseModel):
     due_on: date | None = None
 
 
-class InterventionUpdateBody(BaseModel):
+class InterventionUpdateBody(RequestModel):
     status: Literal["open", "snoozed", "resolved"]
     resolution_note: str | None = Field(default=None, max_length=3000)
 
 
-class CodingAccountBody(BaseModel):
+class CodingAccountBody(RequestModel):
     username: str = Field(min_length=2, max_length=120, pattern=r"^[A-Za-z0-9_.-]+$")
     consent_status: Literal["pending", "granted", "revoked"] = "pending"
     verification_status: Literal["unverified", "verified", "failed"] = "unverified"
 
 
-class CodingSnapshotBody(BaseModel):
+class CodingSnapshotBody(RequestModel):
     captured_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     easy_solved: int | None = Field(default=None, ge=0)
     medium_solved: int | None = Field(default=None, ge=0)
@@ -189,7 +203,7 @@ class CodingSnapshotBody(BaseModel):
     languages: list[str] = Field(default_factory=list, max_length=30)
 
 
-class CompanyBody(BaseModel):
+class CompanyBody(RequestModel):
     name: str = Field(min_length=2, max_length=200)
     industry: str | None = Field(default=None, max_length=100)
     website: str | None = Field(default=None, max_length=500)
@@ -199,7 +213,7 @@ class CompanyBody(BaseModel):
     notes: str | None = Field(default=None, max_length=5000)
 
 
-class StageBody(BaseModel):
+class StageBody(RequestModel):
     id: str | None = None
     name: str = Field(min_length=1, max_length=100)
     slug: str = Field(min_length=1, max_length=100, pattern=r"^[a-z0-9-]+$")
@@ -208,7 +222,7 @@ class StageBody(BaseModel):
     is_enabled: bool = True
 
 
-class StageListBody(BaseModel):
+class StageListBody(RequestModel):
     stages: list[StageBody] = Field(min_length=1, max_length=30)
 
     @model_validator(mode="after")
@@ -218,7 +232,7 @@ class StageListBody(BaseModel):
         return self
 
 
-class OpportunityBody(BaseModel):
+class OpportunityBody(RequestModel):
     company_id: str
     title: str = Field(min_length=2, max_length=220)
     opportunity_type: Literal["campus_drive", "internship", "off_campus", "apprenticeship"] = "campus_drive"
@@ -238,6 +252,10 @@ class OpportunityBody(BaseModel):
     def validate_package(self):
         if self.package_min_paise is not None and self.package_max_paise is not None and self.package_max_paise < self.package_min_paise:
             raise ValueError("Maximum package must be at least the minimum package")
+        if self.opens_at and self.deadline_at and self.deadline_at < self.opens_at:
+            raise ValueError("Opportunity deadline cannot be before its opening time")
+        if self.deadline_at and self.drive_at and self.drive_at < self.deadline_at:
+            raise ValueError("Drive time cannot be before the application deadline")
         protected = {
             "age", "caste", "category", "date_of_birth", "disability", "ethnicity",
             "gender", "guardian", "guardian_income", "marital_status", "nationality",
@@ -264,25 +282,25 @@ class OpportunityBody(BaseModel):
         return self
 
 
-class ApplicationBody(BaseModel):
+class ApplicationBody(RequestModel):
     opportunity_id: str
     student_profile_id: str
     notes: str | None = Field(default=None, max_length=5000)
 
 
-class StageMoveBody(BaseModel):
+class StageMoveBody(RequestModel):
     stage_id: str
     reason: str | None = Field(default=None, max_length=2000)
     version: int = Field(ge=1)
 
 
-class EligibilityOverrideBody(BaseModel):
+class EligibilityOverrideBody(RequestModel):
     status: Literal["eligible", "ineligible", "needs_review"]
     reason: str = Field(min_length=3, max_length=2000)
     version: int = Field(ge=1)
 
 
-class InterviewBody(BaseModel):
+class InterviewBody(RequestModel):
     interview_type: str = Field(min_length=2, max_length=40)
     scheduled_at: datetime | None = None
     status: Literal["scheduled", "completed", "cancelled", "no_show"] = "scheduled"
@@ -293,7 +311,7 @@ class InterviewBody(BaseModel):
     feedback: str | None = Field(default=None, max_length=5000)
 
 
-class OfferBody(BaseModel):
+class OfferBody(RequestModel):
     offered_role: str | None = Field(default=None, max_length=180)
     package_paise: int | None = Field(default=None, ge=0)
     offered_on: date | None = None
@@ -302,17 +320,23 @@ class OfferBody(BaseModel):
     document_id: str | None = None
     notes: str | None = Field(default=None, max_length=5000)
 
+    @model_validator(mode="after")
+    def valid_dates(self):
+        if self.offered_on and self.joining_on and self.joining_on < self.offered_on:
+            raise ValueError("Joining date cannot be before the offer date")
+        return self
 
-class ImportPreviewBody(BaseModel):
+
+class ImportPreviewBody(RequestModel):
     resource_type: Literal["students", "term_results", "attendance", "skills", "assessments"]
     rows: list[dict] = Field(min_length=1, max_length=5000)
     mapping: dict = Field(default_factory=dict)
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=180)
 
 
-class ConnectorBody(BaseModel):
+class ConnectorBody(RequestModel):
     name: str = Field(min_length=2, max_length=120)
-    base_url: str
+    base_url: str = Field(min_length=8, max_length=2000)
     auth_mode: Literal["bearer", "header"] = "bearer"
     auth_header: str | None = Field(default=None, max_length=100)
     api_key: str | None = Field(default=None, max_length=2000)
@@ -329,17 +353,17 @@ class ConnectorBody(BaseModel):
         return self
 
 
-class SyncBody(BaseModel):
+class SyncBody(RequestModel):
     resource_types: list[Literal["students", "term_results", "attendance", "skills", "assessments"]] = Field(default_factory=lambda: ["students", "term_results", "attendance"])
     idempotency_key: str = Field(default_factory=lambda: str(uuid.uuid4()), min_length=8, max_length=120)
 
 
-class ResumeExtractBody(BaseModel):
+class ResumeExtractBody(RequestModel):
     document_id: str
     idempotency_key: str = Field(default_factory=lambda: str(uuid.uuid4()), min_length=8, max_length=120)
 
 
-class ResumeReviewBody(BaseModel):
+class ResumeReviewBody(RequestModel):
     decision: Literal["approve", "reject"]
     accepted: dict = Field(default_factory=dict)
     note: str | None = Field(default=None, max_length=3000)
@@ -1494,11 +1518,25 @@ async def preview_csv_import(
 ):
     require_college(db, user)
     access = resolve_college_access(db, user)
-    if not file.filename or not file.filename.lower().endswith(".csv"):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Upload a CSV file")
-    raw = await file.read()
+    content_type = (file.content_type or "text/csv").lower()
+    if content_type not in {"text/csv", "application/vnd.ms-excel", "application/csv"}:
+        raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "Upload a CSV file")
+    safe_upload_name(
+        file.filename,
+        content_type,
+        allowed_extensions={
+            "text/csv": {".csv"},
+            "application/vnd.ms-excel": {".csv"},
+            "application/csv": {".csv"},
+        },
+        fallback="import.csv",
+    )
+    raw = await file.read(5 * 1024 * 1024 + 1)
     if len(raw) > 5 * 1024 * 1024:
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "CSV files are limited to 5 MB")
+    if not raw:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "The CSV file is empty")
+    validate_upload_signature(raw, content_type)
     try:
         mapping = json.loads(mapping_json)
         text = raw.decode("utf-8-sig")

@@ -75,6 +75,7 @@ class SignupCheckout(TimestampMixin, Base):
     admin_password_hash: Mapped[str | None] = mapped_column(String(300))
     admin_first_name: Mapped[str] = mapped_column(String(100), nullable=False)
     admin_last_name: Mapped[str] = mapped_column(String(100), default="", nullable=False)
+    admin_phone: Mapped[str | None] = mapped_column(String(40))
     location_name: Mapped[str] = mapped_column(String(200), default="Main Location", nullable=False)
     city: Mapped[str | None] = mapped_column(String(100))
     state: Mapped[str | None] = mapped_column(String(100))
@@ -89,9 +90,11 @@ class SignupCheckout(TimestampMixin, Base):
     tax_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     gst_rate_bps: Mapped[int] = mapped_column(Integer, default=1800, nullable=False)
     currency: Mapped[str] = mapped_column(String(3), default="INR", nullable=False)
+    provider: Mapped[str] = mapped_column(String(30), default="razorpay", nullable=False)
     provider_mode: Mapped[str] = mapped_column(String(20), nullable=False)
     provider_order_id: Mapped[str | None] = mapped_column(String(140), unique=True, index=True)
     provider_payment_id: Mapped[str | None] = mapped_column(String(140), unique=True, index=True)
+    provider_session_id: Mapped[str | None] = mapped_column(Text)
     organization_id: Mapped[str | None] = mapped_column(
         UUID_STR, ForeignKey("organizations.id", ondelete="SET NULL"), index=True
     )

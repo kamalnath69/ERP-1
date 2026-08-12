@@ -7,7 +7,7 @@ import { Label } from "@/components/ui/label"
 
 const Form = FormProvider
 
-const FormFieldContext = React.createContext({})
+const FormFieldContext = React.createContext(undefined)
 
 const FormField = (
   {
@@ -26,11 +26,14 @@ const useFormField = () => {
   const itemContext = React.useContext(FormItemContext)
   const { getFieldState, formState } = useFormContext()
 
-  const fieldState = getFieldState(fieldContext.name, formState)
-
   if (!fieldContext) {
     throw new Error("useFormField should be used within <FormField>")
   }
+  if (!itemContext) {
+    throw new Error("useFormField should be used within <FormItem>")
+  }
+
+  const fieldState = getFieldState(fieldContext.name, formState)
 
   const { id } = itemContext
 
@@ -44,7 +47,7 @@ const useFormField = () => {
   }
 }
 
-const FormItemContext = React.createContext({})
+const FormItemContext = React.createContext(undefined)
 
 const FormItem = React.forwardRef(({ className, ...props }, ref) => {
   const id = React.useId()
@@ -121,6 +124,19 @@ const FormMessage = React.forwardRef(({ className, children, ...props }, ref) =>
 })
 FormMessage.displayName = "FormMessage"
 
+const FieldError = React.forwardRef(({ id, error, className, ...props }, ref) => {
+  const body = typeof error === "string" ? error : error?.message
+  if (!body) return null
+  return <p ref={ref} id={id} role="alert" className={cn("text-xs font-medium text-destructive", className)} {...props}>{body}</p>
+})
+FieldError.displayName = "FieldError"
+
+function FormRootError({ error, className }) {
+  const body = typeof error === "string" ? error : error?.message
+  if (!body) return null
+  return <div role="alert" className={cn("rounded-xl border border-destructive/25 bg-destructive/5 px-3 py-2.5 text-sm text-destructive", className)}>{body}</div>
+}
+
 export {
   useFormField,
   Form,
@@ -130,4 +146,6 @@ export {
   FormDescription,
   FormMessage,
   FormField,
+  FieldError,
+  FormRootError,
 }

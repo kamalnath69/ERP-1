@@ -2,12 +2,13 @@
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import Field
 from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.api.v1.business import serialize
 from app.core.database import get_db
+from app.schemas.validation import RequestModel
 from app.core.deps import require_permissions
 from app.models import AccessScope, AuditLog, Client, Location, Organization, Permission, Role, RolePermission, User, UserPermissionOverride, UserRole
 from app.services.audit import log_action
@@ -19,16 +20,16 @@ from app.services.cursor_pagination import decode_cursor, encode_cursor, page_si
 router = APIRouter(prefix="/access", tags=["access-control"])
 
 
-class LocationAccessBody(BaseModel):
+class LocationAccessBody(RequestModel):
     location_ids: list[str]
 
 
-class PermissionOverrideBody(BaseModel):
+class PermissionOverrideBody(RequestModel):
     permission_id: str
     granted: bool
 
 
-class UserAccessConfiguration(BaseModel):
+class UserAccessConfiguration(RequestModel):
     role_ids: list[str] = Field(default_factory=list)
     permission_overrides: list[PermissionOverrideBody] = Field(default_factory=list)
     location_mode: str = Field(pattern="^(full|restricted)$")

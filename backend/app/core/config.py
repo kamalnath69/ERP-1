@@ -97,6 +97,10 @@ class Settings:
     WHATSAPP_REMINDERS_ENABLED: bool = os.environ.get("WHATSAPP_REMINDERS_ENABLED", "false").lower() == "true"
     PROVIDER_MOCK_MODE: bool = os.environ.get("PROVIDER_MOCK_MODE", "true").lower() == "true"
 
+    PAYMENT_GATEWAY: str = os.environ.get("PAYMENT_GATEWAY", "razorpay").strip().lower()
+    if PAYMENT_GATEWAY not in {"razorpay", "cashfree"}:
+        raise ValueError("PAYMENT_GATEWAY must be razorpay or cashfree")
+
     RAZORPAY_MODE: str = os.environ.get(
         "RAZORPAY_MODE", "mock" if PROVIDER_MOCK_MODE else "test"
     ).strip().lower()
@@ -131,6 +135,36 @@ class Settings:
             self.RAZORPAY_LIVE_KEY_SECRET or (self.RAZORPAY_KEY_SECRET if legacy_matches else ""),
             self.RAZORPAY_LIVE_WEBHOOK_SECRET or (self.RAZORPAY_WEBHOOK_SECRET if legacy_matches else ""),
         )
+
+    CASHFREE_MODE: str = os.environ.get(
+        "CASHFREE_MODE", "mock" if PROVIDER_MOCK_MODE else "test"
+    ).strip().lower()
+    if CASHFREE_MODE not in {"mock", "test", "live"}:
+        raise ValueError("CASHFREE_MODE must be mock, test, or live")
+    CASHFREE_API_VERSION: str = os.environ.get("CASHFREE_API_VERSION", "2025-01-01").strip()
+    CASHFREE_APP_ID: str = os.environ.get("CASHFREE_APP_ID", "").strip()
+    CASHFREE_SECRET_KEY: str = os.environ.get("CASHFREE_SECRET_KEY", "").strip()
+    CASHFREE_WEBHOOK_SECRET: str = os.environ.get("CASHFREE_WEBHOOK_SECRET", "").strip()
+    CASHFREE_TEST_APP_ID: str = os.environ.get("CASHFREE_TEST_APP_ID", "").strip()
+    CASHFREE_TEST_SECRET_KEY: str = os.environ.get("CASHFREE_TEST_SECRET_KEY", "").strip()
+    CASHFREE_TEST_WEBHOOK_SECRET: str = os.environ.get("CASHFREE_TEST_WEBHOOK_SECRET", "").strip()
+    CASHFREE_LIVE_APP_ID: str = os.environ.get("CASHFREE_LIVE_APP_ID", "").strip()
+    CASHFREE_LIVE_SECRET_KEY: str = os.environ.get("CASHFREE_LIVE_SECRET_KEY", "").strip()
+    CASHFREE_LIVE_WEBHOOK_SECRET: str = os.environ.get("CASHFREE_LIVE_WEBHOOK_SECRET", "").strip()
+
+    def cashfree_credentials(self, mode: str | None = None) -> tuple[str, str, str]:
+        selected = mode or self.CASHFREE_MODE
+        if selected == "mock":
+            return "", "", ""
+        if selected == "test":
+            app_id = self.CASHFREE_TEST_APP_ID or self.CASHFREE_APP_ID
+            secret = self.CASHFREE_TEST_SECRET_KEY or self.CASHFREE_SECRET_KEY
+            webhook = self.CASHFREE_TEST_WEBHOOK_SECRET or self.CASHFREE_WEBHOOK_SECRET or secret
+            return app_id, secret, webhook
+        app_id = self.CASHFREE_LIVE_APP_ID or self.CASHFREE_APP_ID
+        secret = self.CASHFREE_LIVE_SECRET_KEY or self.CASHFREE_SECRET_KEY
+        webhook = self.CASHFREE_LIVE_WEBHOOK_SECRET or self.CASHFREE_WEBHOOK_SECRET or secret
+        return app_id, secret, webhook
 
     CORS_ORIGINS: list[str] = _cors_origins()
 

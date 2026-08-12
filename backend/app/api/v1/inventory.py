@@ -1,9 +1,10 @@
 """Focused inventory API."""
 from fastapi import APIRouter, Depends, Query, status
-from pydantic import BaseModel, Field
+from pydantic import Field, model_validator
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.schemas.validation import RequestModel
 from app.core.deps import require_permissions
 from app.services.inventory import inventory_levels_page, inventory_movements_page, inventory_workspace, transfer_stock
 
@@ -11,13 +12,19 @@ from app.services.inventory import inventory_levels_page, inventory_movements_pa
 router = APIRouter(prefix="/inventory", tags=["inventory"])
 
 
-class TransferBody(BaseModel):
+class TransferBody(RequestModel):
     item_id: str
     source_location_id: str
     destination_location_id: str
     quantity_milli: int = Field(gt=0)
-    batch_number: str = ""
+    batch_number: str = Field(default="", max_length=120)
     reason: str = Field(min_length=3, max_length=300)
+
+    @model_validator(mode="after")
+    def different_locations(self):
+        if self.source_location_id == self.destination_location_id:
+            raise ValueError("Destination location must differ from the source")
+        return self
 
 
 @router.get("/workspace")

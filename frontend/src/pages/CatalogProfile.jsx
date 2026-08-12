@@ -1,10 +1,12 @@
 import React, { useEffect, useState } from "react";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { useForm } from "react-hook-form";
 import { useParams } from "react-router-dom";
 import { useBusiness } from "@/contexts/BusinessContext";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage, FormRootError } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import StockAdjustmentDialog from "@/components/StockAdjustmentDialog";
@@ -15,11 +17,43 @@ import { QUERY_POLICIES } from "@/store/api/queryPolicies";
 import { ProfileBackLink } from "@/components/entities/EntityProfile";
 import { EmptyState, PageShell, Surface } from "@/components/system";
 import { useUpdateCatalogItemMutation } from "@/features/catalog/catalogApi";
+import { applyApiErrors, catalogProfileSchema, FORM_OPTIONS } from "@/lib/validation";
+
+function catalogValues(item = {}) {
+  return {
+    name: item.name || "",
+    item_type: item.item_type || "product",
+    description: item.description || "",
+    hsn_sac: item.hsn_sac || "",
+    price: item.price_paise == null ? "" : String(item.price_paise / 100),
+    cost: item.cost_paise == null ? "" : String(item.cost_paise / 100),
+    tax_rate: item.tax_rate_bps == null ? "" : String(item.tax_rate_bps / 100),
+    duration_minutes: item.duration_minutes == null ? "" : String(item.duration_minutes),
+    unit: item.unit || "unit",
+    tax_inclusive: Boolean(item.tax_inclusive),
+    track_stock: Boolean(item.track_stock),
+    is_active: item.is_active !== false,
+    version: item.version || 1,
+  };
+}
 
 export default function CatalogProfile() {
-  const { itemId } = useParams(); const { locationId, location } = useBusiness(); const { data, error, refetch } = useGetCatalogProfileQuery({ itemId, locationId }, QUERY_POLICIES.operational); const [editing, setEditing] = useState(false); const [adjustment, setAdjustment] = useState(null); const [form, setForm] = useState({}); const [updateItem] = useUpdateCatalogItemMutation();
-  useEffect(() => { if (data?.item && !editing) setForm(data.item); }, [data, editing]);
-  const save = async () => { try { await updateItem({ itemId, name: form.name, description: form.description || null, hsn_sac: form.hsn_sac || null, price_paise: Number(form.price_paise), cost_paise: Number(form.cost_paise), tax_rate_bps: Number(form.tax_rate_bps), tax_inclusive: !!form.tax_inclusive, duration_minutes: form.duration_minutes ? Number(form.duration_minutes) : null, unit: form.unit, track_stock: !!form.track_stock, is_active: !!form.is_active, version: form.version }).unwrap(); toast.success("Catalog item updated"); setEditing(false); } catch (requestError) { toast.error(requestError?.data?.detail || "Could not update item"); } };
+  const { itemId } = useParams(); const { locationId, location } = useBusiness(); const { data, error, refetch } = useGetCatalogProfileQuery({ itemId, locationId }, QUERY_POLICIES.operational); const [editing, setEditing] = useState(false); const [adjustment, setAdjustment] = useState(null); const [updateItem, updateState] = useUpdateCatalogItemMutation();
+  const editForm = useForm({ resolver: zodResolver(catalogProfileSchema), defaultValues: catalogValues(), ...FORM_OPTIONS });
+  const { clearErrors, control, formState, handleSubmit, reset, setError, setValue, watch } = editForm;
+  const taxInclusive = watch("tax_inclusive"); const active = watch("is_active");
+  useEffect(() => { if (data?.item && !editing) reset(catalogValues(data.item)); }, [data?.item, editing, reset]);
+  const openEditor = () => { reset(catalogValues(data.item)); setEditing(true); };
+  const save = handleSubmit(async (values) => {
+    clearErrors("root.server");
+    try {
+      await updateItem({ itemId, name: values.name, description: values.description || null, hsn_sac: values.hsn_sac || null, price_paise: values.price_paise, cost_paise: values.cost_paise, tax_rate_bps: values.tax_rate_bps, tax_inclusive: values.tax_inclusive, duration_minutes: values.item_type === "service" ? values.duration_minutes : null, unit: values.unit, track_stock: values.track_stock, is_active: values.is_active, version: values.version }).unwrap();
+      toast.success("Catalog item updated"); setEditing(false);
+    } catch (requestError) {
+      const normalized = applyApiErrors(requestError, setError, { aliases: { price_paise: "price", cost_paise: "cost", tax_rate_bps: "tax_rate" }, fallback: "Could not update item" });
+      if (!Object.keys(normalized.fieldErrors).length) setError("root.server", { type: "server", message: normalized.message });
+    }
+  });
   if (error) return <PageShell><State title={error.status === 403 ? "Access restricted" : "Item unavailable"} copy={error.data?.detail || "Could not load catalog item"} /></PageShell>;
   if (!data) return <PageShell><div className="h-72 animate-pulse rounded-2xl bg-secondary" /></PageShell>;
   const item = data.item;
@@ -27,7 +61,7 @@ export default function CatalogProfile() {
   const hasInventoryData = Boolean(data.stock?.length || data.movements?.length);
   return <PageShell className="reveal" size="standard">
     <ProfileBackLink fallback="/app/catalog" className="inline-flex items-center gap-2 text-sm text-muted-foreground"><ArrowLeft />Back</ProfileBackLink>
-    <Surface className="flex flex-col justify-between gap-5 p-5 sm:p-6 lg:flex-row lg:items-center"><div className="flex min-w-0 gap-4"><div className="grid h-14 w-14 shrink-0 place-items-center rounded-2xl bg-secondary sm:h-16 sm:w-16"><Package size={28} /></div><div className="min-w-0"><div className="font-mono text-xs text-muted-foreground">{item.sku}</div><h1 className="mt-1 truncate font-display text-2xl font-semibold sm:text-3xl">{item.name}</h1><div className="mt-2 flex flex-wrap gap-2"><span className="rounded-full bg-secondary px-3 py-1 text-xs capitalize">{item.item_type.replaceAll("_", " ")}</span><span className={`rounded-full px-3 py-1 text-xs ${item.is_active ? "bg-emerald-100 text-emerald-800" : "bg-secondary"}`}>{item.is_active ? "Active" : "Inactive"}</span></div></div></div><div className="flex flex-wrap gap-2">{item.track_stock && data.capabilities.adjust_inventory && <Button variant="outline" disabled={!locationId} onClick={() => setAdjustment({ item, mode: "increase", locationId, locationName: location?.name })} className="rounded-xl text-emerald-700"><Plus />Receive stock</Button>}{data.capabilities.manage && <Button onClick={() => setEditing(true)} className="rounded-xl"><NotePencil className="mr-2" />Edit item</Button>}</div></Surface>
+    <Surface className="flex flex-col justify-between gap-5 p-5 sm:p-6 lg:flex-row lg:items-center"><div className="flex min-w-0 gap-4"><div className="grid h-14 w-14 shrink-0 place-items-center rounded-2xl bg-secondary sm:h-16 sm:w-16"><Package size={28} /></div><div className="min-w-0"><div className="font-mono text-xs text-muted-foreground">{item.sku}</div><h1 className="mt-1 truncate font-display text-2xl font-semibold sm:text-3xl">{item.name}</h1><div className="mt-2 flex flex-wrap gap-2"><span className="rounded-full bg-secondary px-3 py-1 text-xs capitalize">{item.item_type.replaceAll("_", " ")}</span><span className={`rounded-full px-3 py-1 text-xs ${item.is_active ? "bg-emerald-100 text-emerald-800" : "bg-secondary"}`}>{item.is_active ? "Active" : "Inactive"}</span></div></div></div><div className="flex flex-wrap gap-2">{item.track_stock && data.capabilities.adjust_inventory && <Button variant="outline" disabled={!locationId} onClick={() => setAdjustment({ item, mode: "increase", locationId, locationName: location?.name })} className="rounded-xl text-emerald-700"><Plus />Receive stock</Button>}{data.capabilities.manage && <Button onClick={openEditor} className="rounded-xl"><NotePencil className="mr-2" />Edit item</Button>}</div></Surface>
     {(data.capabilities.view_inventory || data.capabilities.view_sales || data.capabilities.view_appointments) && <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">{data.capabilities.view_inventory && <Metric icon={Cube} label={`Available at ${data.scope?.location?.name || "all locations"}`} value={`${data.metrics.stock_milli / 1000} ${item.unit}`} />}{data.capabilities.view_sales && <><Metric icon={TrendUp} label={`Sold at ${data.scope?.location?.name || "all locations"}`} value={`${data.metrics.units_sold_milli / 1000} ${item.unit}`} /><Metric icon={CurrencyInr} label="Revenue" value={money(data.metrics.revenue_paise)} /></>}{data.capabilities.view_appointments && <Metric icon={CalendarBlank} label="Bookings" value={data.metrics.bookings} />}</div>}
     <Tabs defaultValue="overview">
       <TabsList className="premium-scrollbar h-auto max-w-full justify-start overflow-x-auto rounded-xl">
@@ -50,15 +84,13 @@ export default function CatalogProfile() {
         {data.capabilities.view_appointments && data.appointments?.length > 0 && <Panel title="Service bookings">{data.appointments.slice(0, 30).map((appointment) => <div key={appointment.id} className="flex justify-between border-b py-3 last:border-0"><div><div className="font-medium capitalize">{appointment.status}</div><div className="text-xs text-muted-foreground">{new Date(appointment.starts_at).toLocaleString("en-IN")}</div></div></div>)}</Panel>}
       </TabsContent>}
     </Tabs>
-    <Dialog open={editing} onOpenChange={setEditing}><DialogContent className="sm:max-w-2xl"><DialogHeader><DialogTitle className="font-display text-3xl">Edit catalog item</DialogTitle></DialogHeader><div className="grid sm:grid-cols-2 gap-4"><Field label="Name"><Input value={form.name || ""} onChange={set("name")} /></Field><Field label="HSN / SAC"><Input value={form.hsn_sac || ""} onChange={set("hsn_sac")} /></Field><Field label="Selling price (INR)"><Input type="number" value={(form.price_paise || 0) / 100} onChange={moneySet("price_paise")} /></Field><Field label="Cost (INR)"><Input type="number" value={(form.cost_paise || 0) / 100} onChange={moneySet("cost_paise")} /></Field><Field label="GST %"><Input type="number" value={(form.tax_rate_bps || 0) / 100} onChange={(event) => setForm({ ...form, tax_rate_bps: Math.round(Number(event.target.value) * 100) })} /></Field><Field label="Unit"><Input value={form.unit || "unit"} onChange={set("unit")} /></Field>{item.item_type === "service" && <Field label="Duration (minutes)"><Input type="number" value={form.duration_minutes || ""} onChange={set("duration_minutes")} /></Field>}<div className="sm:col-span-2"><Field label="Description"><Textarea value={form.description || ""} onChange={set("description")} /></Field></div><label className="flex gap-2 text-sm"><input type="checkbox" checked={!!form.tax_inclusive} onChange={(event) => setForm({ ...form, tax_inclusive: event.target.checked })} />Tax-inclusive pricing</label><label className="flex gap-2 text-sm"><input type="checkbox" checked={!!form.is_active} onChange={(event) => setForm({ ...form, is_active: event.target.checked })} />Active item</label><Button onClick={save} className="sm:col-span-2 rounded-xl">Save item</Button></div></DialogContent></Dialog>
+    <Dialog open={editing} onOpenChange={(open) => { if (!open && (formState.isSubmitting || updateState.isLoading)) return; setEditing(open); }}><DialogContent className="sm:max-w-2xl"><DialogHeader><DialogTitle className="font-display text-3xl">Edit catalog item</DialogTitle></DialogHeader><Form {...editForm}><form noValidate onSubmit={save} className="grid gap-4 sm:grid-cols-2"><ValidatedField control={control} name="name" label="Name"><Input autoFocus /></ValidatedField><ValidatedField control={control} name="hsn_sac" label="HSN / SAC"><Input /></ValidatedField><ValidatedField control={control} name="price" label="Selling price (INR)"><Input inputMode="decimal" /></ValidatedField><ValidatedField control={control} name="cost" label="Cost (INR)"><Input inputMode="decimal" /></ValidatedField><ValidatedField control={control} name="tax_rate" label="GST %"><Input inputMode="decimal" /></ValidatedField><ValidatedField control={control} name="unit" label="Unit"><Input /></ValidatedField>{item.item_type === "service" && <ValidatedField control={control} name="duration_minutes" label="Duration (minutes)"><Input inputMode="numeric" /></ValidatedField>}<ValidatedField control={control} name="description" label="Description" className="sm:col-span-2"><Textarea rows={4} /></ValidatedField><FormField control={control} name="tax_inclusive" render={() => <FormItem><label className="flex gap-2 text-sm"><input type="checkbox" checked={taxInclusive} onChange={(event) => setValue("tax_inclusive", event.target.checked, { shouldDirty: true })} />Tax-inclusive pricing</label></FormItem>} /><FormField control={control} name="is_active" render={() => <FormItem><label className="flex gap-2 text-sm"><input type="checkbox" checked={active} onChange={(event) => setValue("is_active", event.target.checked, { shouldDirty: true })} />Active item</label></FormItem>} /><FormRootError className="sm:col-span-2" error={formState.errors.root?.server} /><Button type="submit" loading={formState.isSubmitting || updateState.isLoading} loadingText="Saving item..." className="rounded-xl sm:col-span-2">Save item</Button></form></Form></DialogContent></Dialog>
     {adjustment && <StockAdjustmentDialog adjustment={adjustment} onClose={() => setAdjustment(null)} onComplete={refetch} />}
   </PageShell>;
-  function set(key) { return (event) => setForm({ ...form, [key]: event.target.value }); }
-  function moneySet(key) { return (event) => setForm({ ...form, [key]: Math.round(Number(event.target.value) * 100) }); }
 }
 function Metric({ icon: Icon, label, value }) { return <Surface className="p-5"><Icon className="text-accent" /><div className="mt-3 font-display text-2xl">{value}</div><div className="mt-1 text-xs text-muted-foreground">{label}</div></Surface>; }
 function Panel({ title, children }) { return <Surface className="p-5"><h2 className="mb-4 font-display text-xl font-semibold sm:text-2xl">{title}</h2>{children}</Surface>; }
 function Detail({ label, value }) { return <div className="py-2"><div className="overline">{label}</div><div className="text-sm mt-1">{value || "Not provided"}</div></div>; }
-function Field({ label, children }) { return <div className="space-y-2"><Label>{label}</Label>{children}</div>; }
+function ValidatedField({ control, name, label, children, className }) { return <FormField control={control} name={name} render={({ field }) => <FormItem className={className}><FormLabel>{label}</FormLabel><FormControl>{React.cloneElement(children, { ...field, value: field.value ?? "" })}</FormControl><FormMessage /></FormItem>} />; }
 function State({ title, copy }) { return <EmptyState variant="page" icon={WarningCircle} title={title} description={copy} />; }
 function money(value) { return new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format((value || 0) / 100); }

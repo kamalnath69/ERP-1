@@ -4,6 +4,12 @@ import api from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { ValidatedActionDialog } from "@/components/forms/ValidatedActionDialog";
+import { usePendingAction, useStableIdempotencyKey } from "@/hooks/usePendingAction";
+import {
+  approvalDecisionSchema, organizationDeletionSchema, ownerTransferSchema,
+  platformTeamSchema, refundSchema, walletRechargeSchema, z,
+} from "@/lib/validation";
 import {
   ArrowClockwise, Buildings, CaretRight, ChartLineUp, CheckCircle, CreditCard,
   Gear, Lifebuoy, ListMagnifyingGlass, MagnifyingGlass, Pulse, Robot, Scroll,
@@ -89,18 +95,66 @@ function Organizations() {
 
 function OrgWorkspace({ data, toggle, refresh }) {
   const { organization: org, subscription, usage, wallet } = data; const [tab, setTab] = useState("summary");
-  const revoke = async (user) => { try { await api.post(`/super-admin/organizations/${org.id}/users/${user.id}/revoke-sessions`); toast.success("Sessions closed"); } catch (error) { toast.error(message(error)); } };
-  const toggleUser = async (person) => { try { await api.post(`/super-admin/organizations/${org.id}/users/${person.id}/${person.is_active ? "suspend" : "restore"}`); toast.success(person.is_active ? "User suspended" : "User restored"); refresh(); } catch (error) { toast.error(message(error)); } };
-  const transfer = async (person) => { const reason = window.prompt(`Why should ownership move to ${person.first_name}?`); const mfa = window.prompt("Enter your authenticator code"); if (!reason || !mfa) return; try { await api.post(`/super-admin/organizations/${org.id}/transfer-owner`, { new_owner_user_id: person.id, reason, mfa_code: mfa }); toast.success("Ownership transferred and sessions closed"); refresh(); } catch (error) { toast.error(message(error)); } };
-  const remove = async () => { const reason = window.prompt("Explain why this organization must be shut down and removed"); const mfa = window.prompt("Enter your authenticator code"); if (!reason || reason.length < 12 || !mfa) return; if (!window.confirm("Shut down this organization now and send deletion for independent approval?")) return; try { await api.post(`/super-admin/organizations/${org.id}/deletion`, { reason, mfa_code: mfa, idempotency_key: crypto.randomUUID() }); toast.success("Organization shut down; deletion is waiting for approval"); refresh(); } catch (error) { toast.error(message(error)); } };
+  const pending = usePendingAction(); const [action, setAction] = useState(null);
+  const revoke = (user) => pending.run(`revoke:${user.id}`, async () => { try { await api.post(`/super-admin/organizations/${org.id}/users/${user.id}/revoke-sessions`); toast.success("Sessions closed"); } catch (error) { toast.error(message(error)); } });
+  const toggleUser = (person) => pending.run(`user:${person.id}`, async () => { try { await api.post(`/super-admin/organizations/${org.id}/users/${person.id}/${person.is_active ? "suspend" : "restore"}`); toast.success(person.is_active ? "User suspended" : "User restored"); refresh(); } catch (error) { toast.error(message(error)); } });
   return <div><div className="rounded-2xl bg-primary p-5 text-primary-foreground"><div className="flex justify-between gap-3"><div><div className="text-xs uppercase tracking-widest text-primary-foreground/55">{title(org.industry)} · {org.slug}</div><div className="mt-2 font-display text-3xl">{org.name}</div><div className="mt-3"><State value={org.status} dark /></div></div><Button variant="outline" className="border-primary-foreground/25 bg-transparent text-primary-foreground hover:bg-primary-foreground/10" onClick={toggle}>{org.status === "suspended" ? "Restore" : "Suspend"}</Button></div></div>
     <div className="flex gap-1 overflow-x-auto py-4">{["summary", "users", "invoices", "access", "history"].map((item) => <button key={item} onClick={() => setTab(item)} className={`rounded-lg px-3 py-2 text-xs font-medium capitalize ${tab === item ? "bg-accent text-accent-foreground" : "bg-secondary"}`}>{item}</button>)}</div>
     {tab === "summary" && <div className="space-y-4"><div className="grid grid-cols-2 gap-3"><SmallMetric label="Current plan" value={title(subscription?.plan || org.plan)} /><SmallMetric label="AI credits" value={format(wallet.available_credits)} /><SmallMetric label="Clients" value={format(usage.clients)} /><SmallMetric label="Team" value={format(usage.employees)} /><SmallMetric label="Locations" value={format(usage.locations)} /><SmallMetric label="Storage" value={bytes(usage.storage_bytes)} /></div><Panel title="Included access"><div className="grid grid-cols-2 gap-2">{Object.entries(data.entitlements?.values || {}).filter(([key, value]) => key.startsWith("module.") && value).map(([key]) => <div key={key} className="flex items-center gap-2 text-sm"><CheckCircle className="text-positive" />{title(key.split(".")[1])}</div>)}</div></Panel></div>}
-    {tab === "users" && <div className="space-y-2">{data.users.map((person) => <div key={person.id} className="rounded-xl border p-3"><div className="flex items-center justify-between"><div><div className="font-medium">{person.first_name} {person.last_name}</div><div className="text-xs text-muted-foreground">{person.email}</div></div><State value={person.is_active ? "active" : "suspended"} /></div><div className="mt-3 flex flex-wrap gap-2"><Button variant="outline" size="sm" onClick={() => revoke(person)}>Close sessions</Button><Button variant="outline" size="sm" onClick={() => toggleUser(person)}>{person.is_active ? "Suspend" : "Restore"}</Button>{person.is_active && <Button variant="outline" size="sm" onClick={() => transfer(person)}>Make owner</Button>}</div></div>)}</div>}
+    {tab === "users" && <div className="space-y-2">{data.users.map((person) => <div key={person.id} className="rounded-xl border p-3"><div className="flex items-center justify-between"><div><div className="font-medium">{person.first_name} {person.last_name}</div><div className="text-xs text-muted-foreground">{person.email}</div></div><State value={person.is_active ? "active" : "suspended"} /></div><div className="mt-3 flex flex-wrap gap-2"><Button variant="outline" size="sm" loading={pending.isPending(`revoke:${person.id}`)} loadingText="Closing..." onClick={() => revoke(person)}>Close sessions</Button><Button variant="outline" size="sm" loading={pending.isPending(`user:${person.id}`)} loadingText="Updating..." onClick={() => toggleUser(person)}>{person.is_active ? "Suspend" : "Restore"}</Button>{person.is_active && <Button variant="outline" size="sm" onClick={() => setAction({ type: "transfer", person })}>Make owner</Button>}</div></div>)}</div>}
     {tab === "invoices" && <div className="space-y-2">{data.invoices.map((invoice) => <div className="flex justify-between rounded-xl border p-3" key={invoice.id}><div><div className="font-medium">{invoice.invoice_number || "Invoice"}</div><div className="text-xs text-muted-foreground">{date(invoice.created_at)}</div></div><div className="text-right"><div className="font-semibold">{money(invoice.amount_paise)}</div><State value={invoice.status} /></div></div>)}{!data.invoices.length && <Empty text="No invoices yet." />}</div>}
     {tab === "access" && <div className="space-y-3"><Panel title="Current plan version"><Signal label="Billing interval" value={title(subscription?.billing_interval)} /><Signal label="Plan version" value={data.entitlements?.plan?.version || "Original"} /><Signal label="Temporary adjustments" value={data.overrides?.filter((row) => row.is_active).length || 0} /></Panel><PlanAssignmentPanel organization={org} subscription={subscription} refresh={refresh} /></div>}
-    {tab === "history" && <div className="space-y-2">{data.audit.map((event) => <Event key={event.id} event={event} />)}<div className="mt-6 rounded-2xl border border-danger/30 bg-danger/5 p-4"><div className="font-display text-lg font-bold text-danger">Organization removal</div><p className="mt-1 text-xs text-muted-foreground">Access stops immediately. Permanent removal requires another authorized person to approve it, and required records remain sealed until their retention period ends.</p><Button variant="destructive" size="sm" className="mt-4" onClick={remove}>Shut down and request removal</Button></div></div>}
+    {tab === "history" && <div className="space-y-2">{data.audit.map((event) => <Event key={event.id} event={event} />)}<div className="mt-6 rounded-2xl border border-danger/30 bg-danger/5 p-4"><div className="font-display text-lg font-bold text-danger">Organization removal</div><p className="mt-1 text-xs text-muted-foreground">Access stops immediately. Permanent removal requires another authorized person to approve it, and required records remain sealed until their retention period ends.</p><Button variant="destructive" size="sm" className="mt-4" onClick={() => setAction({ type: "delete" })}>Shut down and request removal</Button></div></div>}
+    <OrganizationActionDialog action={action} organization={org} close={() => setAction(null)} refresh={refresh} />
   </div>;
+}
+
+function OrganizationActionDialog({ action, organization, close, refresh }) {
+  const idempotency = useStableIdempotencyKey();
+  useEffect(() => { if (action) idempotency.reset(); }, [action, idempotency.reset]);
+  if (!action) return null;
+  const transfer = action.type === "transfer";
+  const baseSchema = transfer ? ownerTransferSchema : organizationDeletionSchema;
+  const schema = baseSchema.superRefine((values, context) => {
+    if (values.confirmation !== organization.slug) {
+      context.addIssue({ code: "custom", path: ["confirmation"], message: `Type ${organization.slug} exactly` });
+    }
+  });
+  const submit = async (values) => {
+    if (transfer) {
+      await api.post(`/super-admin/organizations/${organization.id}/transfer-owner`, {
+        new_owner_user_id: action.person.id, reason: values.reason, mfa_code: values.mfa_code,
+      });
+      toast.success("Ownership transferred and sessions closed");
+    } else {
+      await api.post(`/super-admin/organizations/${organization.id}/deletion`, {
+        reason: values.reason, mfa_code: values.mfa_code, idempotency_key: idempotency.current(),
+      });
+      toast.success("Organization shut down; deletion is waiting for approval");
+    }
+    await refresh();
+  };
+  return <ValidatedActionDialog
+    open
+    onOpenChange={(open) => { if (!open) close(); }}
+    resetKey={`${action.type}:${action.person?.id || organization.id}`}
+    title={transfer ? `Transfer ownership to ${action.person.first_name}` : `Shut down ${organization.name}`}
+    description={transfer ? "The new owner receives full organization authority." : "This starts the independently approved organization-removal workflow."}
+    impact={transfer ? "The current owner loses ownership and all active sessions are closed." : "Workspace access stops immediately. Retained records are not silently erased."}
+    variant="destructive"
+    schema={schema}
+    defaultValues={{
+      ...(transfer ? { new_owner_user_id: action.person.id } : {}), reason: "", mfa_code: "", confirmation: "",
+    }}
+    fields={[
+      { name: "reason", label: transfer ? "Transfer reason" : "Removal reason", type: "textarea", maxLength: transfer ? 1000 : 2000 },
+      { name: "mfa_code", label: "Authenticator code", type: "password", inputMode: "numeric", autoComplete: "one-time-code", maxLength: 64 },
+      { name: "confirmation", label: `Type ${organization.slug} to confirm`, autoComplete: "off" },
+    ]}
+    submitLabel={transfer ? "Transfer ownership" : "Shut down and request removal"}
+    loadingText={transfer ? "Transferring..." : "Submitting..."}
+    onSubmit={submit}
+  />;
 }
 
 function PlanAssignmentPanel({ organization, subscription, refresh }) {
@@ -118,6 +172,9 @@ function Plans() {
   const features = useLoad("/super-admin/features", []);
   const [editing, setEditing] = useState(null);
   const [updating, setUpdating] = useState("");
+  const [confirmation, setConfirmation] = useState(null);
+  const publishKey = useStableIdempotencyKey();
+  useEffect(() => { if (confirmation?.type === "publish") publishKey.reset(); }, [confirmation, publishKey.reset]);
   const clone = async (plan) => {
     const latest = plan.versions?.[0];
     try {
@@ -135,23 +192,33 @@ function Plans() {
       toast.success("Draft version created"); reload();
     } catch (error) { toast.error(message(error)); }
   };
-  const publish = async (version) => {
-    if (!window.confirm("Publish this plan version? Existing customers stay on their purchased version.")) return;
-    try {
-      await api.post(`/super-admin/plans/versions/${version.id}/publish`, { version_lock: version.version_lock, idempotency_key: crypto.randomUUID() });
-      toast.success("Plan version published"); reload();
-    } catch (error) { toast.error(message(error)); }
-  };
-  const setAvailability = async (plan, field, value) => {
-    if (plan.slug === "trial" && value === false && !window.confirm("Disable Trial for new accounts? Existing trial workspaces are not affected, but new users must pay before an account is created.")) return;
+  const publish = (version) => setConfirmation({ type: "publish", version });
+  const updateAvailability = async (plan, field, value) => {
     setUpdating(`${plan.id}:${field}`);
     try {
       await api.patch(`/super-admin/plans/${plan.id}`, { [field]: value });
       api.invalidate("billing");
       toast.success(plan.slug === "trial" && value === false ? "Trial disabled for new accounts" : "Plan availability updated");
-      reload();
-    } catch (error) { toast.error(message(error)); }
+      await reload();
+    }
     finally { setUpdating(""); }
+  };
+  const setAvailability = async (plan, field, value) => {
+    if (plan.slug === "trial" && value === false) {
+      setConfirmation({ type: "disable_trial", plan, field, value });
+      return;
+    }
+    try { await updateAvailability(plan, field, value); } catch (error) { toast.error(message(error)); }
+  };
+  const confirmPlanAction = async () => {
+    if (confirmation.type === "publish") {
+      const { version } = confirmation;
+      await api.post(`/super-admin/plans/versions/${version.id}/publish`, { version_lock: version.version_lock, idempotency_key: publishKey.current() });
+      toast.success("Plan version published");
+      await reload();
+      return;
+    }
+    await updateAvailability(confirmation.plan, confirmation.field, confirmation.value);
   };
   if (loading) return <PageSkeleton />;
   if (error) return <LoadError retry={reload} />;
@@ -170,6 +237,20 @@ function Plans() {
       </div>;
     })}</div>
     {editing && <Drawer title={`${editing.plan.name} / Version ${editing.version.version}`} close={() => setEditing(null)}><PlanEditor version={editing.version} features={features.data} onSaved={() => { setEditing(null); reload(); }} /></Drawer>}
+    <ValidatedActionDialog
+      open={Boolean(confirmation)}
+      onOpenChange={(open) => { if (!open) setConfirmation(null); }}
+      resetKey={confirmation?.type}
+      title={confirmation?.type === "publish" ? "Publish this plan version?" : "Disable Trial for new accounts?"}
+      description={confirmation?.type === "publish" ? "Published pricing and entitlements become available for future assignments." : "New users will need to complete payment before their workspace account is created."}
+      impact={confirmation?.type === "publish" ? "Existing customers remain on the version they purchased." : "Existing trial workspaces are unchanged; only future account creation is affected."}
+      schema={z.object({})}
+      defaultValues={{}}
+      submitLabel={confirmation?.type === "publish" ? "Publish version" : "Disable Trial"}
+      loadingText={confirmation?.type === "publish" ? "Publishing..." : "Updating..."}
+      variant={confirmation?.type === "disable_trial" ? "destructive" : "default"}
+      onSubmit={confirmPlanAction}
+    />
   </div>;
 }
 
@@ -182,9 +263,9 @@ function LegacyPlans() {
   const { data, loading, error, reload } = useLoad("/super-admin/plans", []);
   const features = useLoad("/super-admin/features", []); const [editing, setEditing] = useState(null); const [updating, setUpdating] = useState("");
   const clone = async (plan) => { const latest = plan.versions?.[0]; try { await api.post(`/super-admin/plans/${plan.id}/versions`, { monthly_price_paise: latest?.monthly_price_paise, annual_price_paise: latest?.annual_price_paise, annual_discount_bps: latest?.annual_discount_bps || 0, tax_enabled: latest?.tax_enabled ?? true, gst_rate_bps: latest?.gst_rate_bps || 1800, included_ai_credits: latest?.included_ai_credits || 0, support_level: latest?.support_level || "standard", ai_tier: latest?.ai_tier || "basic", entitlements: latest?.entitlements || {} }); toast.success("Draft version created"); reload(); } catch (error) { toast.error(message(error)); } };
-  const publish = async (version) => { if (!window.confirm("Publish this plan version? Existing clients will stay on their purchased version.")) return; try { await api.post(`/super-admin/plans/versions/${version.id}/publish`, { version_lock: version.version_lock, idempotency_key: crypto.randomUUID() }); toast.success("Plan version published"); reload(); } catch (error) { toast.error(message(error)); } };
+  const publish = async () => { toast.error("The retired plan editor cannot publish versions. Use the current Plans screen."); };
   const setAvailability = async (plan, field, value) => {
-    if (plan.slug === "trial" && value === false && !window.confirm("Disable Trial for new accounts? Existing trial workspaces are not affected, but new users must pay before an account is created.")) return;
+    if (plan.slug === "trial" && value === false) { toast.error("Use the current Plans screen to disable Trial safely."); return; }
     setUpdating(`${plan.id}:${field}`);
     try {
       await api.patch(`/super-admin/plans/${plan.id}`, { [field]: value });
@@ -222,26 +303,75 @@ function PlanEditor({ version, features, onSaved }) {
 
 function Billing() {
   const { data, loading, error, reload } = useLoad("/super-admin/billing", {});
-  const refund = async (payment) => { const amount = window.prompt(`Refund amount in rupees (maximum ${payment.amount_paise / 100})`); if (!amount) return; const reason = window.prompt("Reason for refund"); const mfa = window.prompt("Enter your authenticator code"); if (!reason || !mfa) return; try { const response = await api.post(`/super-admin/billing/payments/${payment.id}/refund`, { amount_paise: Math.round(Number(amount) * 100), reason, mfa_code: mfa, idempotency_key: crypto.randomUUID() }); toast.success(response.data.status === "requested" ? "Refund sent for approval" : "Refund processed"); reload(); } catch (error) { toast.error(message(error)); } };
+  const [refundTarget, setRefundTarget] = useState(null); const idempotency = useStableIdempotencyKey();
+  const [gatewayTarget, setGatewayTarget] = useState(null);
+  useEffect(() => { if (refundTarget) idempotency.reset(); }, [refundTarget, idempotency.reset]);
+  const refundedFor = (payment) => (data.refunds || []).filter((item) => item.payment_id === payment.id && ["requested", "approved", "processed"].includes(item.status)).reduce((total, item) => total + Number(item.amount_paise || 0), 0);
+  const remaining = refundTarget ? Math.max(0, Number(refundTarget.amount_paise || 0) - refundedFor(refundTarget)) : 0;
+  const activeRefundSchema = refundSchema.superRefine((values, context) => {
+    if (values.amount_paise > remaining) context.addIssue({ code: "custom", path: ["amount"], message: `Refund cannot exceed ${money(remaining)}` });
+  });
+  const refund = async (values) => {
+    const response = await api.post(`/super-admin/billing/payments/${refundTarget.id}/refund`, {
+      amount_paise: values.amount_paise, reason: values.reason, mfa_code: values.mfa_code, idempotency_key: idempotency.current(),
+    });
+    const refundMessage = response.data.status === "requested"
+      ? "Refund sent for approval"
+      : response.data.status === "processed"
+        ? "Refund processed"
+        : "Refund submitted and awaiting provider confirmation";
+    toast.success(refundMessage);
+    await reload();
+  };
+  const switchGateway = async () => {
+    await api.put("/super-admin/billing/gateway", {
+      provider: gatewayTarget.provider,
+      version: data.provider?.version || 1,
+    });
+    toast.success(`${title(gatewayTarget.provider)} is now active for new checkouts`);
+    await reload();
+  };
   if (loading) return <PageSkeleton />; if (error) return <LoadError retry={reload} />;
-  return <div className="space-y-6"><PageIntro eyebrow="Billing" title="Payments that reconcile cleanly" text="Track invoices, collections, failed payments, refunds, and payment-provider status." /><div className="grid md:grid-cols-3 gap-4"><Metric label="Collected" value={money(data.summary?.collected_paise)} accent /><Metric label="Outstanding" value={money(data.summary?.outstanding_paise)} /><Metric label="Failed payments" value={data.summary?.failed || 0} warn={data.summary?.failed > 0} /></div><ApprovalQueue /><Panel title="Recent payments" action={<State value={data.provider?.mode || "not configured"} />}><DataTable headers={["Organization", "Amount", "Mode", "Status", ""]} rows={data.payments?.map((payment) => [payment.organization_id?.slice(0, 8), money(payment.amount_paise), title(payment.mode), <State value={payment.status} />, payment.status === "captured" || payment.status === "partially_refunded" ? <Button size="sm" variant="outline" onClick={() => refund(payment)}>Refund</Button> : null])} empty="No payments recorded yet." /></Panel><Panel title="Invoices"><DataTable headers={["Invoice", "Amount", "Created", "Status"]} rows={data.invoices?.map((invoice) => [invoice.invoice_number || invoice.id.slice(0, 8), money(invoice.amount_paise), date(invoice.created_at), <State value={invoice.status} />])} empty="No invoices yet." /></Panel></div>;
+  return <div className="space-y-6"><PageIntro eyebrow="Billing" title="Payments that reconcile cleanly" text="Track invoices, collections, failed payments, refunds, and payment-provider status." /><GatewayPanel gateway={data.provider} select={setGatewayTarget} /><div className="grid md:grid-cols-3 gap-4"><Metric label="Collected" value={money(data.summary?.collected_paise)} accent /><Metric label="Outstanding" value={money(data.summary?.outstanding_paise)} /><Metric label="Failed payments" value={data.summary?.failed || 0} warn={data.summary?.failed > 0} /></div><ApprovalQueue /><Panel title="Recent payments" action={<State value={data.provider?.mode || "not configured"} />}><DataTable headers={["Organization", "Amount", "Provider", "Mode", "Status", ""]} rows={data.payments?.map((payment) => [payment.organization_id?.slice(0, 8), money(payment.amount_paise), title(payment.provider), title(payment.mode), <State value={payment.status} />, payment.status === "captured" || payment.status === "partially_refunded" ? <Button size="sm" variant="outline" onClick={() => setRefundTarget(payment)}>Refund</Button> : null])} empty="No payments recorded yet." /></Panel><Panel title="Invoices"><DataTable headers={["Invoice", "Amount", "Created", "Status"]} rows={data.invoices?.map((invoice) => [invoice.invoice_number || invoice.id.slice(0, 8), money(invoice.amount_paise), date(invoice.created_at), <State value={invoice.status} />])} empty="No invoices yet." /></Panel><ValidatedActionDialog open={Boolean(gatewayTarget)} onOpenChange={(open) => { if (!open) setGatewayTarget(null); }} resetKey={gatewayTarget?.provider} title={`Activate ${title(gatewayTarget?.provider)}?`} description="This changes the provider used when a customer starts a new checkout." impact="Open and historical payments stay bound to their original provider. Cashfree currently supports one-time terms; existing Razorpay recurring subscriptions continue unchanged." schema={z.object({})} defaultValues={{}} fields={[]} submitLabel="Activate gateway" loadingText="Activating..." onSubmit={switchGateway} /><ValidatedActionDialog open={Boolean(refundTarget)} onOpenChange={(open) => { if (!open) setRefundTarget(null); }} resetKey={refundTarget?.id} title="Refund payment" description={`Refund up to ${money(remaining)} from this captured payment.`} impact="The refund is audited and may require independent approval. The original payment record remains immutable." schema={activeRefundSchema} defaultValues={{ amount: "", reason: "", mfa_code: "" }} fields={[{ name: "amount", label: "Refund amount (INR)", inputMode: "decimal", placeholder: "0.00" }, { name: "reason", label: "Refund reason", type: "textarea", maxLength: 1000 }, { name: "mfa_code", label: "Authenticator code", type: "password", inputMode: "numeric", autoComplete: "one-time-code", maxLength: 64 }]} submitLabel="Request refund" loadingText="Processing..." variant="destructive" onSubmit={refund} /></div>;
+}
+
+function GatewayPanel({ gateway, select }) {
+  return <Panel title="Checkout gateway" action={<State value={`${gateway?.provider || "not configured"} ${gateway?.mode || ""}`} />}>
+    <p className="mb-4 max-w-3xl text-sm text-muted-foreground">Choose the provider for new paid signups, one-time plan purchases, and AI-wallet top-ups. API credentials remain server-managed.</p>
+    <div className="grid gap-3 md:grid-cols-2">{(gateway?.providers || []).map((provider) => {
+      const ready = provider.configured && provider.webhook_configured;
+      return <article key={provider.provider} className={`rounded-xl border p-4 ${provider.active ? "border-primary bg-primary/5 ring-1 ring-primary/15" : "bg-card"}`}>
+        <div className="flex items-start justify-between gap-3"><div><h4 className="font-semibold">{title(provider.provider)}</h4><p className="mt-1 text-xs text-muted-foreground">{provider.recurring_supported ? "One-time and recurring checkout" : "One-time checkout"} / {title(provider.mode)}</p></div><State value={provider.active ? "active" : ready ? "configured" : "setup_needed"} /></div>
+        <div className="mt-4 flex items-center justify-between gap-3 border-t pt-3"><span className="text-xs text-muted-foreground">{ready ? "Credentials and webhook are ready" : "Configure credentials and webhook in the deployment environment"}</span><Button size="sm" variant={provider.active ? "outline" : "default"} disabled={provider.active || !ready} onClick={() => select(provider)}>{provider.active ? "Active" : "Activate"}</Button></div>
+      </article>;
+    })}</div>
+  </Panel>;
 }
 
 function ApprovalQueue() {
-  const [items, setItems] = useState([]); const [available, setAvailable] = useState(true);
+  const [items, setItems] = useState([]); const [available, setAvailable] = useState(true); const [decisionTarget, setDecisionTarget] = useState(null);
   const load = useCallback(() => api.get("/super-admin/approvals?status=pending").then(({ data }) => { setItems(data); setAvailable(true); }).catch((error) => { if (error.response?.status === 403) setAvailable(false); }), []);
   useEffect(() => { load(); }, [load]);
-  const decide = async (item, decision) => { const mfa = item.amount_paise ? window.prompt("Enter your authenticator code") : null; if (item.amount_paise && !mfa) return; const note = window.prompt(`${decision === "approve" ? "Approval" : "Rejection"} note (optional)`) || null; try { await api.post(`/super-admin/approvals/${item.id}/${decision}`, { version: item.version, note, mfa_code: mfa }); toast.success(decision === "approve" ? "Action approved" : "Action rejected"); load(); } catch (error) { toast.error(message(error)); } };
+  const decisionSchema = approvalDecisionSchema.superRefine((values, context) => {
+    if (decisionTarget?.item.amount_paise && !values.mfa_code) context.addIssue({ code: "custom", path: ["mfa_code"], message: "Enter your authentication code" });
+  });
+  const decide = async (values) => {
+    const { item, decision } = decisionTarget;
+    await api.post(`/super-admin/approvals/${item.id}/${decision}`, { version: item.version, note: values.note || null, mfa_code: values.mfa_code || null });
+    toast.success(decision === "approve" ? "Action approved" : "Action rejected");
+    await load();
+  };
   if (!available) return null;
-  return <Panel title="Approvals waiting"><DataTable headers={["Request", "Amount", "Reason", "Requested", "Decision"]} rows={items.map((item) => [title(item.action_type), item.amount_paise ? money(item.amount_paise) : "—", item.reason, date(item.created_at), <div className="flex gap-2"><Button size="sm" onClick={() => decide(item, "approve")}>Approve</Button><Button size="sm" variant="outline" onClick={() => decide(item, "reject")}>Reject</Button></div>])} empty="No approvals are waiting." /></Panel>;
+  return <><Panel title="Approvals waiting"><DataTable headers={["Request", "Amount", "Reason", "Requested", "Decision"]} rows={items.map((item) => [title(item.action_type), item.amount_paise ? money(item.amount_paise) : "—", item.reason, date(item.created_at), <div className="flex gap-2"><Button size="sm" onClick={() => setDecisionTarget({ item, decision: "approve" })}>Approve</Button><Button size="sm" variant="outline" onClick={() => setDecisionTarget({ item, decision: "reject" })}>Reject</Button></div>])} empty="No approvals are waiting." /></Panel><ValidatedActionDialog open={Boolean(decisionTarget)} onOpenChange={(open) => { if (!open) setDecisionTarget(null); }} resetKey={`${decisionTarget?.item.id}:${decisionTarget?.decision}`} title={decisionTarget?.decision === "approve" ? "Approve this request?" : "Reject this request?"} description={decisionTarget ? `${title(decisionTarget.item.action_type)}${decisionTarget.item.amount_paise ? ` for ${money(decisionTarget.item.amount_paise)}` : ""}` : ""} impact={decisionTarget?.decision === "approve" ? "The approved operation may execute immediately and will be permanently audited." : "The requested operation will not run; the decision remains in the audit record."} variant={decisionTarget?.decision === "reject" ? "destructive" : "default"} schema={decisionSchema} defaultValues={{ note: "", mfa_code: "" }} fields={[{ name: "note", label: `${decisionTarget?.decision === "approve" ? "Approval" : "Rejection"} note (optional)`, type: "textarea", maxLength: 1000 }, ...(decisionTarget?.item.amount_paise ? [{ name: "mfa_code", label: "Authenticator code", type: "password", inputMode: "numeric", autoComplete: "one-time-code", maxLength: 64 }] : [])]} submitLabel={decisionTarget?.decision === "approve" ? "Approve request" : "Reject request"} loadingText="Recording..." onSubmit={decide} /></>;
 }
 
 function Wallets() {
   const { data, loading, error, reload } = useLoad("/super-admin/wallets", { wallets: [], packs: [] });
-  const [editingPack, setEditingPack] = useState(null);
-  const recharge = async (item) => { const credits = window.prompt("How many AI credits should be added?"); const reason = window.prompt("Reason for this recharge"); const mfa = window.prompt("Enter your authenticator code"); if (!credits || !reason || !mfa) return; try { await api.post(`/super-admin/wallets/${item.organization.id}/recharge`, { credits: Number(credits), reason, mfa_code: mfa, idempotency_key: crypto.randomUUID() }); toast.success("AI credits added"); reload(); } catch (error) { toast.error(message(error)); } };
+  const [editingPack, setEditingPack] = useState(null); const [rechargeTarget, setRechargeTarget] = useState(null); const idempotency = useStableIdempotencyKey();
+  useEffect(() => { if (rechargeTarget) idempotency.reset(); }, [rechargeTarget, idempotency.reset]);
+  const recharge = async (values) => { await api.post(`/super-admin/wallets/${rechargeTarget.organization.id}/recharge`, { credits: values.credits, reason: values.reason, mfa_code: values.mfa_code, idempotency_key: idempotency.current() }); toast.success("AI credits added"); await reload(); };
   if (loading) return <PageSkeleton />; if (error) return <LoadError retry={reload} />;
-  return <div className="space-y-6"><PageIntro eyebrow="AI Wallet" title="Credits with a complete money trail" text="Control recharge packs, tax treatment, cycle grants, and manual adjustments." action={<Button onClick={() => setEditingPack({ name: "", credits: 500, price_paise: 49900, tax_enabled: true, gst_rate_bps: 1800, is_active: true, display_order: data.packs.length })}>New pack</Button>} /><div className="grid gap-4 md:grid-cols-3">{data.packs.map((pack) => <button onClick={() => setEditingPack(pack)} className="rounded-2xl bg-primary p-5 text-left text-primary-foreground transition hover:-translate-y-0.5" key={pack.id}><div className="text-xs uppercase tracking-widest text-accent">Recharge pack</div><div className="mt-2 font-display text-2xl">{pack.name}</div><div className="mt-4 text-3xl font-bold">{format(pack.credits)} credits</div><div className="mt-1 text-primary-foreground/65">{money(pack.price_paise)} {pack.tax_enabled ? `+ ${pack.gst_rate_bps / 100}% GST` : "- no GST"}</div><div className="mt-4 text-xs text-primary-foreground/55">Select to edit</div></button>)}</div><Panel title="Organization wallets"><DataTable headers={["Organization", "Available", "Reserved", "Cycle ends", ""]} rows={data.wallets.map((item) => [<div><div className="font-medium">{item.organization.name}</div><div className="text-xs text-muted-foreground">{item.organization.slug}</div></div>, format(item.wallet.available_credits), format(item.wallet.reserved_credits), date(item.wallet.cycle_end), <Button size="sm" variant="outline" onClick={() => recharge(item)}>Add credits</Button>])} empty="No AI wallets found." /></Panel>{editingPack && <Drawer title={editingPack.id ? `Edit ${editingPack.name}` : "New recharge pack"} close={() => setEditingPack(null)}><PackEditor pack={editingPack} saved={() => { setEditingPack(null); reload(); }} /></Drawer>}</div>;
+  return <div className="space-y-6"><PageIntro eyebrow="AI Wallet" title="Credits with a complete money trail" text="Control recharge packs, tax treatment, cycle grants, and manual adjustments." action={<Button onClick={() => setEditingPack({ name: "", credits: 500, price_paise: 49900, tax_enabled: true, gst_rate_bps: 1800, is_active: true, display_order: data.packs.length })}>New pack</Button>} /><div className="grid gap-4 md:grid-cols-3">{data.packs.map((pack) => <button onClick={() => setEditingPack(pack)} className="rounded-2xl bg-primary p-5 text-left text-primary-foreground transition hover:-translate-y-0.5" key={pack.id}><div className="text-xs uppercase tracking-widest text-accent">Recharge pack</div><div className="mt-2 font-display text-2xl">{pack.name}</div><div className="mt-4 text-3xl font-bold">{format(pack.credits)} credits</div><div className="mt-1 text-primary-foreground/65">{money(pack.price_paise)} {pack.tax_enabled ? `+ ${pack.gst_rate_bps / 100}% GST` : "- no GST"}</div><div className="mt-4 text-xs text-primary-foreground/55">Select to edit</div></button>)}</div><Panel title="Organization wallets"><DataTable headers={["Organization", "Available", "Reserved", "Cycle ends", ""]} rows={data.wallets.map((item) => [<div><div className="font-medium">{item.organization.name}</div><div className="text-xs text-muted-foreground">{item.organization.slug}</div></div>, format(item.wallet.available_credits), format(item.wallet.reserved_credits), date(item.wallet.cycle_end), <Button size="sm" variant="outline" onClick={() => setRechargeTarget(item)}>Add credits</Button>])} empty="No AI wallets found." /></Panel>{editingPack && <Drawer title={editingPack.id ? `Edit ${editingPack.name}` : "New recharge pack"} close={() => setEditingPack(null)}><PackEditor pack={editingPack} saved={() => { setEditingPack(null); reload(); }} /></Drawer>}<ValidatedActionDialog open={Boolean(rechargeTarget)} onOpenChange={(open) => { if (!open) setRechargeTarget(null); }} resetKey={rechargeTarget?.organization.id} title="Add AI credits" description={rechargeTarget ? `Manually credit ${rechargeTarget.organization.name}'s wallet.` : ""} impact="The adjustment is permanent, MFA-protected, and recorded in the wallet ledger and platform audit." schema={walletRechargeSchema} defaultValues={{ credits: "", reason: "", mfa_code: "" }} fields={[{ name: "credits", label: "AI credits", inputMode: "numeric", placeholder: "500" }, { name: "reason", label: "Recharge reason", type: "textarea", maxLength: 500 }, { name: "mfa_code", label: "Authenticator code", type: "password", inputMode: "numeric", autoComplete: "one-time-code", maxLength: 64 }]} submitLabel="Add credits" loadingText="Adding..." onSubmit={recharge} /></div>;
 }
 
 function PackEditor({ pack, saved }) {
@@ -254,10 +384,12 @@ function PackEditor({ pack, saved }) {
 
 function PlatformTeam() {
   const { data, loading, error, reload } = useLoad("/super-admin/platform-team", { users: [], roles: [] });
-  const add = async () => { const email = window.prompt("Work email"); const first = window.prompt("First name"); if (!email || !first) return; const role = data.roles.find((item) => item.slug === "read-only") || data.roles[0]; try { await api.post("/super-admin/platform-team", { email, first_name: first, last_name: "", role_id: role.id }); toast.success("Team member added. They can verify their account to continue."); reload(); } catch (error) { toast.error(message(error)); } };
-  const changeRole = async (person, roleId) => { try { await api.put(`/super-admin/platform-team/${person.id}/role`, { role_id: roleId }); toast.success("Platform role updated"); reload(); } catch (error) { toast.error(message(error)); } };
+  const [addOpen, setAddOpen] = useState(false); const pending = usePendingAction();
+  const defaultRole = data.roles.find((item) => item.slug === "read-only") || data.roles[0];
+  const add = async (values) => { await api.post("/super-admin/platform-team", values); toast.success("Team member added. They can verify their account to continue."); await reload(); };
+  const changeRole = (person, roleId) => pending.run(`role:${person.id}`, async () => { try { await api.put(`/super-admin/platform-team/${person.id}/role`, { role_id: roleId }); toast.success("Platform role updated"); await reload(); } catch (error) { toast.error(message(error)); } });
   if (loading) return <PageSkeleton />; if (error) return <LoadError retry={reload} />;
-  return <div className="space-y-6"><PageIntro eyebrow="Platform Team" title="Clear responsibility, limited authority" text="Operations, Support, Finance, and Read-only roles keep platform access focused." action={<Button onClick={add}>Add team member</Button>} /><div className="grid gap-4 lg:grid-cols-3">{data.roles.map((role) => <div key={role.id} className="rounded-2xl border bg-card p-5"><ShieldCheck className="text-accent" size={24} /><div className="mt-3 font-display text-xl font-bold">{role.name}</div><p className="mt-1 text-sm text-muted-foreground">{role.description}</p><div className="mt-4 text-xs">{role.permissions.length} responsibilities</div></div>)}</div><Panel title="Team members"><DataTable headers={["Name", "Email", "Role", "Status"]} rows={data.users.map((person) => [`${person.first_name} ${person.last_name}`, person.email, <select className="rounded-lg border bg-background px-2 py-1" value={person.roles?.[0]?.id || ""} onChange={(event) => changeRole(person, event.target.value)}>{data.roles.map((role) => <option key={role.id} value={role.id}>{role.name}</option>)}</select>, <State value={person.is_active ? "active" : "suspended"} />])} empty="No platform team members." /></Panel></div>;
+  return <div className="space-y-6"><PageIntro eyebrow="Platform Team" title="Clear responsibility, limited authority" text="Operations, Support, Finance, and Read-only roles keep platform access focused." action={<Button disabled={!defaultRole} onClick={() => setAddOpen(true)}>Add team member</Button>} /><div className="grid gap-4 lg:grid-cols-3">{data.roles.map((role) => <div key={role.id} className="rounded-2xl border bg-card p-5"><ShieldCheck className="text-accent" size={24} /><div className="mt-3 font-display text-xl font-bold">{role.name}</div><p className="mt-1 text-sm text-muted-foreground">{role.description}</p><div className="mt-4 text-xs">{role.permissions.length} responsibilities</div></div>)}</div><Panel title="Team members"><DataTable headers={["Name", "Email", "Role", "Status"]} rows={data.users.map((person) => [`${person.first_name} ${person.last_name}`, person.email, <select aria-label={`Role for ${person.first_name}`} className="rounded-lg border bg-background px-2 py-1 disabled:opacity-60" value={person.roles?.[0]?.id || ""} disabled={pending.isPending(`role:${person.id}`)} onChange={(event) => changeRole(person, event.target.value)}>{data.roles.map((role) => <option key={role.id} value={role.id}>{role.name}</option>)}</select>, <State value={person.is_active ? "active" : "suspended"} />])} empty="No platform team members." /></Panel><ValidatedActionDialog open={addOpen} onOpenChange={setAddOpen} resetKey={defaultRole?.id} title="Add platform team member" description="Invite a verified work email with the least authority needed for their role." impact="The person can access platform-level data allowed by the selected role after account verification." schema={platformTeamSchema} defaultValues={{ email: "", first_name: "", last_name: "", role_id: defaultRole?.id || "" }} fields={[{ name: "email", label: "Work email", type: "email", autoComplete: "email" }, { name: "first_name", label: "First name", autoComplete: "given-name" }, { name: "last_name", label: "Last name (optional)", autoComplete: "family-name" }, { name: "role_id", label: "Platform role", type: "select", options: data.roles.map((role) => [role.id, role.name]) }]} submitLabel="Add team member" loadingText="Adding..." onSubmit={add} /></div>;
 }
 
 function Support() {
@@ -284,7 +416,7 @@ function Settings() {
   const { data, loading, error, reload } = useLoad("/super-admin/settings", []);
   if (loading) return <PageSkeleton />; if (error) return <LoadError retry={reload} />;
   const labels = { financial_approvals: ["Financial approvals", "Controls when a second person must approve a money-related action."], retention: ["Record retention", "Controls how long required financial and care records are sealed before removal."] };
-  return <div className="space-y-6"><PageIntro eyebrow="Settings" title="Platform policies in one place" text="Sensitive provider keys stay on the server. This page contains only safe operating policies." /><div className="grid lg:grid-cols-3 gap-5">{data.map((row) => row.key === "ai_credit_policy" ? <AICreditPolicyCard key={row.id} row={row} reload={reload} /> : <PolicyCard key={row.id} row={row} label={labels[row.key]} reload={reload} />)}</div></div>;
+  return <div className="space-y-6"><PageIntro eyebrow="Settings" title="Platform policies in one place" text="Sensitive provider keys stay on the server. This page contains only safe operating policies." /><div className="grid lg:grid-cols-3 gap-5">{data.filter((row) => row.key !== "payment_gateway").map((row) => row.key === "ai_credit_policy" ? <AICreditPolicyCard key={row.id} row={row} reload={reload} /> : <PolicyCard key={row.id} row={row} label={labels[row.key]} reload={reload} />)}</div></div>;
 }
 
 function AICreditPolicyCard({ row, reload }) {

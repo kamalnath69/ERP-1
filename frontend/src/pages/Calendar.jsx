@@ -1,8 +1,11 @@
 import React, { useDeferredValue, useEffect, useMemo, useState } from "react";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { useForm } from "react-hook-form";
 import { useAuth } from "@/contexts/AuthContext";
 import { useBusiness } from "@/contexts/BusinessContext";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage, FormRootError } from "@/components/ui/form";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { CalendarBlank, CaretLeft, CaretRight, Clock, MagnifyingGlass, Plus, UserCircle } from "@phosphor-icons/react";
@@ -19,6 +22,7 @@ import { QUERY_POLICIES, withSkip } from "@/store/api/queryPolicies";
 import { useCreateAppointmentMutation, useRescheduleAppointmentMutation, useUpdateAppointmentStatusMutation } from "@/features/scheduling/schedulingApi";
 import { cn } from "@/lib/utils";
 import useCursorPagination from "@/hooks/useCursorPagination";
+import { applyApiErrors, appointmentSchema, FORM_OPTIONS } from "@/lib/validation";
 
 const activeStatuses = ["scheduled", "confirmed", "checked_in", "in_progress"];
 
@@ -37,7 +41,6 @@ export default function CalendarPage() {
   const [statusFilter, setStatusFilter] = useState("active");
   const [createOpen, setCreateOpen] = useState(() => new URLSearchParams(window.location.search).get("new") === "1");
   const [selected, setSelected] = useState(null);
-  const [form, setForm] = useState(() => newAppointment(locationId, timezone));
   const appointmentsQuery = useGetAppointmentsWindowQuery({ locationId, day }, withSkip(QUERY_POLICIES.live, !locationId));
   const [createAppointment, createState] = useCreateAppointmentMutation();
   const [updateStatus, statusState] = useUpdateAppointmentStatusMutation();
@@ -49,8 +52,6 @@ export default function CalendarPage() {
   const clientsById = useMemo(() => new Map(clients.map((row) => [row.id, row])), [clients]);
   const employeesById = useMemo(() => new Map(employees.map((row) => [row.id, row])), [employees]);
   const servicesById = useMemo(() => new Map(services.map((row) => [row.id, row])), [services]);
-
-  useEffect(() => { setForm(newAppointment(locationId, timezone)); }, [locationId, timezone]);
 
   const filtered = useMemo(() => appointments.filter((row) => {
     const client = clientsById.get(row.client_id);
@@ -75,25 +76,6 @@ export default function CalendarPage() {
     { id: "completion", label: isCollege ? "Completed meetings" : "Completed in view", value: filtered.filter((row) => row.status === "completed").length },
   ] : [];
 
-  const serviceChanged = (id, selectedService) => {
-    const service = selectedService || servicesById.get(id);
-    const start = zonedLocalToDate(form.starts_at, timezone);
-    const end = new Date(start.getTime() + (service?.duration_minutes || 30) * 60000);
-    setForm((current) => ({ ...current, service_id: id, ends_at: toLocalInput(end, timezone) }));
-  };
-  const create = async (event) => {
-    event.preventDefault();
-    try {
-      await createAppointment({
-        ...form, employee_id: form.employee_id === "none" ? null : form.employee_id,
-        service_id: form.service_id === "none" ? null : form.service_id,
-        starts_at: zonedLocalToDate(form.starts_at, timezone).toISOString(),
-        ends_at: zonedLocalToDate(form.ends_at, timezone).toISOString(),
-      }).unwrap();
-      toast.success(isCollege ? "Student meeting scheduled" : form.source === "walk_in" ? "Walk-in added" : "Appointment scheduled");
-      setCreateOpen(false); setForm(newAppointment(locationId, timezone));
-    } catch (error) { toast.error(error?.data?.detail || (isCollege ? "Could not schedule student meeting" : "Could not schedule appointment")); }
-  };
   const moveStatus = async (row, status) => {
     try { const updated = await updateStatus({ appointmentId: row.id, status, version: row.version }).unwrap(); setSelected((current) => current?.id === row.id ? updated : current); toast.success(`${isCollege ? "Student meeting" : "Appointment"} marked ${status.replaceAll("_", " ")}`); }
     catch (error) { toast.error(error?.data?.detail || `Could not update ${isCollege ? "student meeting" : "appointment"}`); }
@@ -125,7 +107,7 @@ export default function CalendarPage() {
 
     {view === "week" ? <WeekView isCollege={isCollege} entityName={entityName} dates={week} rows={filtered} timezone={timezone} loading={appointmentsQuery.isLoading} references={{ clientsById, employeesById, servicesById }} onOpen={setSelected} onDrop={moveToDay} canManage={can("appointments.manage")} /> : view === "day" ? <DayView isCollege={isCollege} entityName={entityName} day={day} rows={selectedDayRows} timezone={timezone} loading={appointmentsQuery.isLoading} references={{ clientsById, employeesById, servicesById }} onOpen={setSelected} onCreate={can("appointments.manage") ? () => setCreateOpen(true) : null} /> : <DataTable loading={appointmentsQuery.isLoading} rows={filtered} columns={agendaColumns} onRowClick={setSelected} empty={<CalendarEmpty isCollege={isCollege} onCreate={can("appointments.manage") ? () => setCreateOpen(true) : null} />} />}
 
-    <DrawerForm open={createOpen} onOpenChange={setCreateOpen} title={isCollege ? "Schedule student meeting" : organization?.industry === "salon" ? "Book or add walk-in" : "Book appointment"} description={isCollege ? "Choose the student, responsible faculty member, and time. Conflicts are checked before saving." : "Availability and overlapping staff appointments are checked before saving."}><AppointmentForm open={createOpen} locationId={locationId} isCollege={isCollege} entityName={entityName} form={form} setForm={setForm} serviceChanged={serviceChanged} submit={create} saving={createState.isLoading} /></DrawerForm>
+    <DrawerForm open={createOpen} onOpenChange={(nextOpen) => { if (!nextOpen && createState.isLoading) return; setCreateOpen(nextOpen); }} title={isCollege ? "Schedule student meeting" : organization?.industry === "salon" ? "Book or add walk-in" : "Book appointment"} description={isCollege ? "Choose the student, responsible faculty member, and time. Conflicts are checked before saving." : "Availability and overlapping staff appointments are checked before saving."}><AppointmentForm open={createOpen} locationId={locationId} timezone={timezone} isCollege={isCollege} entityName={entityName} createAppointment={createAppointment} saving={createState.isLoading} onCreated={() => setCreateOpen(false)} /></DrawerForm>
     <AppointmentDrawer isCollege={isCollege} row={selected} onClose={() => setSelected(null)} timezone={timezone} references={{ clientsById, employeesById, servicesById }} canManage={can("appointments.manage")} onStatus={moveStatus} saving={statusState.isLoading || rescheduleState.isLoading} />
   </PageShell>;
 }
@@ -148,7 +130,97 @@ function AppointmentCard({ isCollege, entityName, row, timezone, references, onO
   return <button type="button" draggable={draggable} onDragStart={(event) => event.dataTransfer.setData("text/appointment", row.id)} onClick={() => onOpen(row)} className={cn("w-full rounded-2xl border bg-card p-4 text-left transition hover:border-accent focus-visible:ring-2 focus-visible:ring-ring", compact && "rounded-xl p-3")}><div className="flex items-start justify-between gap-2"><span className="font-semibold leading-tight">{fullName(client) || entityName}</span><StatusBadge status={row.status} className="shrink-0" /></div><div className="mt-2 text-xs text-muted-foreground">{formatTime(row.starts_at, timezone)} · {service?.name || (isCollege ? "Student support" : "General appointment")}</div>{!compact && <div className="mt-4 flex items-center gap-2 border-t pt-3 text-xs text-muted-foreground"><UserCircle />{fullName(employee) || "Unassigned"}</div>}</button>;
 }
 
-function AppointmentForm({ open, locationId, isCollege, entityName, form, setForm, serviceChanged, submit, saving }) {
+function AppointmentForm({ open, locationId, timezone, isCollege, entityName, createAppointment, saving, onCreated }) {
+  const [clientSearch, setClientSearch] = useState("");
+  const [employeeSearch, setEmployeeSearch] = useState("");
+  const [serviceSearch, setServiceSearch] = useState("");
+  const clientQuery = useDeferredValue(clientSearch.trim());
+  const employeeQuery = useDeferredValue(employeeSearch.trim());
+  const serviceQuery = useDeferredValue(serviceSearch.trim());
+  const [selectedClient, setSelectedClient] = useState(null);
+  const [selectedEmployee, setSelectedEmployee] = useState(NONE_EMPLOYEE);
+  const [selectedService, setSelectedService] = useState(NONE_SERVICE);
+  const appointmentForm = useForm({ resolver: zodResolver(appointmentSchema), defaultValues: newAppointment(locationId, timezone), ...FORM_OPTIONS });
+  const { clearErrors, control, formState, getValues, handleSubmit, reset, setError, setValue, watch } = appointmentForm;
+  const clientId = watch("client_id");
+  const employeeId = watch("employee_id");
+  const serviceId = watch("service_id");
+  const clientPaging = useCursorPagination(JSON.stringify({ open, locationId, q: clientQuery }));
+  const employeePaging = useCursorPagination(JSON.stringify({ open, locationId, q: employeeQuery }));
+  const servicePaging = useCursorPagination(JSON.stringify({ open, q: serviceQuery }));
+  const clientsResponse = useGetClientDirectoryQuery({ locationId, q: clientQuery, segment: "active", cursor: clientPaging.cursor, limit: 25 }, withSkip(QUERY_POLICIES.reference, !open || !locationId));
+  const employeesResponse = useGetTeamDirectoryQuery({ locationId, q: employeeQuery, status: "active", cursor: employeePaging.cursor, limit: 25 }, withSkip(QUERY_POLICIES.reference, !open || !locationId));
+  const servicesResponse = useGetCatalogDirectoryQuery({ q: serviceQuery, itemType: "service", state: "active", cursor: servicePaging.cursor, limit: 25 }, withSkip(QUERY_POLICIES.reference, !open || isCollege));
+  const { accept: acceptClients } = clientPaging;
+  const { accept: acceptEmployees } = employeePaging;
+  const { accept: acceptServices } = servicePaging;
+  useEffect(() => { acceptClients(clientsResponse.data); }, [acceptClients, clientsResponse.data]);
+  useEffect(() => { acceptEmployees(employeesResponse.data); }, [acceptEmployees, employeesResponse.data]);
+  useEffect(() => { acceptServices(servicesResponse.data); }, [acceptServices, servicesResponse.data]);
+  useEffect(() => {
+    if (!open) return;
+    reset(newAppointment(locationId, timezone));
+    setSelectedClient(null);
+    setSelectedEmployee(NONE_EMPLOYEE);
+    setSelectedService(NONE_SERVICE);
+  }, [locationId, open, reset, timezone]);
+  useEffect(() => { if (!clientId) setSelectedClient(null); }, [clientId]);
+  useEffect(() => { if (employeeId === "none") setSelectedEmployee(NONE_EMPLOYEE); }, [employeeId]);
+  useEffect(() => { if (serviceId === "none") setSelectedService(NONE_SERVICE); }, [serviceId]);
+  const clients = clientPaging.items.length ? clientPaging.items : clientsResponse.data?.items || [];
+  const employees = employeePaging.items.length ? employeePaging.items : employeesResponse.data?.items || [];
+  const services = servicePaging.items.length ? servicePaging.items : servicesResponse.data?.items || [];
+
+  const submit = handleSubmit(async (values) => {
+    clearErrors("root.server");
+    try {
+      await createAppointment({
+        location_id: values.location_id,
+        client_id: values.client_id,
+        employee_id: values.employee_id === "none" ? null : values.employee_id,
+        service_id: values.service_id === "none" ? null : values.service_id,
+        starts_at: zonedLocalToDate(values.starts_at, timezone).toISOString(),
+        ends_at: zonedLocalToDate(values.ends_at, timezone).toISOString(),
+        source: values.source,
+        notes: values.notes || null,
+      }).unwrap();
+      toast.success(isCollege ? "Student meeting scheduled" : values.source === "walk_in" ? "Walk-in added" : "Appointment scheduled");
+      reset(newAppointment(locationId, timezone));
+      onCreated();
+    } catch (error) {
+      const normalized = applyApiErrors(error, setError, { fallback: isCollege ? "Could not schedule student meeting" : "Could not schedule appointment" });
+      if (!Object.keys(normalized.fieldErrors).length) setError("root.server", { type: "server", message: normalized.message });
+    }
+  });
+
+  const chooseService = (value, item) => {
+    setSelectedService(item);
+    setValue("service_id", value, { shouldDirty: true, shouldValidate: true });
+    const startsAt = getValues("starts_at");
+    if (!startsAt) return;
+    const start = zonedLocalToDate(startsAt, timezone);
+    const end = new Date(start.getTime() + (item?.duration_minutes || 30) * 60000);
+    setValue("ends_at", toLocalInput(end, timezone), { shouldDirty: true, shouldValidate: true });
+  };
+
+  return <Form {...appointmentForm}><form noValidate onSubmit={submit} className="space-y-5">
+    <FormField control={control} name="client_id" render={({ field }) => <FormItem><FormLabel>{entityName}</FormLabel><RemoteCombobox value={field.value} selectedItem={selectedClient} items={clients} onValueChange={(value, item) => { field.onChange(value); setSelectedClient(item); }} onSearchChange={setClientSearch} getLabel={(row) => row.display_name || fullName(row)} getDescription={(row) => isCollege ? row.admission_number || row.client_number : row.phone || row.client_number} placeholder={`Select ${entityName.toLowerCase()}`} searchPlaceholder={`Search ${entityName.toLowerCase()} name or number`} loading={clientsResponse.isFetching} error={clientsResponse.isError} hasMore={Boolean(clientsResponse.data?.has_more)} onLoadMore={() => clientPaging.loadMore(clientsResponse.data?.next_cursor)} onRetry={clientsResponse.refetch} /><FormMessage /></FormItem>} />
+    <div className="grid gap-4 sm:grid-cols-2">
+      {!isCollege && <FormField control={control} name="service_id" render={({ field }) => <FormItem><FormLabel>Service</FormLabel><RemoteCombobox value={field.value} selectedItem={selectedService} items={[NONE_SERVICE, ...services]} onValueChange={chooseService} onSearchChange={setServiceSearch} getLabel={(row) => row.name} getDescription={(row) => row.id === "none" ? "No catalog service" : `${money(row.price_paise)} · ${row.duration_minutes || 30} min`} placeholder="Choose service" searchPlaceholder="Search service name" loading={servicesResponse.isFetching} error={servicesResponse.isError} hasMore={Boolean(servicesResponse.data?.has_more)} onLoadMore={() => servicePaging.loadMore(servicesResponse.data?.next_cursor)} onRetry={servicesResponse.refetch} /><FormMessage /></FormItem>} />}
+      <FormField control={control} name="employee_id" render={({ field }) => <FormItem><FormLabel>{isCollege ? "Faculty / placement coordinator" : "Assigned staff"}</FormLabel><RemoteCombobox value={field.value} selectedItem={selectedEmployee} items={[NONE_EMPLOYEE, ...employees]} onValueChange={(value, item) => { field.onChange(value); setSelectedEmployee(item); }} onSearchChange={setEmployeeSearch} getLabel={(row) => row.id === "none" ? "Unassigned" : fullName(row)} getDescription={(row) => row.id === "none" ? "Assign later" : row.designation} placeholder="Choose team member" searchPlaceholder="Search team member" loading={employeesResponse.isFetching} error={employeesResponse.isError} hasMore={Boolean(employeesResponse.data?.has_more)} onLoadMore={() => employeePaging.loadMore(employeesResponse.data?.next_cursor)} onRetry={employeesResponse.refetch} /><FormMessage /></FormItem>} />
+    </div>
+    <div className="grid gap-4 sm:grid-cols-2"><ValidatedCalendarField control={control} name="starts_at" label="Starts"><Input type="datetime-local" /></ValidatedCalendarField><ValidatedCalendarField control={control} name="ends_at" label="Ends"><Input type="datetime-local" /></ValidatedCalendarField></div>
+    <div className="grid gap-4 sm:grid-cols-2">{!isCollege && <FormField control={control} name="source" render={({ field }) => <FormItem><FormLabel>Booking type</FormLabel><Select value={field.value} onValueChange={field.onChange}><FormControl><SelectTrigger><SelectValue /></SelectTrigger></FormControl><SelectContent><SelectItem value="staff">Scheduled booking</SelectItem><SelectItem value="walk_in">Walk-in</SelectItem><SelectItem value="phone">Phone booking</SelectItem></SelectContent></Select><FormMessage /></FormItem>} />}<ValidatedCalendarField control={control} name="notes" label={isCollege ? "Meeting purpose / notes" : "Notes"}><Input placeholder={isCollege ? "Placement counselling, resume review, interview preparation..." : undefined} /></ValidatedCalendarField></div>
+    <FormRootError error={formState.errors.root?.server} />
+    <Button type="submit" loading={formState.isSubmitting || saving} loadingText="Checking availability..." className="h-12 w-full">{isCollege ? "Schedule meeting" : "Save appointment"}</Button>
+  </form></Form>;
+}
+
+function ValidatedCalendarField({ control, name, label, children }) {
+  return <FormField control={control} name={name} render={({ field }) => <FormItem><FormLabel>{label}</FormLabel><FormControl>{React.cloneElement(children, { ...field, value: field.value ?? "" })}</FormControl><FormMessage /></FormItem>} />;
+}
+
+function LegacyAppointmentForm({ open, locationId, isCollege, entityName, form, setForm, serviceChanged, submit, saving }) {
   const [clientSearch, setClientSearch] = useState("");
   const [employeeSearch, setEmployeeSearch] = useState("");
   const [serviceSearch, setServiceSearch] = useState("");

@@ -101,9 +101,9 @@ AUTH_COOKIE_DOMAIN=
 
 Keep `AUTH_COOKIE_SECURE=false` only for local `http://localhost` development. Restart the API after changing environment values.
 
-## Razorpay Test and Live Payments
+## Payment Gateways
 
-Payment mode is selected on the server. Test and live credentials are stored separately so they cannot be mixed accidentally.
+Gateway credentials and test/live modes are selected on the server. Super Admin chooses which configured provider handles new checkouts; existing payments remain bound to their original provider.
 
 ```dotenv
 RAZORPAY_MODE=test
@@ -114,9 +114,21 @@ RAZORPAY_TEST_WEBHOOK_SECRET=your_test_webhook_secret
 RAZORPAY_LIVE_KEY_ID=
 RAZORPAY_LIVE_KEY_SECRET=
 RAZORPAY_LIVE_WEBHOOK_SECRET=
+
+CASHFREE_MODE=test
+CASHFREE_API_VERSION=2025-01-01
+CASHFREE_TEST_APP_ID=your_test_app_id
+CASHFREE_TEST_SECRET_KEY=your_test_secret_key
+CASHFREE_TEST_WEBHOOK_SECRET=your_test_secret_key
+
+CASHFREE_LIVE_APP_ID=
+CASHFREE_LIVE_SECRET_KEY=
+CASHFREE_LIVE_WEBHOOK_SECRET=
 ```
 
-Use `RAZORPAY_MODE=mock` for local payments without Razorpay, `test` for Razorpay's simulated payment flow, and `live` only after live credentials and the live webhook are configured. Production fails closed when mock mode is selected. Existing `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, and `RAZORPAY_WEBHOOK_SECRET` values remain supported when their key prefix matches the selected mode.
+Use provider `mock` mode only for local development, `test` for sandbox checkout, and `live` only after live credentials and webhooks are configured. Production fails closed for mock payments. `PAYMENT_GATEWAY` supplies the initial/fallback provider; after seeding, switch the active provider from Super Admin > Billing. Provider secrets are never returned to the browser or stored in platform settings.
+
+Cashfree currently handles paid signup, one-time plan terms, AI-wallet top-ups, verification, webhooks, and refunds. Existing Razorpay recurring subscriptions remain on Razorpay; when Cashfree is active, new plan purchases use one-time terms.
 
 Public signup prices come from active, public, published plan versions. If Super Admin disables Trial, `/api/auth/register` is blocked and a workspace is provisioned only after the initial paid-plan order is verified as captured.
 
@@ -127,6 +139,14 @@ https://your-api-domain.example/api/billing/webhook
 ```
 
 Subscribe to `payment.captured`, `payment.failed`, and `order.paid`. Razorpay requires a public HTTPS URL and does not deliver webhooks to localhost.
+
+Configure the Cashfree webhook as:
+
+```text
+https://your-api-domain.example/api/billing/webhooks/cashfree
+```
+
+Enable payment success, failed, user-dropped, and refund-status events. Keep the webhook secret synchronized with the Cashfree client secret or set the matching `CASHFREE_*_WEBHOOK_SECRET` explicitly.
 
 Run the durable document and notification worker separately:
 

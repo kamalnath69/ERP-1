@@ -12,8 +12,8 @@ router = APIRouter(prefix="/clients", tags=["clients"])
 
 @router.get("/directory")
 def directory(
-    q: str | None = None,
-    segment: str = "all",
+    q: str | None = Query(default=None, max_length=100),
+    segment: str = Query(default="all", pattern="^(all|active|inactive|new|attention|member|product_only|balance)$"),
     location_id: str | None = None,
     limit: int = Query(default=50, ge=1, le=100),
     cursor: str | None = None,

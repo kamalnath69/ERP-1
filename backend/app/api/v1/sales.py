@@ -1,11 +1,13 @@
 """Thin sales and payment API."""
 from datetime import datetime
+from typing import Literal
 
 from fastapi import APIRouter, Depends, Query, status
-from pydantic import BaseModel, Field
+from pydantic import Field, model_validator
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.schemas.validation import RequestModel
 from app.core.deps import require_permissions
 from app.services.sales import create_sale, invoice_detail, record_payment, sales_workspace, void_invoice
 
@@ -13,13 +15,13 @@ from app.services.sales import create_sale, invoice_detail, record_payment, sale
 router = APIRouter(prefix="/sales", tags=["sales"])
 
 
-class InvoiceLineBody(BaseModel):
+class InvoiceLineBody(RequestModel):
     item_id: str
     quantity_milli: int = Field(gt=0)
     discount_paise: int = Field(default=0, ge=0)
 
 
-class InvoiceBody(BaseModel):
+class InvoiceBody(RequestModel):
     location_id: str
     client_id: str | None = None
     employee_id: str | None = None
@@ -30,16 +32,23 @@ class InvoiceBody(BaseModel):
     issue: bool = True
     idempotency_key: str = Field(min_length=8, max_length=120)
 
+    @model_validator(mode="after")
+    def unique_items(self):
+        item_ids = [line.item_id for line in self.lines]
+        if len(set(item_ids)) != len(item_ids):
+            raise ValueError("Each item can appear only once on an invoice")
+        return self
 
-class PaymentBody(BaseModel):
+
+class PaymentBody(RequestModel):
     amount_paise: int = Field(gt=0)
-    method: str
+    method: Literal["cash", "upi", "card", "bank"]
     reference: str | None = Field(default=None, max_length=120)
     idempotency_key: str = Field(min_length=8, max_length=120)
     version: int | None = Field(default=None, ge=1)
 
 
-class VoidInvoiceBody(BaseModel):
+class VoidInvoiceBody(RequestModel):
     reason: str = Field(min_length=3, max_length=500)
     version: int | None = Field(default=None, ge=1)
 
@@ -48,7 +57,7 @@ class VoidInvoiceBody(BaseModel):
 def workspace(
     location_id: str | None = None,
     q: str | None = Query(default=None, max_length=120),
-    status_filter: str | None = Query(default=None, alias="status"),
+    status_filter: str | None = Query(default=None, alias="status", pattern="^(draft|issued|partially_paid|paid|void|refunded)$"),
     starts_at: datetime | None = None,
     ends_at: datetime | None = None,
     limit: int = Query(default=50, ge=1, le=100),
@@ -72,7 +81,7 @@ def workspace(
 @router.get("")
 def list_compatibility(
     location_id: str | None = None,
-    status_filter: str | None = Query(default=None, alias="status"),
+    status_filter: str | None = Query(default=None, alias="status", pattern="^(draft|issued|partially_paid|paid|void|refunded)$"),
     user=Depends(require_permissions("sales.view")),
     db: Session = Depends(get_db),
 ):

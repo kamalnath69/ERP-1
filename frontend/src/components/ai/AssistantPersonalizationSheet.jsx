@@ -1,8 +1,11 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect } from "react";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { useForm } from "react-hook-form";
 import { Sparkle } from "@phosphor-icons/react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { FieldError, FormRootError } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -15,6 +18,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useAuth } from "@/contexts/AuthContext";
 import { useBusiness } from "@/contexts/BusinessContext";
 import { useSaveMyPreferenceMutation } from "@/store/api/workspaceApi";
+import { applyApiErrors, assistantPreferencesSchema, FORM_OPTIONS } from "@/lib/validation";
 
 export const ASSISTANT_DEFAULTS = Object.freeze({
   preferred_name: "",
@@ -32,19 +36,21 @@ export default function AssistantPersonalizationSheet({ open, onOpenChange }) {
   const { user } = useAuth();
   const { context, refresh } = useBusiness();
   const saved = context?.preferences?.assistant;
-  const [form, setForm] = useState(ASSISTANT_DEFAULTS);
   const [savePreference, saveState] = useSaveMyPreferenceMutation();
+  const formApi = useForm({ resolver: zodResolver(assistantPreferencesSchema), defaultValues: ASSISTANT_DEFAULTS, ...FORM_OPTIONS });
+  const { clearErrors, formState, handleSubmit, register, reset, setError, setValue, watch } = formApi;
+  const form = watch();
 
   useEffect(() => {
-    if (open) setForm(assistantPreferences(context));
-  }, [context, open]);
+    if (open) reset(assistantPreferences(context));
+  }, [context, open, reset]);
 
-  const update = (key, value) => setForm((current) => ({ ...current, [key]: value }));
-  const save = async () => {
+  const save = handleSubmit(async (values) => {
+    clearErrors("root.server");
     try {
       await savePreference({
         namespace: "assistant",
-        value: form,
+        value: values,
         version: saved?.version,
       }).unwrap();
       await refresh();
@@ -53,14 +59,18 @@ export default function AssistantPersonalizationSheet({ open, onOpenChange }) {
     } catch (error) {
       if (error?.status === 409) {
         await refresh();
+        setError("root.server", { type: "conflict", message: "These preferences changed on another device. Review the latest values and try again." });
         toast.error("These preferences changed on another device. Review the latest values and try again.");
       } else {
-        toast.error(error?.data?.detail || "Assistant preferences could not be saved");
+        const normalized = applyApiErrors(error, setError, { fallback: "Assistant preferences could not be saved" });
+        toast.error(normalized.message);
       }
     }
-  };
+  });
 
-  return <Sheet open={open} onOpenChange={onOpenChange}>
+  const close = (next) => { if (!next && (formState.isSubmitting || saveState.isLoading)) return; onOpenChange(next); };
+
+  return <Sheet open={open} onOpenChange={close}>
     <SheetContent className="premium-scrollbar flex w-full flex-col overflow-y-auto sm:max-w-lg">
       <SheetHeader className="text-left">
         <div className="mb-2 grid h-11 w-11 place-items-center rounded-2xl bg-primary text-primary-foreground">
@@ -78,10 +88,11 @@ export default function AssistantPersonalizationSheet({ open, onOpenChange }) {
           <Input
             id="assistant-preferred-name"
             maxLength={60}
-            value={form.preferred_name}
-            onChange={(event) => update("preferred_name", event.target.value)}
+            {...register("preferred_name")}
+            aria-invalid={Boolean(formState.errors.preferred_name)}
             placeholder={user?.first_name || "Your preferred name"}
           />
+          <FieldError error={formState.errors.preferred_name} />
           <p className="text-xs leading-5 text-muted-foreground">Leave this blank to use your profile first name.</p>
         </div>
 
@@ -90,14 +101,14 @@ export default function AssistantPersonalizationSheet({ open, onOpenChange }) {
             id="assistant-tone"
             label="Tone"
             value={form.tone}
-            onChange={(value) => update("tone", value)}
+            onChange={(value) => setValue("tone", value, { shouldDirty: true, shouldValidate: true })}
             options={[["professional", "Professional"], ["friendly", "Friendly"], ["direct", "Direct"]]}
           />
           <PreferenceSelect
             id="assistant-detail"
             label="Answer length"
             value={form.detail}
-            onChange={(value) => update("detail", value)}
+            onChange={(value) => setValue("detail", value, { shouldDirty: true, shouldValidate: true })}
             options={[["concise", "Concise"], ["balanced", "Balanced"], ["detailed", "Detailed"]]}
           />
         </div>
@@ -106,7 +117,7 @@ export default function AssistantPersonalizationSheet({ open, onOpenChange }) {
           id="assistant-formatting"
           label="Preferred formatting"
           value={form.formatting}
-          onChange={(value) => update("formatting", value)}
+          onChange={(value) => setValue("formatting", value, { shouldDirty: true, shouldValidate: true })}
           options={[["auto", "Choose automatically"], ["bullets", "Bullets and steps"], ["paragraphs", "Plain paragraphs"]]}
         />
 
@@ -119,10 +130,11 @@ export default function AssistantPersonalizationSheet({ open, onOpenChange }) {
             id="assistant-custom-instructions"
             rows={7}
             maxLength={1500}
-            value={form.custom_instructions}
-            onChange={(event) => update("custom_instructions", event.target.value)}
+            {...register("custom_instructions")}
+            aria-invalid={Boolean(formState.errors.custom_instructions)}
             placeholder="For example: Avoid jargon. Start with the action I should take, then show supporting details."
           />
+          <FieldError error={formState.errors.custom_instructions} />
           <p className="text-xs leading-5 text-muted-foreground">
             Instructions shape presentation only. Access rules, business facts, confirmations, and tool safety cannot be changed.
           </p>
@@ -136,15 +148,15 @@ export default function AssistantPersonalizationSheet({ open, onOpenChange }) {
         </div>
       </div>
 
+      <FormRootError error={formState.errors.root?.server} />
+
       <SheetFooter className="sticky bottom-0 border-t bg-background py-4 sm:justify-between">
-        <Button type="button" variant="ghost" onClick={() => setForm(ASSISTANT_DEFAULTS)} disabled={saveState.isLoading}>
+        <Button type="button" variant="ghost" onClick={() => reset(ASSISTANT_DEFAULTS)} disabled={saveState.isLoading || formState.isSubmitting}>
           Reset defaults
         </Button>
         <div className="flex gap-2">
-          <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={saveState.isLoading}>Cancel</Button>
-          <Button type="button" onClick={save} disabled={saveState.isLoading}>
-            {saveState.isLoading ? "Saving..." : "Save preferences"}
-          </Button>
+          <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={saveState.isLoading || formState.isSubmitting}>Cancel</Button>
+          <Button type="button" onClick={save} loading={saveState.isLoading || formState.isSubmitting} loadingText="Saving preferences...">Save preferences</Button>
         </div>
       </SheetFooter>
     </SheetContent>

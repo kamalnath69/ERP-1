@@ -1,5 +1,7 @@
-import React, { useDeferredValue, useEffect, useMemo, useState } from "react";
+import React, { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, useNavigate, useSearchParams } from "react-router-dom";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { useForm } from "react-hook-form";
 import {
   Archive, ArrowRight, Books, Briefcase, Buildings, CalendarCheck, ChartBar,
   CheckCircle, Code, Database, FileArrowUp, Funnel, GraduationCap, ListChecks,
@@ -16,6 +18,7 @@ import {
   SegmentControl, StatusBadge, Surface,
 } from "@/components/system";
 import { Button } from "@/components/ui/button";
+import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage, FormRootError } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -39,6 +42,11 @@ import {
   useSaveCollegeScoresMutation,
 } from "@/features/college/collegeApi";
 import useCursorPagination from "@/hooks/useCursorPagination";
+import {
+  applyApiErrors, assessmentScoreSchema, attendanceRecordSchema, attendanceSessionSchema,
+  collegeApplicationSchema, collegeAssessmentSchema, collegeConnectorSchema, collegeDriveSchema,
+  companySchema, FORM_OPTIONS, normalizeApiError,
+} from "@/lib/validation";
 
 
 const NAVIGATION = [
@@ -454,47 +462,116 @@ function ClearancePanel() {
 function AttendanceRegisterDrawer({ session, onClose }) {
   const [search, setSearch] = useState("");
   const [changes, setChanges] = useState({});
+  const [rowErrors, setRowErrors] = useState({});
+  const [formError, setFormError] = useState("");
+  const submitLock = useRef(false);
   const q = useDeferredValue(search.trim());
   const paging = useCursorPagination(JSON.stringify({ id: session?.id, q }));
   const query = useGetCollegeAttendanceRegisterQuery({ sessionId: session?.id, q, cursor: paging.cursor, limit: 50 }, { skip: !session?.id });
   const rows = usePagedData(query, paging);
   const [save, saveState] = useSaveCollegeAttendanceMutation();
-  useEffect(() => { if (!session) { setSearch(""); setChanges({}); } }, [session]);
+  useEffect(() => { if (!session) { setSearch(""); setChanges({}); setRowErrors({}); setFormError(""); } }, [session]);
   const submit = async () => {
     const records = Object.entries(changes).map(([student_profile_id, value]) => ({ student_profile_id, status: value.status, note: value.note || null }));
     if (!records.length) return;
-    try { await save({ sessionId: session.id, records }).unwrap(); toast.success("Attendance changes saved"); setChanges({}); paging.reset(); query.refetch(); }
-    catch (error) { toast.error(error?.data?.detail || "Attendance could not be saved"); }
+    const errors = {};
+    records.forEach((record) => {
+      const parsed = attendanceRecordSchema.safeParse(record);
+      if (!parsed.success) errors[record.student_profile_id] = parsed.error.issues[0]?.message || "Invalid attendance value";
+    });
+    setRowErrors(errors);
+    if (Object.keys(errors).length || submitLock.current) return;
+    submitLock.current = true;
+    setFormError("");
+    try { await save({ sessionId: session.id, records }).unwrap(); toast.success("Attendance changes saved"); setChanges({}); setRowErrors({}); paging.reset(); query.refetch(); }
+    catch (error) { setFormError(normalizeApiError(error, "Attendance could not be saved").message); }
+    finally { submitLock.current = false; }
   };
-  return <DrawerForm open={Boolean(session)} onOpenChange={(open) => !open && onClose()} title={session ? `Attendance / ${session.course_name}` : "Attendance register"} description={query.data?.summary ? `${query.data.summary.recorded} recorded / ${query.data.summary.unrecorded} remaining` : "Paged student register"}><div className="space-y-4"><SearchField value={search} onChange={setSearch} placeholder="Search student" /><div className="divide-y rounded-xl border">{rows.map((row) => { const value = changes[row.student_profile_id] || row; return <div key={row.student_profile_id} className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center"><div className="min-w-0 flex-1"><div className="font-semibold">{row.student_name}</div><div className="mt-1 text-xs text-muted-foreground">{row.admission_number} / {row.roll_number || "No roll number"}</div></div><Select value={value.status} onValueChange={(status) => setChanges((current) => ({ ...current, [row.student_profile_id]: { ...value, status } }))}><SelectTrigger className="sm:w-40"><SelectValue /></SelectTrigger><SelectContent>{["unrecorded", "present", "absent", "late", "excused"].map((status) => <SelectItem key={status} value={status} disabled={status === "unrecorded"}>{sentence(status)}</SelectItem>)}</SelectContent></Select></div>; })}</div><ListFooter query={query} paging={paging} noun="students" /><div className="sticky bottom-0 flex flex-col gap-2 border-t bg-card/95 pt-4 backdrop-blur sm:flex-row sm:items-center sm:justify-between"><span className="text-xs text-muted-foreground">{Object.keys(changes).length} unsaved change(s)</span><Button onClick={submit} disabled={!Object.keys(changes).length || saveState.isLoading}>{saveState.isLoading ? "Saving..." : "Save attendance"}</Button></div></div></DrawerForm>;
+  return <DrawerForm open={Boolean(session)} onOpenChange={(open) => { if (!open && !saveState.isLoading) onClose(); }} title={session ? `Attendance / ${session.course_name}` : "Attendance register"} description={query.data?.summary ? `${query.data.summary.recorded} recorded / ${query.data.summary.unrecorded} remaining` : "Paged student register"}><div className="space-y-4"><SearchField value={search} onChange={setSearch} placeholder="Search student" /><div className="divide-y rounded-xl border">{rows.map((row) => { const value = changes[row.student_profile_id] || row; const error = rowErrors[row.student_profile_id]; return <div key={row.student_profile_id} className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center"><div className="min-w-0 flex-1"><div className="font-semibold">{row.student_name}</div><div className="mt-1 text-xs text-muted-foreground">{row.admission_number} / {row.roll_number || "No roll number"}</div>{error && <p role="alert" className="mt-1 text-xs font-medium text-destructive">{error}</p>}</div><Select value={value.status} onValueChange={(status) => { setChanges((current) => ({ ...current, [row.student_profile_id]: { ...value, status } })); setRowErrors((current) => ({ ...current, [row.student_profile_id]: undefined })); }}><SelectTrigger className="sm:w-40" aria-invalid={Boolean(error)}><SelectValue /></SelectTrigger><SelectContent>{["unrecorded", "present", "absent", "late", "excused"].map((status) => <SelectItem key={status} value={status} disabled={status === "unrecorded"}>{sentence(status)}</SelectItem>)}</SelectContent></Select></div>; })}</div><ListFooter query={query} paging={paging} noun="students" />{formError && <div role="alert" className="rounded-xl border border-destructive/25 bg-destructive/5 p-3 text-sm text-destructive">{formError}</div>}<div className="sticky bottom-0 flex flex-col gap-2 border-t bg-card/95 pt-4 backdrop-blur sm:flex-row sm:items-center sm:justify-between"><span className="text-xs text-muted-foreground">{Object.keys(changes).length} unsaved change(s)</span><Button onClick={submit} disabled={!Object.keys(changes).length} loading={saveState.isLoading} loadingText="Saving...">Save attendance</Button></div></div></DrawerForm>;
 }
 
 function AssessmentRegisterDrawer({ assessment, onClose }) {
   const [search, setSearch] = useState("");
   const [changes, setChanges] = useState({});
+  const [rowErrors, setRowErrors] = useState({});
+  const [formError, setFormError] = useState("");
+  const [pendingMode, setPendingMode] = useState(null);
+  const submitLock = useRef(false);
   const q = useDeferredValue(search.trim());
   const paging = useCursorPagination(JSON.stringify({ id: assessment?.id, q }));
   const query = useGetCollegeAssessmentRegisterQuery({ assessmentId: assessment?.id, q, cursor: paging.cursor, limit: 50 }, { skip: !assessment?.id });
   const rows = usePagedData(query, paging);
   const [save, saveState] = useSaveCollegeScoresMutation();
-  useEffect(() => { if (!assessment) { setSearch(""); setChanges({}); } }, [assessment]);
+  useEffect(() => { if (!assessment) { setSearch(""); setChanges({}); setRowErrors({}); setFormError(""); } }, [assessment]);
   const submit = async (publish = false) => {
-    const scores = Object.entries(changes).map(([student_profile_id, value]) => ({ student_profile_id, marks_awarded: value.marks_awarded === "" ? null : Number(value.marks_awarded), grade: value.grade || null, feedback: value.feedback || null }));
+    const rawScores = Object.entries(changes).map(([student_profile_id, value]) => ({ student_profile_id, marks_awarded: value.marks_awarded, grade: value.grade || null, feedback: value.feedback || null }));
+    const errors = {};
+    const scores = [];
+    rawScores.forEach((score) => {
+      const parsed = assessmentScoreSchema.safeParse(score);
+      if (!parsed.success) { errors[score.student_profile_id] = parsed.error.issues[0]?.message || "Invalid score"; return; }
+      if (parsed.data.marks_awarded != null && Number(parsed.data.marks_awarded) > Number(assessment?.max_marks || 0)) { errors[score.student_profile_id] = `Marks cannot exceed ${assessment.max_marks}`; return; }
+      scores.push(parsed.data);
+    });
+    setRowErrors(errors);
+    if (Object.keys(errors).length || submitLock.current) return;
     if (!scores.length) return;
-    try { await save({ assessmentId: assessment.id, scores, publish }).unwrap(); toast.success(publish ? "Scores published" : "Scores saved"); setChanges({}); paging.reset(); query.refetch(); }
-    catch (error) { toast.error(error?.data?.detail || "Scores could not be saved"); }
+    submitLock.current = true;
+    setPendingMode(publish ? "publish" : "draft");
+    setFormError("");
+    try { await save({ assessmentId: assessment.id, scores, publish }).unwrap(); toast.success(publish ? "Scores published" : "Scores saved"); setChanges({}); setRowErrors({}); paging.reset(); query.refetch(); }
+    catch (error) { setFormError(normalizeApiError(error, "Scores could not be saved").message); }
+    finally { submitLock.current = false; setPendingMode(null); }
   };
-  return <DrawerForm open={Boolean(assessment)} onOpenChange={(open) => !open && onClose()} title={assessment?.title || "Assessment register"} description={query.data?.summary ? `${query.data.summary.scored} scored / ${query.data.summary.unscored} remaining` : "Paged score register"}><div className="space-y-4"><SearchField value={search} onChange={setSearch} placeholder="Search student" /><div className="divide-y rounded-xl border">{rows.map((row) => { const value = changes[row.student_profile_id] || row; return <div key={row.student_profile_id} className="grid gap-3 p-3 sm:grid-cols-[minmax(0,1fr)_110px_90px] sm:items-center"><div><div className="font-semibold">{row.student_name}</div><div className="mt-1 text-xs text-muted-foreground">{row.admission_number}</div></div><Input type="number" min="0" max={assessment?.max_marks} value={value.marks_awarded ?? ""} placeholder={`/${assessment?.max_marks}`} onChange={(event) => setChanges((current) => ({ ...current, [row.student_profile_id]: { ...value, marks_awarded: event.target.value } }))} /><Input value={value.grade || ""} placeholder="Grade" onChange={(event) => setChanges((current) => ({ ...current, [row.student_profile_id]: { ...value, grade: event.target.value } }))} /></div>; })}</div><ListFooter query={query} paging={paging} noun="students" /><div className="sticky bottom-0 flex flex-col gap-2 border-t bg-card/95 pt-4 backdrop-blur sm:flex-row sm:items-center sm:justify-between"><span className="text-xs text-muted-foreground">{Object.keys(changes).length} unsaved change(s)</span><div className="flex gap-2"><Button variant="outline" onClick={() => submit(false)} disabled={!Object.keys(changes).length || saveState.isLoading}>Save draft</Button><Button onClick={() => submit(true)} disabled={!Object.keys(changes).length || saveState.isLoading}>Publish</Button></div></div></div></DrawerForm>;
+  return <DrawerForm open={Boolean(assessment)} onOpenChange={(open) => { if (!open && !saveState.isLoading) onClose(); }} title={assessment?.title || "Assessment register"} description={query.data?.summary ? `${query.data.summary.scored} scored / ${query.data.summary.unscored} remaining` : "Paged score register"}><div className="space-y-4"><SearchField value={search} onChange={setSearch} placeholder="Search student" /><div className="divide-y rounded-xl border">{rows.map((row) => { const value = changes[row.student_profile_id] || row; const error = rowErrors[row.student_profile_id]; return <div key={row.student_profile_id} className="grid gap-3 p-3 sm:grid-cols-[minmax(0,1fr)_110px_90px] sm:items-center"><div><div className="font-semibold">{row.student_name}</div><div className="mt-1 text-xs text-muted-foreground">{row.admission_number}</div>{error && <p role="alert" className="mt-1 text-xs font-medium text-destructive">{error}</p>}</div><Input inputMode="decimal" aria-label={`Marks for ${row.student_name}`} aria-invalid={Boolean(error)} value={value.marks_awarded ?? ""} placeholder={`/${assessment?.max_marks}`} onChange={(event) => { setChanges((current) => ({ ...current, [row.student_profile_id]: { ...value, marks_awarded: event.target.value } })); setRowErrors((current) => ({ ...current, [row.student_profile_id]: undefined })); }} /><Input value={value.grade || ""} maxLength={12} aria-label={`Grade for ${row.student_name}`} placeholder="Grade" onChange={(event) => { setChanges((current) => ({ ...current, [row.student_profile_id]: { ...value, grade: event.target.value } })); setRowErrors((current) => ({ ...current, [row.student_profile_id]: undefined })); }} /></div>; })}</div><ListFooter query={query} paging={paging} noun="students" />{formError && <div role="alert" className="rounded-xl border border-destructive/25 bg-destructive/5 p-3 text-sm text-destructive">{formError}</div>}<div className="sticky bottom-0 flex flex-col gap-2 border-t bg-card/95 pt-4 backdrop-blur sm:flex-row sm:items-center sm:justify-between"><span className="text-xs text-muted-foreground">{Object.keys(changes).length} unsaved change(s)</span><div className="flex gap-2"><Button variant="outline" onClick={() => submit(false)} disabled={!Object.keys(changes).length || Boolean(pendingMode)} loading={pendingMode === "draft"} loadingText="Saving...">Save draft</Button><Button onClick={() => submit(true)} disabled={!Object.keys(changes).length || Boolean(pendingMode)} loading={pendingMode === "publish"} loadingText="Publishing...">Publish</Button></div></div></div></DrawerForm>;
 }
 
 function CompanyDrawer({ open, onClose }) {
-  const [form, setForm] = useState({ name: "", industry: "", website: "", contact_name: "", contact_email: "", contact_phone: "", notes: "", is_active: true });
   const [create, state] = useCreateCollegeCompanyMutation();
-  const submit = async (event) => { event.preventDefault(); try { await create(nulls(form)).unwrap(); toast.success("Company added"); onClose(); } catch (error) { toast.error(error?.data?.detail || "Company could not be added"); } };
-  return <DrawerForm open={open} onOpenChange={(value) => !value && onClose()} title="Add recruiting company" description="Create the employer once, then connect opportunities and outcomes."><form onSubmit={submit} className="space-y-4"><Field label="Company name"><Input required value={form.name} onChange={field(setForm, "name")} /></Field><div className="grid gap-4 sm:grid-cols-2"><Field label="Industry"><Input value={form.industry} onChange={field(setForm, "industry")} /></Field><Field label="Website"><Input type="url" value={form.website} onChange={field(setForm, "website")} /></Field><Field label="Contact name"><Input value={form.contact_name} onChange={field(setForm, "contact_name")} /></Field><Field label="Contact email"><Input type="email" value={form.contact_email} onChange={field(setForm, "contact_email")} /></Field></div><Button className="w-full" disabled={state.isLoading}>{state.isLoading ? "Adding..." : "Add company"}</Button></form></DrawerForm>;
+  const form = useForm({ resolver: zodResolver(companySchema), defaultValues: companyDefaults, ...FORM_OPTIONS });
+  const { control, formState, handleSubmit, reset, setError } = form;
+  useEffect(() => { if (open) reset(companyDefaults); }, [open, reset]);
+  const pending = formState.isSubmitting || state.isLoading;
+  const submit = handleSubmit(async (values) => {
+    try { await create(values).unwrap(); toast.success("Company added"); reset(companyDefaults); onClose(); }
+    catch (error) { const normalized = applyApiErrors(error, setError, { fallback: "Company could not be added" }); if (!Object.keys(normalized.fieldErrors).length) setError("root.server", { type: "server", message: normalized.message }); }
+  });
+  return <DrawerForm open={open} onOpenChange={(value) => { if (!value && !pending) onClose(); }} title="Add recruiting company" description="Create the employer once, then connect opportunities and outcomes."><Form {...form}><form noValidate onSubmit={submit} className="space-y-4"><CollegeFormField control={control} name="name" label="Company name"><Input autoFocus /></CollegeFormField><div className="grid gap-4 sm:grid-cols-2"><CollegeFormField control={control} name="industry" label="Industry"><Input /></CollegeFormField><CollegeFormField control={control} name="website" label="Website"><Input type="url" /></CollegeFormField><CollegeFormField control={control} name="contact_name" label="Contact name"><Input /></CollegeFormField><CollegeFormField control={control} name="contact_email" label="Contact email"><Input type="email" /></CollegeFormField><CollegeFormField control={control} name="contact_phone" label="Contact phone"><Input inputMode="tel" /></CollegeFormField></div><CollegeFormField control={control} name="notes" label="Internal note"><Textarea rows={3} /></CollegeFormField><FormRootError error={formState.errors.root?.server} /><Button type="submit" className="w-full" loading={pending} loadingText="Adding...">Add company</Button></form></Form></DrawerForm>;
 }
 
 function DriveDrawer({ open, onClose }) {
+  const [companySearch, setCompanySearch] = useState("");
+  const companies = useGetCollegeCompaniesQuery({ q: companySearch, limit: 25 }, { skip: !open });
+  const [create, state] = useCreateCollegeOpportunityMutation();
+  const form = useForm({ resolver: zodResolver(collegeDriveSchema), defaultValues: driveDefaults, ...FORM_OPTIONS });
+  const { control, formState, handleSubmit, reset, setError } = form;
+  useEffect(() => { if (open) { reset(driveDefaults); setCompanySearch(""); } }, [open, reset]);
+  const pending = formState.isSubmitting || state.isLoading;
+  const submit = handleSubmit(async (values) => {
+    try { await create(values).unwrap(); toast.success("Placement drive created"); reset(driveDefaults); onClose(); }
+    catch (error) { const normalized = applyApiErrors(error, setError, { fallback: "Drive could not be created" }); if (!Object.keys(normalized.fieldErrors).length) setError("root.server", { type: "server", message: normalized.message }); }
+  });
+  return <DrawerForm open={open} onOpenChange={(value) => { if (!value && !pending) onClose(); }} title="Create placement drive" description="Set only the evidence rules this opportunity genuinely requires."><Form {...form}><form noValidate onSubmit={submit} className="space-y-5">
+    <div className="space-y-2"><label className="text-sm font-medium" htmlFor="company-search">Find company</label><Input id="company-search" value={companySearch} onChange={(event) => setCompanySearch(event.target.value)} placeholder="Search employer" /></div>
+    <FormField control={control} name="company_id" render={({ field }) => <FormItem><FormLabel>Company</FormLabel><Select value={field.value} onValueChange={field.onChange}><FormControl><SelectTrigger><SelectValue placeholder="Choose company" /></SelectTrigger></FormControl><SelectContent>{(companies.data?.items || []).map((row) => <SelectItem key={row.id} value={row.id}>{row.name}</SelectItem>)}</SelectContent></Select><FormMessage /></FormItem>} />
+    <CollegeFormField control={control} name="title" label="Opportunity title"><Input /></CollegeFormField>
+    <div className="grid gap-4 sm:grid-cols-2">
+      <CollegeSelectField control={control} name="opportunity_type" label="Type" values={["campus_drive", "internship", "off_campus", "apprenticeship"]} />
+      <CollegeSelectField control={control} name="status" label="Status" values={["draft", "published", "active"]} />
+      <CollegeFormField control={control} name="deadline_at" label="Application deadline"><Input type="datetime-local" /></CollegeFormField>
+      <CollegeFormField control={control} name="drive_at" label="Drive date"><Input type="datetime-local" /></CollegeFormField>
+      <CollegeFormField control={control} name="work_location" label="Work location"><Input /></CollegeFormField>
+      <CollegeFormField control={control} name="employment_type" label="Employment type"><Input /></CollegeFormField>
+      <CollegeFormField control={control} name="package_min" label="Minimum package (INR)"><Input inputMode="decimal" /></CollegeFormField>
+      <CollegeFormField control={control} name="package_max" label="Maximum package (INR)"><Input inputMode="decimal" /></CollegeFormField>
+    </div>
+    <div className="border-t pt-4"><h3 className="text-sm font-semibold">Eligibility evidence</h3><div className="mt-3 grid gap-4 sm:grid-cols-2"><CollegeFormField control={control} name="minimum_cgpa" label="Minimum CGPA"><Input inputMode="decimal" /></CollegeFormField><CollegeFormField control={control} name="maximum_active_backlogs" label="Maximum active backlogs"><Input inputMode="numeric" /></CollegeFormField><CollegeFormField control={control} name="minimum_attendance" label="Minimum attendance %"><Input inputMode="decimal" /></CollegeFormField><CollegeFormField control={control} name="minimum_solved" label="Minimum solved problems"><Input inputMode="numeric" /></CollegeFormField></div></div>
+    <FormRootError error={formState.errors.root?.server} />
+    <Button type="submit" className="w-full" loading={pending} loadingText="Creating...">Create drive</Button>
+  </form></Form></DrawerForm>;
+}
+
+function LegacyDriveDrawer({ open, onClose }) {
   const [companySearch, setCompanySearch] = useState("");
   const companies = useGetCollegeCompaniesQuery({ q: companySearch, limit: 25 }, { skip: !open });
   const [form, setForm] = useState({ company_id: "", title: "", opportunity_type: "campus_drive", status: "active", deadline_at: "", drive_at: "", work_location: "", employment_type: "", package_min: "", package_max: "", minimum_cgpa: "", maximum_active_backlogs: "", minimum_attendance: "", minimum_solved: "" });
@@ -514,34 +591,78 @@ function ApplicationDrawer({ open, onClose }) {
   const [driveSearch, setDriveSearch] = useState("");
   const students = useGetCollegeStudentIntelligenceQuery({ q: studentSearch, limit: 25 }, { skip: !open });
   const drives = useGetCollegeOpportunitiesQuery({ q: driveSearch, status: "active", limit: 25 }, { skip: !open });
-  const [form, setForm] = useState({ opportunity_id: "", student_profile_id: "", notes: "" });
   const [create, state] = useCreateCollegeApplicationMutation();
-  const submit = async (event) => { event.preventDefault(); try { await create(nulls(form)).unwrap(); toast.success("Application created"); onClose(); } catch (error) { toast.error(error?.data?.detail || "Application could not be created"); } };
-  return <DrawerForm open={open} onOpenChange={(value) => !value && onClose()} title="Add student to opportunity" description="Eligibility is recalculated from current evidence before the application is created."><form onSubmit={submit} className="space-y-4"><Field label="Find opportunity"><Input value={driveSearch} onChange={(event) => setDriveSearch(event.target.value)} /></Field><Field label="Opportunity"><ReferenceSelect value={form.opportunity_id} onChange={(value) => setForm({ ...form, opportunity_id: value })} rows={drives.data?.items || []} label={(row) => `${row.title} / ${row.company?.name}`} placeholder="Choose opportunity" /></Field><Field label="Find student"><Input value={studentSearch} onChange={(event) => setStudentSearch(event.target.value)} /></Field><Field label="Student"><ReferenceSelect value={form.student_profile_id} onChange={(value) => setForm({ ...form, student_profile_id: value })} rows={students.data?.items || []} label={(row) => `${row.name} / ${row.admission_number}`} placeholder="Choose student" /></Field><Field label="Internal note"><Textarea value={form.notes} onChange={field(setForm, "notes")} /></Field><Button className="w-full" disabled={state.isLoading || !form.opportunity_id || !form.student_profile_id}>{state.isLoading ? "Checking eligibility..." : "Create application"}</Button></form></DrawerForm>;
+  const form = useForm({ resolver: zodResolver(collegeApplicationSchema), defaultValues: applicationDefaults, ...FORM_OPTIONS });
+  const { control, formState, handleSubmit, reset, setError } = form;
+  useEffect(() => { if (open) { reset(applicationDefaults); setStudentSearch(""); setDriveSearch(""); } }, [open, reset]);
+  const pending = formState.isSubmitting || state.isLoading;
+  const submit = handleSubmit(async (values) => {
+    try { await create(values).unwrap(); toast.success("Application created"); reset(applicationDefaults); onClose(); }
+    catch (error) { const normalized = applyApiErrors(error, setError, { fallback: "Application could not be created" }); if (!Object.keys(normalized.fieldErrors).length) setError("root.server", { type: "server", message: normalized.message }); }
+  });
+  return <DrawerForm open={open} onOpenChange={(value) => { if (!value && !pending) onClose(); }} title="Add student to opportunity" description="Eligibility is recalculated from current evidence before the application is created."><Form {...form}><form noValidate onSubmit={submit} className="space-y-4"><div className="space-y-2"><label className="text-sm font-medium" htmlFor="drive-search">Find opportunity</label><Input id="drive-search" value={driveSearch} onChange={(event) => setDriveSearch(event.target.value)} /></div><CollegeReferenceField control={control} name="opportunity_id" label="Opportunity" rows={drives.data?.items || []} getLabel={(row) => `${row.title} / ${row.company?.name}`} placeholder="Choose opportunity" /><div className="space-y-2"><label className="text-sm font-medium" htmlFor="student-search">Find student</label><Input id="student-search" value={studentSearch} onChange={(event) => setStudentSearch(event.target.value)} /></div><CollegeReferenceField control={control} name="student_profile_id" label="Student" rows={students.data?.items || []} getLabel={(row) => `${row.name} / ${row.admission_number}`} placeholder="Choose student" /><CollegeFormField control={control} name="notes" label="Internal note"><Textarea rows={3} /></CollegeFormField><FormRootError error={formState.errors.root?.server} /><Button type="submit" className="w-full" loading={pending} loadingText="Checking eligibility...">Create application</Button></form></Form></DrawerForm>;
 }
 
 function AttendanceSessionDrawer({ open, onClose }) {
   const refs = useGetCollegeReferencesQuery(undefined, { skip: !open });
-  const [form, setForm] = useState({ offering_id: "", held_on: isoToday(), starts_at: "", ends_at: "", topic: "" });
   const [create, state] = useCreateCollegeAttendanceMutation();
-  const submit = async (event) => { event.preventDefault(); try { await create({ ...nulls(form), records: [] }).unwrap(); toast.success("Attendance session created"); onClose(); } catch (error) { toast.error(error?.data?.detail || "Session could not be created"); } };
-  return <DrawerForm open={open} onOpenChange={(value) => !value && onClose()} title="Create local attendance session" description="Use only when authoritative ERP attendance is unavailable."><form onSubmit={submit} className="space-y-4"><Field label="Course offering"><ReferenceSelect value={form.offering_id} onChange={(value) => setForm({ ...form, offering_id: value })} rows={refs.data?.offerings || []} label={(row) => row.id} placeholder="Choose offering" /></Field><div className="grid gap-4 sm:grid-cols-2"><Field label="Held on"><Input type="date" required value={form.held_on} onChange={field(setForm, "held_on")} /></Field><Field label="Topic"><Input value={form.topic} onChange={field(setForm, "topic")} /></Field><Field label="Starts"><Input type="time" value={form.starts_at} onChange={field(setForm, "starts_at")} /></Field><Field label="Ends"><Input type="time" value={form.ends_at} onChange={field(setForm, "ends_at")} /></Field></div><Button className="w-full" disabled={state.isLoading || !form.offering_id}>Create session</Button></form></DrawerForm>;
+  const form = useForm({ resolver: zodResolver(attendanceSessionSchema), defaultValues: attendanceSessionDefaults(), ...FORM_OPTIONS });
+  const { control, formState, handleSubmit, reset, setError } = form;
+  useEffect(() => { if (open) reset(attendanceSessionDefaults()); }, [open, reset]);
+  const pending = formState.isSubmitting || state.isLoading;
+  const submit = handleSubmit(async (values) => {
+    try { await create({ ...values, starts_at: values.starts_at || null, ends_at: values.ends_at || null, records: [] }).unwrap(); toast.success("Attendance session created"); reset(attendanceSessionDefaults()); onClose(); }
+    catch (error) { const normalized = applyApiErrors(error, setError, { fallback: "Session could not be created" }); if (!Object.keys(normalized.fieldErrors).length) setError("root.server", { type: "server", message: normalized.message }); }
+  });
+  return <DrawerForm open={open} onOpenChange={(value) => { if (!value && !pending) onClose(); }} title="Create local attendance session" description="Use only when authoritative ERP attendance is unavailable."><Form {...form}><form noValidate onSubmit={submit} className="space-y-4"><CollegeReferenceField control={control} name="offering_id" label="Course offering" rows={refs.data?.offerings || []} getLabel={(row) => row.id} placeholder="Choose offering" /><div className="grid gap-4 sm:grid-cols-2"><CollegeFormField control={control} name="held_on" label="Held on"><Input type="date" /></CollegeFormField><CollegeFormField control={control} name="topic" label="Topic"><Input /></CollegeFormField><CollegeFormField control={control} name="starts_at" label="Starts"><Input type="time" /></CollegeFormField><CollegeFormField control={control} name="ends_at" label="Ends"><Input type="time" /></CollegeFormField></div><FormRootError error={formState.errors.root?.server} /><Button type="submit" className="w-full" loading={pending} loadingText="Creating...">Create session</Button></form></Form></DrawerForm>;
 }
 
 function AssessmentDrawer({ open, onClose }) {
   const refs = useGetCollegeReferencesQuery(undefined, { skip: !open });
-  const [form, setForm] = useState({ offering_id: "", title: "", assessment_type: "internal", max_marks: 100, weightage_bps: 0, due_on: "", status: "draft" });
   const [create, state] = useCreateCollegeAssessmentMutation();
-  const submit = async (event) => { event.preventDefault(); try { await create({ ...form, due_on: form.due_on || null, max_marks: Number(form.max_marks), weightage_bps: Number(form.weightage_bps) }).unwrap(); toast.success("Assessment created"); onClose(); } catch (error) { toast.error(error?.data?.detail || "Assessment could not be created"); } };
-  return <DrawerForm open={open} onOpenChange={(value) => !value && onClose()} title="Create assessment" description="Use for placement-specific evaluation or approved local academic evidence."><form onSubmit={submit} className="space-y-4"><Field label="Course offering"><ReferenceSelect value={form.offering_id} onChange={(value) => setForm({ ...form, offering_id: value })} rows={refs.data?.offerings || []} label={(row) => row.id} placeholder="Choose offering" /></Field><Field label="Assessment title"><Input required value={form.title} onChange={field(setForm, "title")} /></Field><div className="grid gap-4 sm:grid-cols-2"><Field label="Type"><SimpleSelect value={form.assessment_type} onChange={(value) => setForm({ ...form, assessment_type: value })} values={["internal", "assignment", "quiz", "practical", "project", "semester"]} /></Field><Field label="Maximum marks"><Input type="number" min="1" value={form.max_marks} onChange={field(setForm, "max_marks")} /></Field><Field label="Due on"><Input type="date" value={form.due_on} onChange={field(setForm, "due_on")} /></Field><Field label="Weightage (basis points)"><Input type="number" min="0" max="10000" value={form.weightage_bps} onChange={field(setForm, "weightage_bps")} /></Field></div><Button className="w-full" disabled={state.isLoading || !form.offering_id}>Create assessment</Button></form></DrawerForm>;
+  const form = useForm({ resolver: zodResolver(collegeAssessmentSchema), defaultValues: assessmentDefaults, ...FORM_OPTIONS });
+  const { control, formState, handleSubmit, reset, setError } = form;
+  useEffect(() => { if (open) reset(assessmentDefaults); }, [open, reset]);
+  const pending = formState.isSubmitting || state.isLoading;
+  const submit = handleSubmit(async (values) => {
+    try { await create(values).unwrap(); toast.success("Assessment created"); reset(assessmentDefaults); onClose(); }
+    catch (error) { const normalized = applyApiErrors(error, setError, { fallback: "Assessment could not be created" }); if (!Object.keys(normalized.fieldErrors).length) setError("root.server", { type: "server", message: normalized.message }); }
+  });
+  return <DrawerForm open={open} onOpenChange={(value) => { if (!value && !pending) onClose(); }} title="Create assessment" description="Use for placement-specific evaluation or approved local academic evidence."><Form {...form}><form noValidate onSubmit={submit} className="space-y-4"><CollegeReferenceField control={control} name="offering_id" label="Course offering" rows={refs.data?.offerings || []} getLabel={(row) => row.id} placeholder="Choose offering" /><CollegeFormField control={control} name="title" label="Assessment title"><Input /></CollegeFormField><div className="grid gap-4 sm:grid-cols-2"><CollegeSelectField control={control} name="assessment_type" label="Type" values={["internal", "assignment", "quiz", "practical", "project", "semester"]} /><CollegeFormField control={control} name="max_marks" label="Maximum marks"><Input inputMode="decimal" /></CollegeFormField><CollegeFormField control={control} name="due_on" label="Due on"><Input type="date" /></CollegeFormField><CollegeFormField control={control} name="weightage_bps" label="Weightage (basis points)"><Input inputMode="numeric" /></CollegeFormField></div><FormRootError error={formState.errors.root?.server} /><Button type="submit" className="w-full" loading={pending} loadingText="Creating...">Create assessment</Button></form></Form></DrawerForm>;
 }
 
 function ConnectorDrawer({ open, onClose }) {
-  const [form, setForm] = useState({ name: "", base_url: "", auth_mode: "bearer", auth_header: "", api_key: "", sync_interval_hours: 6 });
   const [create, state] = useCreateCollegeIntegrationMutation();
-  const submit = async (event) => { event.preventDefault(); try { await create({ ...nulls(form), mapping: {}, pagination: {}, sync_interval_hours: Number(form.sync_interval_hours) }).unwrap(); toast.success("ERP connector saved"); onClose(); } catch (error) { toast.error(error?.data?.detail || "ERP connector could not be saved"); } };
-  return <DrawerForm open={open} onOpenChange={(value) => !value && onClose()} title="Connect College ERP" description="Configure a credential-protected read-only HTTPS source."><form onSubmit={submit} className="space-y-4"><Field label="Connection name"><Input required value={form.name} onChange={field(setForm, "name")} /></Field><Field label="HTTPS base URL"><Input required type="url" value={form.base_url} onChange={field(setForm, "base_url")} /></Field><div className="grid gap-4 sm:grid-cols-2"><Field label="Authentication"><SimpleSelect value={form.auth_mode} onChange={(value) => setForm({ ...form, auth_mode: value })} values={["bearer", "header"]} /></Field>{form.auth_mode === "header" && <Field label="Header name"><Input required value={form.auth_header} onChange={field(setForm, "auth_header")} /></Field>}</div><Field label="API key"><Input type="password" required value={form.api_key} onChange={field(setForm, "api_key")} /></Field><Button className="w-full" disabled={state.isLoading}>Save connector</Button></form></DrawerForm>;
+  const form = useForm({ resolver: zodResolver(collegeConnectorSchema), defaultValues: connectorDefaults, ...FORM_OPTIONS });
+  const { control, formState, handleSubmit, reset, setError, watch } = form;
+  const authMode = watch("auth_mode");
+  useEffect(() => { if (open) reset(connectorDefaults); }, [open, reset]);
+  const pending = formState.isSubmitting || state.isLoading;
+  const submit = handleSubmit(async (values) => {
+    try { await create({ ...values, auth_header: values.auth_header || null, mapping: {}, pagination: {} }).unwrap(); toast.success("ERP connector saved"); reset(connectorDefaults); onClose(); }
+    catch (error) { const normalized = applyApiErrors(error, setError, { fallback: "ERP connector could not be saved" }); if (!Object.keys(normalized.fieldErrors).length) setError("root.server", { type: "server", message: normalized.message }); }
+  });
+  return <DrawerForm open={open} onOpenChange={(value) => { if (!value && !pending) onClose(); }} title="Connect College ERP" description="Configure a credential-protected read-only HTTPS source."><Form {...form}><form noValidate onSubmit={submit} className="space-y-4"><CollegeFormField control={control} name="name" label="Connection name"><Input /></CollegeFormField><CollegeFormField control={control} name="base_url" label="HTTPS base URL"><Input type="url" /></CollegeFormField><div className="grid gap-4 sm:grid-cols-2"><CollegeSelectField control={control} name="auth_mode" label="Authentication" values={["bearer", "header"]} />{authMode === "header" && <CollegeFormField control={control} name="auth_header" label="Header name"><Input /></CollegeFormField>}<CollegeFormField control={control} name="sync_interval_hours" label="Sync interval (hours)"><Input inputMode="numeric" /></CollegeFormField></div><CollegeFormField control={control} name="api_key" label="API key" description="Stored securely and never returned to the browser."><Input type="password" autoComplete="off" /></CollegeFormField><FormRootError error={formState.errors.root?.server} /><Button type="submit" className="w-full" loading={pending} loadingText="Saving...">Save connector</Button></form></Form></DrawerForm>;
 }
+
+function CollegeFormField({ control, name, label, description, children }) {
+  return <FormField control={control} name={name} render={({ field }) => <FormItem><FormLabel>{label}</FormLabel><FormControl>{React.cloneElement(children, { ...field, value: field.value ?? "" })}</FormControl>{description && <FormDescription>{description}</FormDescription>}<FormMessage /></FormItem>} />;
+}
+
+function CollegeSelectField({ control, name, label, values }) {
+  return <FormField control={control} name={name} render={({ field }) => <FormItem><FormLabel>{label}</FormLabel><Select value={field.value} onValueChange={field.onChange}><FormControl><SelectTrigger><SelectValue /></SelectTrigger></FormControl><SelectContent>{values.map((value) => <SelectItem key={value} value={value}>{sentence(value)}</SelectItem>)}</SelectContent></Select><FormMessage /></FormItem>} />;
+}
+
+function CollegeReferenceField({ control, name, label, rows, getLabel = (row) => row.name, placeholder }) {
+  return <FormField control={control} name={name} render={({ field }) => <FormItem><FormLabel>{label}</FormLabel><Select value={field.value} onValueChange={field.onChange}><FormControl><SelectTrigger><SelectValue placeholder={placeholder} /></SelectTrigger></FormControl><SelectContent>{rows.map((row) => <SelectItem key={row.id} value={row.id}>{getLabel(row)}</SelectItem>)}</SelectContent></Select><FormMessage /></FormItem>} />;
+}
+
+const companyDefaults = { name: "", industry: "", website: "", contact_name: "", contact_email: "", contact_phone: "", notes: "" };
+const driveDefaults = { company_id: "", title: "", opportunity_type: "campus_drive", status: "active", deadline_at: "", drive_at: "", work_location: "", employment_type: "", package_min: "", package_max: "", minimum_cgpa: "", maximum_active_backlogs: "", minimum_attendance: "", minimum_solved: "" };
+const applicationDefaults = { opportunity_id: "", student_profile_id: "", notes: "" };
+const assessmentDefaults = { offering_id: "", title: "", assessment_type: "internal", max_marks: "100", weightage_bps: "0", due_on: "", status: "draft" };
+const connectorDefaults = { name: "", base_url: "", auth_mode: "bearer", auth_header: "", api_key: "", sync_interval_hours: "6" };
+function attendanceSessionDefaults() { return { offering_id: "", held_on: isoToday(), starts_at: "", ends_at: "", topic: "" }; }
 
 function OwnershipNotice() { return <Surface className="flex items-start gap-3 p-4"><span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary"><Database /></span><div><div className="text-sm font-semibold">Your College ERP remains authoritative</div><p className="mt-1 text-xs leading-5 text-muted-foreground">Edvatiq validates academic evidence, adds placement intelligence, and never deletes local records because they disappear from a source response.</p></div></Surface>; }
 function PanelToolbar({ title, action }) { return <div className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between sm:px-5"><h2 className="font-semibold">{title}</h2>{action}</div>; }

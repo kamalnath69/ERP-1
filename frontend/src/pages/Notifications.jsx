@@ -10,6 +10,7 @@ import { useBusiness } from "@/contexts/BusinessContext";
 import { QUERY_POLICIES } from "@/store/api/queryPolicies";
 import { useGetNotificationInboxQuery, useMarkAllNotificationsReadMutation, useMarkNotificationReadMutation } from "@/features/notifications/notificationsApi";
 import useCursorPagination from "@/hooks/useCursorPagination";
+import { usePendingAction } from "@/hooks/usePendingAction";
 
 const filters = [
   ["all", "All"], ["unread", "Unread"], ["action_required", "Action required"], ["delivery_issues", "Delivery issues"],
@@ -28,6 +29,7 @@ export default function Notifications() {
   const query = useGetNotificationInboxQuery({ status: filter, q, cursor: paging.cursor, limit: 25 }, QUERY_POLICIES.live);
   const [markRead] = useMarkNotificationReadMutation();
   const [markAll, markAllState] = useMarkAllNotificationsReadMutation();
+  const rowActions = usePendingAction();
   const { accept: acceptPage } = paging;
   useEffect(() => { acceptPage(query.data); }, [acceptPage, query.data]);
   const items = paging.items;
@@ -35,9 +37,14 @@ export default function Notifications() {
   if (query.isError && !query.data) return <PageShell><ErrorState title="Notifications could not be loaded" description={query.error?.data?.detail} retry={query.refetch} /></PageShell>;
 
   const open = async (item) => {
-    if (!item.is_read) markRead({ id: item.id, status: filter });
-    const path = destinationPath(item.destination, organization?.industry);
-    if (path) navigate(path);
+    await rowActions.run(`open:${item.id}`, async () => {
+      if (!item.is_read) {
+        try { await markRead({ id: item.id, status: filter }).unwrap(); }
+        catch (error) { toast.error(error?.data?.detail || "Could not mark this notification as read"); }
+      }
+      const path = destinationPath(item.destination, organization?.industry);
+      if (path) navigate(path);
+    });
   };
   const readAll = async () => {
     try { await markAll().unwrap(); toast.success("Notifications marked as read"); }
@@ -45,10 +52,10 @@ export default function Notifications() {
   };
 
   return <PageShell className="reveal" size="narrow">
-    <PageHeader eyebrow={isCollege ? "College inbox" : "Operational inbox"} title="Notifications" description={isCollege ? "Student support alerts, placement updates, evidence freshness, and communication delivery health." : "Updates that affect your work, reminders that need action, and communication delivery health."} actions={<div className="flex gap-2"><Button variant="outline" onClick={() => navigate("/app/me?tab=notifications")}><Gear className="mr-2" />Preferences</Button><Button variant="outline" onClick={readAll} disabled={markAllState.isLoading || !items.some((item) => !item.is_read)}><Check className="mr-2" />Mark all read</Button></div>} />
+    <PageHeader eyebrow={isCollege ? "College inbox" : "Operational inbox"} title="Notifications" description={isCollege ? "Student support alerts, placement updates, evidence freshness, and communication delivery health." : "Updates that affect your work, reminders that need action, and communication delivery health."} actions={<div className="flex gap-2"><Button variant="outline" onClick={() => navigate("/app/me?tab=notifications")}><Gear className="mr-2" />Preferences</Button><Button variant="outline" onClick={readAll} loading={markAllState.isLoading} loadingText="Updating..." disabled={!items.some((item) => !item.is_read)}><Check className="mr-2" />Mark all read</Button></div>} />
     <div className="premium-scrollbar flex gap-2 overflow-x-auto" role="tablist" aria-label="Notification filters">{filters.map(([value, label]) => <button role="tab" aria-selected={filter === value} key={value} onClick={() => setFilter(value)} className={`whitespace-nowrap rounded-full px-4 py-2 text-sm ${filter === value ? "bg-primary text-primary-foreground" : "border bg-card hover:bg-secondary"}`}>{label}</button>)}</div>
     <FilterBar><div className="relative flex-1"><MagnifyingGlass className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" /><Input value={search} onChange={(event) => setSearch(event.target.value)} className="border-0 bg-transparent pl-10 shadow-none" placeholder="Search notifications" /></div></FilterBar>
-    {query.isLoading && !items.length ? <NotificationSkeleton /> : items.length ? <Surface className="overflow-hidden"><div className="divide-y">{items.map((item) => { const Icon = icons[item.kind] || Info; const actionable = Boolean(item.destination); return <button key={item.id} onClick={() => open(item)} disabled={!actionable && item.is_read} className={`flex w-full gap-4 p-5 text-left transition-colors hover:bg-surface-hover disabled:cursor-default ${item.is_read ? "opacity-70" : "bg-accent/[.035]"}`}><span className={`grid h-11 w-11 shrink-0 place-items-center rounded-xl ${item.kind === "warning" || item.kind === "error" ? "bg-destructive/10 text-danger" : "bg-secondary text-primary"}`}><Icon size={21} /></span><span className="min-w-0 flex-1"><span className="flex flex-wrap items-start justify-between gap-2"><span className="font-semibold">{item.title}</span><time className="shrink-0 text-xs text-muted-foreground">{relative(item.created_at)}</time></span><span className="mt-1 block text-sm leading-6 text-muted-foreground">{item.body || "Open this update for more information."}</span><span className="mt-3 flex flex-wrap items-center gap-2">{item.category !== "general" && <StatusBadge status={item.category === "delivery_issue" ? "failed" : "warning"} label={item.category === "delivery_issue" ? "Delivery issue" : "Action required"} />}{actionable && <span className="text-xs font-semibold text-accent">Open related work</span>}</span></span>{!item.is_read && <span className="mt-2 h-2.5 w-2.5 shrink-0 rounded-full bg-accent" aria-label="Unread" />}</button>; })}</div></Surface> : <EmptyState variant="section" alignment="left" icon={Bell} title={q ? "No notifications match this search" : emptyCopy(filter, isCollege).title} description={q ? "Try a different title or message keyword." : emptyCopy(filter, isCollege).description} />}
+    {query.isLoading && !items.length ? <NotificationSkeleton /> : items.length ? <Surface className="overflow-hidden"><div className="divide-y">{items.map((item) => { const Icon = icons[item.kind] || Info; const actionable = Boolean(item.destination); const pending = rowActions.isPending(`open:${item.id}`); return <button key={item.id} onClick={() => open(item)} disabled={pending || (!actionable && item.is_read)} aria-busy={pending || undefined} className={`flex w-full gap-4 p-5 text-left transition-colors hover:bg-surface-hover disabled:cursor-default ${item.is_read ? "opacity-70" : "bg-accent/[.035]"}`}><span className={`grid h-11 w-11 shrink-0 place-items-center rounded-xl ${item.kind === "warning" || item.kind === "error" ? "bg-destructive/10 text-danger" : "bg-secondary text-primary"}`}><Icon size={21} /></span><span className="min-w-0 flex-1"><span className="flex flex-wrap items-start justify-between gap-2"><span className="font-semibold">{item.title}</span><time className="shrink-0 text-xs text-muted-foreground">{relative(item.created_at)}</time></span><span className="mt-1 block text-sm leading-6 text-muted-foreground">{item.body || "Open this update for more information."}</span><span className="mt-3 flex flex-wrap items-center gap-2">{item.category !== "general" && <StatusBadge status={item.category === "delivery_issue" ? "failed" : "warning"} label={item.category === "delivery_issue" ? "Delivery issue" : "Action required"} />}{actionable && <span className="text-xs font-semibold text-accent">{pending ? "Opening..." : "Open related work"}</span>}</span></span>{!item.is_read && <span className="mt-2 h-2.5 w-2.5 shrink-0 rounded-full bg-accent" aria-label="Unread" />}</button>; })}</div></Surface> : <EmptyState variant="section" alignment="left" icon={Bell} title={q ? "No notifications match this search" : emptyCopy(filter, isCollege).title} description={q ? "Try a different title or message keyword." : emptyCopy(filter, isCollege).description} />}
     {(items.length > 0 || query.data?.has_more) && <CursorListFooter count={items.length} noun="notifications" hasMore={Boolean(query.data?.has_more)} loading={query.isFetching} error={query.isError} onLoadMore={() => paging.loadMore(query.data?.next_cursor)} onRetry={query.refetch} />}
   </PageShell>;
 }

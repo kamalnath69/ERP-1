@@ -1,5 +1,7 @@
 import React, { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { useForm } from "react-hook-form";
 import {
   ArrowRight, Cards, List, MagnifyingGlass, Plus, UserPlus, UsersThree,
 } from "@phosphor-icons/react";
@@ -12,7 +14,8 @@ import {
 } from "@/components/system";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage, FormRootError } from "@/components/ui/form";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useAuth } from "@/contexts/AuthContext";
 import { useBusiness } from "@/contexts/BusinessContext";
@@ -27,6 +30,7 @@ import {
   useGetCollegeStudentIntelligenceQuery,
 } from "@/features/college/collegeApi";
 import useCursorPagination from "@/hooks/useCursorPagination";
+import { applyApiErrors, clientSchema, FORM_OPTIONS, studentAdmissionSchema } from "@/lib/validation";
 
 const emptyClient = {
   first_name: "", last_name: "", phone: "", email: "", address: "",
@@ -53,8 +57,6 @@ export default function Clients() {
   const segment = isCollege && !collegeSegments.includes(requestedSegment) ? "all" : requestedSegment;
   const [view, setView] = useState(() => localStorage.getItem("edvatiq.clients.view") || "table");
   const [drawerOpen, setDrawerOpen] = useState(() => searchParams.get("new") === "1");
-  const [form, setForm] = useState(emptyClient);
-  const [studentForm, setStudentForm] = useState(emptyStudent);
   const [createClient, createState] = useCreateClientMutation();
   const [admitStudent, admitState] = useAdmitCollegeStudentMutation();
 
@@ -94,7 +96,8 @@ export default function Clients() {
     setSearchParams(next, { replace: true });
   };
 
-  const closeDrawer = (open) => {
+  const closeDrawer = (open, force = false) => {
+    if (!open && !force && (createState.isLoading || admitState.isLoading)) return;
     setDrawerOpen(open);
     if (open) return;
     const next = new URLSearchParams(searchParams);
@@ -114,49 +117,6 @@ export default function Clients() {
   const openProfile = (item) => navigate(`/app/clients/${item.client_id || item.id}`, {
     state: { profileFrom: `${window.location.pathname}${window.location.search}` },
   });
-
-  const submit = async (event) => {
-    event.preventDefault();
-    try {
-      const created = await createClient({
-        ...form,
-        email: form.email || null,
-        phone: form.phone || null,
-        address: form.address || null,
-        date_of_birth: form.date_of_birth || null,
-        gender: form.gender || null,
-        home_location_id: form.home_location_id || locationId || null,
-        notes: form.notes || null,
-        tags: form.tags.split(",").map((tag) => tag.trim()).filter(Boolean),
-      }).unwrap();
-      toast.success(`${singular} created`);
-      setDrawerOpen(false);
-      setForm(emptyClient);
-      navigate(`/app/clients/${created.id}`);
-    } catch (error) {
-      toast.error(error?.data?.detail || `Could not create ${singular.toLowerCase()}`);
-    }
-  };
-
-  const submitStudent = async (event) => {
-    event.preventDefault();
-    try {
-      const created = await admitStudent({
-        ...studentForm,
-        email: studentForm.email || null,
-        phone: studentForm.phone || null,
-        roll_number: studentForm.roll_number || null,
-        home_location_id: studentForm.home_location_id || locationId || null,
-        current_semester: Number(studentForm.current_semester),
-      }).unwrap();
-      toast.success("Student admitted");
-      closeDrawer(false);
-      setStudentForm(emptyStudent);
-      navigate(`/app/clients/${created.client_id}`);
-    } catch (error) {
-      toast.error(error?.data?.detail || "Student could not be admitted");
-    }
-  };
 
   const columns = useMemo(() => isCollege ? [
     {
@@ -268,32 +228,17 @@ export default function Clients() {
     />}
 
     {!isCollege && <DrawerForm open={drawerOpen} onOpenChange={closeDrawer} title={`Add ${singular.toLowerCase()}`} description={`Start with identity and contact details. You can complete the ${singular.toLowerCase()} workspace after creation.`}>
-      <form className="space-y-5" onSubmit={submit}>
-        <div className="grid grid-cols-2 gap-4"><Field label="First name"><Input required autoFocus value={form.first_name} onChange={update(setForm, "first_name")} /></Field><Field label="Last name"><Input value={form.last_name} onChange={update(setForm, "last_name")} /></Field></div>
-        <div className="grid sm:grid-cols-2 gap-4"><Field label="Phone"><Input inputMode="tel" value={form.phone} onChange={update(setForm, "phone")} /></Field><Field label="Email"><Input type="email" value={form.email} onChange={update(setForm, "email")} /></Field></div>
-        <div className="grid sm:grid-cols-2 gap-4"><Field label="Date of birth"><Input type="date" value={form.date_of_birth} onChange={update(setForm, "date_of_birth")} /></Field><Field label="Gender"><Select value={form.gender || "unspecified"} onValueChange={(value) => setForm((current) => ({ ...current, gender: value === "unspecified" ? "" : value }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="unspecified">Prefer not to record</SelectItem><SelectItem value="female">Female</SelectItem><SelectItem value="male">Male</SelectItem><SelectItem value="non_binary">Non-binary</SelectItem><SelectItem value="other">Other</SelectItem></SelectContent></Select></Field></div>
-        <Field label="Home location"><Select value={form.home_location_id || locationId || ""} onValueChange={(value) => setForm((current) => ({ ...current, home_location_id: value }))}><SelectTrigger><SelectValue placeholder="Choose location" /></SelectTrigger><SelectContent>{locations.map((location) => <SelectItem key={location.id} value={location.id}>{location.name}</SelectItem>)}</SelectContent></Select></Field>
-        <Field label="Address"><Input value={form.address} onChange={update(setForm, "address")} /></Field>
-        <Field label="Tags"><Input value={form.tags} onChange={update(setForm, "tags")} placeholder="VIP, morning, referral" /><p className="mt-1 text-xs text-muted-foreground">Separate tags with commas.</p></Field>
-        <Field label="Relationship notes"><textarea className="min-h-24 w-full rounded-xl border bg-background p-3 text-sm" value={form.notes} onChange={update(setForm, "notes")} /></Field>
-        <Surface className="space-y-3 p-4">
-          <Consent checked={form.whatsapp_consent} onChange={(value) => setForm((current) => ({ ...current, whatsapp_consent: value }))} label="They agreed to WhatsApp service updates and reminders" />
-          <Consent checked={form.email_consent} onChange={(value) => setForm((current) => ({ ...current, email_consent: value }))} label="They agreed to email service updates" />
-          {form.whatsapp_consent && !form.phone && <p className="text-xs font-medium text-danger">A phone number is required for WhatsApp consent.</p>}
-        </Surface>
-        <Button className="h-11 w-full" disabled={createState.isLoading || (form.whatsapp_consent && !form.phone)}>{createState.isLoading ? "Creating..." : `Create ${singular.toLowerCase()}`}</Button>
-      </form>
+      <ClientCreateForm createClient={createClient} loading={createState.isLoading} locations={locations} locationId={locationId} singular={singular} onCreated={(created) => { toast.success(`${singular} created`); closeDrawer(false, true); navigate(`/app/clients/${created.id}`); }} />
     </DrawerForm>}
 
     {isCollege && <DrawerForm open={drawerOpen} onOpenChange={closeDrawer} title="Admit student" description="Create the local placement identity and connect it to the authoritative program and cohort.">
       <StudentAdmissionForm
-        form={studentForm}
-        setForm={setStudentForm}
         references={references.data}
         locations={locations}
         locationId={locationId}
         loading={admitState.isLoading}
-        onSubmit={submitStudent}
+        admitStudent={admitStudent}
+        onCreated={(created) => { toast.success("Student admitted"); closeDrawer(false, true); navigate(`/app/clients/${created.client_id}`); }}
       />
     </DrawerForm>}
   </PageShell>;
@@ -314,23 +259,70 @@ function ClientCards({ items, loading, onOpen, singular, empty, isCollege }) {
   })}</div>;
 }
 
-function Field({ label, children }) { return <div className="space-y-2"><Label>{label}</Label>{children}</div>; }
-function Consent({ checked, onChange, label }) { return <label className="flex cursor-pointer items-start gap-3 text-sm"><input className="mt-0.5 h-4 w-4 accent-[hsl(var(--accent))]" type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} /><span>{label}</span></label>; }
-function StudentAdmissionForm({ form, setForm, references, locations, locationId, loading, onSubmit }) {
-  const programs = references?.programs || [];
-  const cohorts = (references?.cohorts || []).filter((row) => !form.program_id || row.program_id === form.program_id);
-  return <form className="space-y-5" onSubmit={onSubmit}>
-    <div className="grid grid-cols-2 gap-4"><Field label="First name"><Input required autoFocus value={form.first_name} onChange={update(setForm, "first_name")} /></Field><Field label="Last name"><Input value={form.last_name} onChange={update(setForm, "last_name")} /></Field></div>
-    <div className="grid gap-4 sm:grid-cols-2"><Field label="Admission number"><Input required value={form.admission_number} onChange={update(setForm, "admission_number")} placeholder="CSE-2026-001" /></Field><Field label="Roll number"><Input value={form.roll_number} onChange={update(setForm, "roll_number")} /></Field></div>
-    <div className="grid gap-4 sm:grid-cols-2"><Field label="Program"><Select value={form.program_id} onValueChange={(value) => setForm((current) => ({ ...current, program_id: value, cohort_id: "" }))}><SelectTrigger><SelectValue placeholder="Choose program" /></SelectTrigger><SelectContent>{programs.map((row) => <SelectItem key={row.id} value={row.id}>{row.name}</SelectItem>)}</SelectContent></Select></Field><Field label="Cohort"><Select value={form.cohort_id} onValueChange={(value) => setForm((current) => ({ ...current, cohort_id: value }))} disabled={!form.program_id}><SelectTrigger><SelectValue placeholder="Choose cohort" /></SelectTrigger><SelectContent>{cohorts.map((row) => <SelectItem key={row.id} value={row.id}>{row.name}</SelectItem>)}</SelectContent></Select></Field></div>
-    <div className="grid gap-4 sm:grid-cols-2"><Field label="Current semester"><Input required type="number" min="1" max="16" value={form.current_semester} onChange={update(setForm, "current_semester")} /></Field><Field label="Admitted on"><Input required type="date" value={form.admitted_on} onChange={update(setForm, "admitted_on")} /></Field></div>
-    <div className="grid gap-4 sm:grid-cols-2"><Field label="Email"><Input type="email" value={form.email} onChange={update(setForm, "email")} /></Field><Field label="Phone"><Input inputMode="tel" value={form.phone} onChange={update(setForm, "phone")} /></Field></div>
-    <Field label="Campus"><Select value={form.home_location_id || locationId || ""} onValueChange={(value) => setForm((current) => ({ ...current, home_location_id: value }))}><SelectTrigger><SelectValue placeholder="Choose campus" /></SelectTrigger><SelectContent>{locations.map((location) => <SelectItem key={location.id} value={location.id}>{location.name}</SelectItem>)}</SelectContent></Select></Field>
-    <Surface className="p-4 text-xs leading-5 text-muted-foreground">Student identity and academic ownership can later move to ERP synchronization. Local placement evidence remains in Edvatiq.</Surface>
-    <Button className="h-11 w-full" disabled={loading || !form.program_id || !form.cohort_id}>{loading ? "Admitting..." : "Admit student"}</Button>
-  </form>;
+function ClientCreateForm({ createClient, loading, locations, locationId, singular, onCreated }) {
+  const form = useForm({ resolver: zodResolver(clientSchema), defaultValues: { ...emptyClient, home_location_id: locationId || "" }, ...FORM_OPTIONS });
+  const { clearErrors, control, formState, handleSubmit, reset, setError, setValue, watch } = form;
+  const whatsappConsent = watch("whatsapp_consent"); const emailConsent = watch("email_consent");
+  const submit = handleSubmit(async (values) => {
+    clearErrors("root.server");
+    try {
+      const created = await createClient({
+        ...values, last_name: values.last_name || "", home_location_id: values.home_location_id || locationId || null,
+      }).unwrap();
+      reset({ ...emptyClient, home_location_id: locationId || "" });
+      onCreated(created);
+    } catch (error) {
+      const normalized = applyApiErrors(error, setError, { fallback: `Could not create ${singular.toLowerCase()}` });
+      if (!Object.keys(normalized.fieldErrors).length) setError("root.server", { type: "server", message: normalized.message });
+    }
+  });
+  return <Form {...form}><form noValidate className="space-y-5" onSubmit={submit}>
+    <div className="grid grid-cols-2 gap-4"><ValidatedField control={control} name="first_name" label="First name"><Input autoFocus autoComplete="given-name" /></ValidatedField><ValidatedField control={control} name="last_name" label="Last name"><Input autoComplete="family-name" /></ValidatedField></div>
+    <div className="grid gap-4 sm:grid-cols-2"><ValidatedField control={control} name="phone" label="Phone"><Input inputMode="tel" autoComplete="tel" /></ValidatedField><ValidatedField control={control} name="email" label="Email"><Input type="email" autoComplete="email" /></ValidatedField></div>
+    <div className="grid gap-4 sm:grid-cols-2"><ValidatedField control={control} name="date_of_birth" label="Date of birth"><Input type="date" /></ValidatedField><SelectField control={control} name="gender" label="Gender" placeholder="Prefer not to record" options={[["female", "Female"], ["male", "Male"], ["non_binary", "Non-binary"], ["other", "Other"]]} /></div>
+    <SelectField control={control} name="home_location_id" label="Home location" placeholder="Choose location" options={locations.map((location) => [location.id, location.name])} />
+    <ValidatedField control={control} name="address" label="Address"><Input autoComplete="street-address" /></ValidatedField>
+    <ValidatedField control={control} name="tags" label="Tags" description="Separate tags with commas."><Input placeholder="VIP, morning, referral" /></ValidatedField>
+    <ValidatedField control={control} name="notes" label="Relationship notes"><Textarea rows={4} /></ValidatedField>
+    <Surface className="space-y-3 p-4"><Consent checked={whatsappConsent} onChange={(value) => setValue("whatsapp_consent", value, { shouldDirty: true, shouldValidate: true })} label="They agreed to WhatsApp service updates and reminders" /><Consent checked={emailConsent} onChange={(value) => setValue("email_consent", value, { shouldDirty: true })} label="They agreed to email service updates" /></Surface>
+    <FormRootError error={formState.errors.root?.server} />
+    <Button type="submit" className="h-11 w-full" loading={formState.isSubmitting || loading} loadingText="Creating...">Create {singular.toLowerCase()}</Button>
+  </form></Form>;
 }
-function update(setter, key) { return (event) => setter((current) => ({ ...current, [key]: event.target.value })); }
+
+function Consent({ checked, onChange, label }) { return <label className="flex cursor-pointer items-start gap-3 text-sm"><input className="mt-0.5 h-4 w-4 accent-[hsl(var(--accent))]" type="checkbox" checked={Boolean(checked)} onChange={(event) => onChange(event.target.checked)} /><span>{label}</span></label>; }
+
+function StudentAdmissionForm({ references, locations, locationId, loading, admitStudent, onCreated }) {
+  const form = useForm({ resolver: zodResolver(studentAdmissionSchema), defaultValues: { ...emptyStudent, home_location_id: locationId || "" }, ...FORM_OPTIONS });
+  const { clearErrors, control, formState, handleSubmit, reset, setError, setValue, watch } = form;
+  const programId = watch("program_id"); const programs = references?.programs || [];
+  const cohorts = (references?.cohorts || []).filter((row) => !programId || row.program_id === programId);
+  const submit = handleSubmit(async (values) => {
+    clearErrors("root.server");
+    try {
+      const created = await admitStudent({ ...values, last_name: values.last_name || "", home_location_id: values.home_location_id || locationId || null }).unwrap();
+      reset({ ...emptyStudent, home_location_id: locationId || "" });
+      onCreated(created);
+    } catch (error) {
+      const normalized = applyApiErrors(error, setError, { fallback: "Student could not be admitted" });
+      if (!Object.keys(normalized.fieldErrors).length) setError("root.server", { type: "server", message: normalized.message });
+    }
+  });
+  return <Form {...form}><form noValidate className="space-y-5" onSubmit={submit}>
+    <div className="grid grid-cols-2 gap-4"><ValidatedField control={control} name="first_name" label="First name"><Input autoFocus autoComplete="given-name" /></ValidatedField><ValidatedField control={control} name="last_name" label="Last name"><Input autoComplete="family-name" /></ValidatedField></div>
+    <div className="grid gap-4 sm:grid-cols-2"><ValidatedField control={control} name="admission_number" label="Admission number"><Input placeholder="CSE-2026-001" /></ValidatedField><ValidatedField control={control} name="roll_number" label="Roll number"><Input /></ValidatedField></div>
+    <div className="grid gap-4 sm:grid-cols-2"><FormField control={control} name="program_id" render={({ field }) => <FormItem><FormLabel>Program</FormLabel><Select value={field.value} onValueChange={(value) => { field.onChange(value); setValue("cohort_id", "", { shouldValidate: true }); }}><FormControl><SelectTrigger><SelectValue placeholder="Choose program" /></SelectTrigger></FormControl><SelectContent>{programs.map((row) => <SelectItem key={row.id} value={row.id}>{row.name}</SelectItem>)}</SelectContent></Select><FormMessage /></FormItem>} /><SelectField control={control} name="cohort_id" label="Cohort" placeholder="Choose cohort" options={cohorts.map((row) => [row.id, row.name])} disabled={!programId} /></div>
+    <div className="grid gap-4 sm:grid-cols-2"><ValidatedField control={control} name="current_semester" label="Current semester"><Input inputMode="numeric" /></ValidatedField><ValidatedField control={control} name="admitted_on" label="Admitted on"><Input type="date" /></ValidatedField></div>
+    <div className="grid gap-4 sm:grid-cols-2"><ValidatedField control={control} name="email" label="Email"><Input type="email" autoComplete="email" /></ValidatedField><ValidatedField control={control} name="phone" label="Phone"><Input inputMode="tel" autoComplete="tel" /></ValidatedField></div>
+    <SelectField control={control} name="home_location_id" label="Campus" placeholder="Choose campus" options={locations.map((location) => [location.id, location.name])} />
+    <Surface className="p-4 text-xs leading-5 text-muted-foreground">Student identity and academic ownership can later move to ERP synchronization. Local placement evidence remains in Edvatiq.</Surface>
+    <FormRootError error={formState.errors.root?.server} />
+    <Button type="submit" className="h-11 w-full" loading={formState.isSubmitting || loading} loadingText="Admitting...">Admit student</Button>
+  </form></Form>;
+}
+
+function ValidatedField({ control, name, label, description, children }) { return <FormField control={control} name={name} render={({ field }) => <FormItem><FormLabel>{label}</FormLabel><FormControl>{React.cloneElement(children, { ...field, value: field.value ?? "" })}</FormControl>{description && <FormDescription>{description}</FormDescription>}<FormMessage /></FormItem>} />; }
+function SelectField({ control, name, label, placeholder, options, disabled }) { return <FormField control={control} name={name} render={({ field }) => <FormItem><FormLabel>{label}</FormLabel><Select value={field.value || ""} onValueChange={field.onChange} disabled={disabled}><FormControl><SelectTrigger><SelectValue placeholder={placeholder} /></SelectTrigger></FormControl><SelectContent>{options.map(([value, text]) => <SelectItem key={value} value={value}>{text}</SelectItem>)}</SelectContent></Select><FormMessage /></FormItem>} />; }
 function money(paise = 0) { return new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(Number(paise) / 100); }
 function date(value) { return value ? new Date(`${String(value).slice(0, 10)}T00:00:00`).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }) : "Not set"; }
 function dateTime(value) { return value ? new Date(value).toLocaleString("en-IN", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }) : "Not set"; }

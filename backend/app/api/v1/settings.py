@@ -2,10 +2,11 @@
 from typing import Literal
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import EmailStr, Field
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.schemas.validation import RequestModel
 from app.core.deps import require_any_permission
 from app.models import User
 from app.services.organization_settings import request_industry_migration, settings_workspace, update_section
@@ -13,7 +14,7 @@ from app.services.organization_settings import request_industry_migration, setti
 router = APIRouter(prefix="/settings", tags=["settings"])
 
 
-class VersionedBody(BaseModel):
+class VersionedBody(RequestModel):
     version: int = Field(ge=1)
 
 
@@ -52,7 +53,7 @@ class PrivacyBody(VersionedBody):
     conversation_retention_days: int = Field(default=90, ge=30, le=3650)
 
 
-class IndustryRequestBody(BaseModel):
+class IndustryRequestBody(RequestModel):
     requested_industry: Literal["gym", "salon", "clinic", "college"]
     reason: str = Field(min_length=20, max_length=2000)
 

@@ -1,12 +1,10 @@
 """Secure cookie authentication, payment-first registration, recovery, and sessions."""
-import hashlib
-import hmac
 import secrets
 import re
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import EmailStr, Field, field_validator
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
@@ -21,14 +19,15 @@ from app.schemas import (
     PaidSignupCheckoutRequest, PaidSignupVerifyRequest, RegisterOrgRequest,
     ResetPasswordRequest, UserOut, VerifyEmailRequest, validate_strong_password,
 )
+from app.schemas.validation import RequestModel
 from app.services.audit import log_action
 from app.services.auth_security import (
     clear_auth_cookies, client_ip, consume_auth_code, create_auth_code, identifier_hash,
     new_csrf_token, set_auth_cookies, token_hash,
 )
 from app.services.email import send_auth_code_email
-from app.services.billing import payment_config, plan_price, provider_error
-from app.services.razorpay_provider import razorpay_provider
+from app.services.billing import create_provider_order, plan_price, verify_provider_payment
+from app.services.payment_gateways import active_gateway, gateway_config
 from app.services.signup import (
     ACTIVE_CHECKOUT_STATUSES, CHECKOUT_TTL, checkout_response, expire_stale_checkouts,
     finalize_signup, hash_signup_password, organization_modules, public_plan_pair,
@@ -40,7 +39,7 @@ DUMMY_PASSWORD_HASH = hash_password("NotARealPassword123")
 PUBLIC_MESSAGE = "If the account exists, a code has been sent"
 
 
-class PlatformInviteAccept(BaseModel):
+class PlatformInviteAccept(RequestModel):
     email: EmailStr
     code: str = Field(pattern=r"^\d{6}$")
     new_password: str = Field(min_length=10, max_length=128)
@@ -200,7 +199,8 @@ def register_organization(body: RegisterOrgRequest, request: Request, db: Sessio
     db.add(org); db.flush()
     admin = User(
         organization_id=org.id, email=body.admin_email.lower(), hashed_password=hash_password(body.admin_password),
-        first_name=body.admin_first_name, last_name=body.admin_last_name, is_active=True, email_verified=False,
+        first_name=body.admin_first_name, last_name=body.admin_last_name, phone=body.admin_phone,
+        is_active=True, email_verified=False,
     )
     db.add(admin); db.flush()
     location = Location(organization_id=org.id, name=body.location_name, code="MAIN", city=body.city, state=body.state, is_primary=True)
@@ -248,7 +248,8 @@ def create_registration_checkout(
     )).scalar_one_or_none()
     if existing:
         if body.checkout_token and valid_checkout_token(existing, body.checkout_token) and existing.status in {"ready", "completed"}:
-            key_id = payment_config()[1] or None if existing.status == "ready" else None
+            config = gateway_config(existing.provider, existing.provider_mode)
+            key_id = config.client_id if config.provider == "razorpay" and existing.status == "ready" else None
             db.commit()
             return checkout_response(existing, body.checkout_token, key_id)
         db.commit()
@@ -283,7 +284,9 @@ def create_registration_checkout(
     if quote["tax_enabled"] and not (body.state or "").strip():
         raise HTTPException(400, "State is required to create a GST invoice")
     _ensure_signup_not_throttled(db, request, str(body.admin_email))
-    mode, key_id, key_secret, _webhook_secret = payment_config()
+    config = active_gateway(db)
+    if config.provider == "cashfree" and not body.admin_phone:
+        raise HTTPException(422, "A phone number is required for Cashfree checkout")
     access_token = secrets.token_urlsafe(36)
     checkout = SignupCheckout(
         status="creating",
@@ -296,6 +299,7 @@ def create_registration_checkout(
         admin_password_hash=hash_signup_password(body.admin_password),
         admin_first_name=body.admin_first_name.strip(),
         admin_last_name=body.admin_last_name.strip(),
+        admin_phone=body.admin_phone,
         location_name=body.location_name.strip(),
         city=body.city.strip() if body.city else None,
         state=body.state.strip() if body.state else None,
@@ -314,7 +318,8 @@ def create_registration_checkout(
         tax_enabled=quote["tax_enabled"],
         gst_rate_bps=quote["gst_rate_bps"],
         currency=quote["currency"],
-        provider_mode=mode,
+        provider=config.provider,
+        provider_mode=config.mode,
         expires_at=now + CHECKOUT_TTL,
     )
     db.add(checkout)
@@ -325,32 +330,39 @@ def create_registration_checkout(
         succeeded=True,
     ))
     db.flush()
-    if mode == "mock":
-        checkout.provider_order_id = f"mock-signup-{checkout.id}"
-    else:
-        try:
-            order = razorpay_provider(key_id, key_secret).create_order({
-                "amount": int(checkout.total_paise),
-                "currency": checkout.currency,
-                "receipt": checkout.id[:40],
-                "notes": {
-                    "signup_checkout_id": checkout.id,
-                    "plan": definition.slug,
-                    "billing_interval": checkout.billing_interval,
-                    "mode": mode,
-                },
-            })
-            checkout.provider_order_id = order["id"]
-        except Exception as exc:
-            code, message = provider_error(exc, "signup_order")
-            checkout.status = "failed"
-            checkout.last_error = code
-            checkout.admin_password_hash = None
-            db.commit()
-            raise HTTPException(502, message) from exc
+    try:
+        order = create_provider_order(
+            config,
+            reference_id=checkout.id,
+            amount_paise=int(checkout.total_paise),
+            currency=checkout.currency,
+            customer={
+                "id": checkout.id,
+                "name": f"{checkout.admin_first_name} {checkout.admin_last_name}".strip(),
+                "email": checkout.admin_email,
+                "phone": checkout.admin_phone,
+            },
+            notes={
+                "signup_checkout_id": checkout.id,
+                "plan": definition.slug,
+                "billing_interval": checkout.billing_interval,
+                "mode": config.mode,
+                "description": f"Edvatiq {definition.name} signup",
+            },
+            idempotency_key=checkout.idempotency_key,
+        )
+        checkout.provider_order_id = order["order_id"]
+        checkout.provider_session_id = order.get("session_id")
+    except HTTPException as exc:
+        checkout.status = "failed"
+        checkout.last_error = str((exc.headers or {}).get("X-Edvatiq-Error-Code") or "provider_order_failed")
+        checkout.admin_password_hash = None
+        db.commit()
+        raise
     checkout.status = "ready"
     db.commit()
     db.refresh(checkout)
+    key_id = config.client_id if config.provider == "razorpay" else None
     return checkout_response(checkout, access_token, key_id or None)
 
 
@@ -366,7 +378,8 @@ def registration_checkout_status(
     if checkout.status in ACTIVE_CHECKOUT_STATUSES and checkout.expires_at <= datetime.now(timezone.utc):
         checkout.status = "expired"
         db.commit()
-    key_id = payment_config()[1] or None if checkout.status == "ready" else None
+    config = gateway_config(checkout.provider, checkout.provider_mode)
+    key_id = config.client_id if config.provider == "razorpay" and checkout.status == "ready" else None
     return checkout_response(checkout, key_id=key_id)
 
 
@@ -377,9 +390,9 @@ def mock_registration_payment(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    if settings.RAZORPAY_MODE != "mock" or settings.ENVIRONMENT == "production":
-        raise HTTPException(404, "Not available")
     checkout = _authorized_checkout(db, checkout_id, body.checkout_token, lock=True)
+    if checkout.provider_mode != "mock" or settings.ENVIRONMENT == "production":
+        raise HTTPException(404, "Not available")
     if checkout.status != "completed" and checkout.expires_at <= datetime.now(timezone.utc):
         checkout.status = "expired"
         db.commit()
@@ -411,39 +424,28 @@ def verify_registration_payment(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    mode, key_id, key_secret, _webhook_secret = payment_config()
-    if mode == "mock":
-        raise HTTPException(404, "Not available")
     checkout = _authorized_checkout(db, body.checkout_id, body.checkout_token, lock=True)
-    if checkout.provider_mode != mode or checkout.provider_order_id != body.razorpay_order_id:
+    if checkout.provider == "razorpay" and checkout.provider_order_id != body.razorpay_order_id:
         raise HTTPException(409, "Payment does not match this signup checkout")
-    expected = hmac.new(
-        key_secret.encode(),
-        f"{checkout.provider_order_id}|{body.razorpay_payment_id}".encode(),
-        hashlib.sha256,
-    ).hexdigest()
-    if not hmac.compare_digest(expected, body.razorpay_signature):
-        raise HTTPException(400, "Payment verification failed")
-    try:
-        payment = razorpay_provider(key_id, key_secret).fetch_payment(body.razorpay_payment_id)
-    except Exception as exc:
-        provider_error(exc, "signup_payment_fetch")
-        raise HTTPException(502, "Payment is being confirmed. Please check again shortly") from exc
-    if (
-        payment.get("order_id") != checkout.provider_order_id
-        or int(payment.get("amount", 0)) != int(checkout.total_paise)
-        or payment.get("currency") != checkout.currency
-    ):
-        raise HTTPException(409, "Payment details do not match this signup checkout")
-    if payment.get("status") != "captured":
-        return {"ok": True, "status": payment.get("status", "pending")}
+    verification = verify_provider_payment(
+        provider=checkout.provider,
+        mode=checkout.provider_mode,
+        order_id=checkout.provider_order_id,
+        amount_paise=int(checkout.total_paise),
+        currency=checkout.currency,
+        payment_id=body.razorpay_payment_id,
+        signature=body.razorpay_signature,
+    )
+    if verification["status"] != "paid":
+        return {"ok": True, "status": verification["status"]}
 
     if checkout.status != "completed":
         checkout.status = "paid"
+    payment_id = verification["payment_id"]
     organization, owner, created = finalize_signup(
         db,
         checkout,
-        body.razorpay_payment_id,
+        payment_id,
         ip_address=client_ip(request),
     )
     db.commit()

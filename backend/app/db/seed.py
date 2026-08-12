@@ -428,6 +428,7 @@ def ensure_control_plane(db: Session) -> None:
             "fallback": {"input": 255, "cached_input": 26, "output": 1530},
         },
         "billing_identity": {"registered_state": "Tamil Nadu", "country": "IN"},
+        "payment_gateway": {"provider": settings.PAYMENT_GATEWAY},
     }.items():
         if not db.execute(select(PlatformSetting).where(PlatformSetting.key == key)).scalar_one_or_none():
             db.add(PlatformSetting(key=key, value=value))

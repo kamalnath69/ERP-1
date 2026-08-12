@@ -2,15 +2,18 @@
 import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import EmailStr, Field, model_validator
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.api.v1.business import serialize
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.validation_errors import validation_problem
+from app.schemas.validation import RequestModel
 from app.core.security import hash_password
 from app.models import (
     AIUsage, AIWallet, ApprovalRequest, AuditLog, BillingProfile, Client, Document,
@@ -30,36 +33,50 @@ from app.services.platform_security import (
     provisioning_uri, require_platform_permission, verify_mfa_or_recovery, verify_totp,
 )
 from app.services.wallet import add_credits, ensure_wallet, wallet_summary
+from app.services.billing import paise_to_rupees, provider_error
+from app.services.cashfree_provider import cashfree_provider, cashfree_refund_state
+from app.services.payment_gateways import gateway_config, gateway_inventory
 
 router = APIRouter(prefix="/super-admin", tags=["super-admin"])
 now_utc = lambda: datetime.now(timezone.utc)
 
 
-class OrganizationUpdate(BaseModel):
-    status: str | None = None
-    version: int | None = None
+class OrganizationUpdate(RequestModel):
+    status: Literal["active", "trial", "suspended", "cancelled"] | None = None
+    version: int | None = Field(default=None, ge=1)
 
 
-class PlanDraftBody(BaseModel):
-    name: str | None = None
+class PlanDraftBody(RequestModel):
+    name: str | None = Field(default=None, min_length=2, max_length=100)
     monthly_price_paise: int | None = Field(default=None, ge=0)
     annual_price_paise: int | None = Field(default=None, ge=0)
     annual_discount_bps: int = Field(default=0, ge=0, le=10000)
     tax_enabled: bool = True
     gst_rate_bps: int = Field(default=1800, ge=0, le=10000)
-    included_ai_credits: int = Field(default=0, ge=0)
-    support_level: str = "standard"
-    ai_tier: str = "basic"
+    included_ai_credits: int = Field(default=0, ge=0, le=10_000_000)
+    support_level: Literal["self-service", "standard", "priority", "dedicated"] = "standard"
+    ai_tier: Literal["basic", "advanced", "actions", "enterprise"] = "basic"
     entitlements: dict[str, object] = {}
-    version_lock: int | None = None
+    version_lock: int | None = Field(default=None, ge=1)
 
 
-class PlanAvailabilityBody(BaseModel):
+class PlanAvailabilityBody(RequestModel):
     is_active: bool | None = None
     is_public: bool | None = None
 
+    @model_validator(mode="after")
+    def has_change(self):
+        if self.is_active is None and self.is_public is None:
+            raise ValueError("Choose at least one availability setting")
+        return self
 
-class RechargePackBody(BaseModel):
+
+class PublishPlanBody(RequestModel):
+    version_lock: int = Field(ge=1)
+    effective_from: datetime | None = None
+
+
+class RechargePackBody(RequestModel):
     name: str = Field(min_length=2, max_length=100)
     credits: int = Field(gt=0, le=10_000_000)
     price_paise: int = Field(gt=0)
@@ -69,112 +86,127 @@ class RechargePackBody(BaseModel):
     display_order: int = Field(default=0, ge=0)
 
 
-class PlanAssignment(BaseModel):
-    plan_version_id: str
+class PlanAssignment(RequestModel):
+    plan_version_id: str = Field(min_length=1, max_length=100)
     billing_interval: str = Field(pattern="^(monthly|annual)$")
     change_timing: str = Field(default="immediate", pattern="^(immediate|cycle_end)$")
     reason: str = Field(min_length=5, max_length=500)
-    version: int
+    version: int = Field(ge=1)
     idempotency_key: str = Field(min_length=8, max_length=160)
 
 
-class OverrideBody(BaseModel):
-    feature_code: str
+class OverrideBody(RequestModel):
+    feature_code: str = Field(min_length=1, max_length=160)
     value: object
-    reason: str = Field(min_length=8)
+    reason: str = Field(min_length=8, max_length=1000)
     starts_at: datetime
     ends_at: datetime
-    version: int = 1
+    version: int = Field(default=1, ge=1)
+
+    @model_validator(mode="after")
+    def valid_window(self):
+        if self.ends_at <= self.starts_at:
+            raise ValueError("Override end must be after its start")
+        return self
 
 
-class WalletRechargeBody(BaseModel):
+class WalletRechargeBody(RequestModel):
     credits: int = Field(gt=0, le=10_000_000)
     reason: str = Field(min_length=5, max_length=500)
     idempotency_key: str = Field(min_length=8, max_length=160)
-    mfa_code: str
+    mfa_code: str = Field(min_length=6, max_length=64)
 
 
-class RefundBody(BaseModel):
-    amount_paise: int = Field(gt=0)
-    reason: str = Field(min_length=8)
+class RefundBody(RequestModel):
+    amount_paise: int = Field(gt=0, le=100_000_000_000)
+    reason: str = Field(min_length=8, max_length=1000)
     idempotency_key: str = Field(min_length=8, max_length=160)
-    mfa_code: str
+    mfa_code: str = Field(min_length=6, max_length=64)
 
 
-class TeamMemberBody(BaseModel):
+class GatewaySelectionBody(RequestModel):
+    provider: Literal["razorpay", "cashfree"]
+    version: int = Field(ge=1)
+
+
+class TeamMemberBody(RequestModel):
     email: EmailStr
-    first_name: str
-    last_name: str = ""
-    role_id: str
+    first_name: str = Field(min_length=1, max_length=120)
+    last_name: str = Field(default="", max_length=120)
+    role_id: str = Field(min_length=1, max_length=100)
 
 
-class TeamRoleBody(BaseModel):
-    role_id: str
-    version: int | None = None
+class TeamRoleBody(RequestModel):
+    role_id: str = Field(min_length=1, max_length=100)
+    version: int | None = Field(default=None, ge=1)
 
 
-class SupportBody(BaseModel):
-    organization_id: str
-    target_user_id: str
-    reason: str = Field(min_length=8)
+class SupportBody(RequestModel):
+    organization_id: str = Field(min_length=1, max_length=100)
+    target_user_id: str = Field(min_length=1, max_length=100)
+    reason: str = Field(min_length=8, max_length=1000)
     ticket_reference: str = Field(min_length=3, max_length=120)
-    mode: str = Field(default="read_only", pattern="^(read_only|limited_write)$")
+    mode: Literal["read_only", "limited_write"] = "read_only"
 
 
-class ApprovalDecision(BaseModel):
-    version: int
-    note: str | None = None
-    mfa_code: str | None = None
+class ApprovalDecision(RequestModel):
+    version: int = Field(ge=1)
+    note: str | None = Field(default=None, max_length=1000)
+    mfa_code: str | None = Field(default=None, min_length=6, max_length=64)
 
 
-class MFAConfirm(BaseModel):
+class MFAConfirm(RequestModel):
     code: str = Field(pattern=r"^\d{6}$")
 
 
-class SettingsBody(BaseModel):
+class SettingsBody(RequestModel):
     value: dict
-    version: int
+    version: int = Field(ge=1)
 
 
-class DeletionBody(BaseModel):
-    reason: str = Field(min_length=12)
+class DeletionBody(RequestModel):
+    reason: str = Field(min_length=12, max_length=2000)
     idempotency_key: str = Field(min_length=8, max_length=160)
-    mfa_code: str
+    mfa_code: str = Field(min_length=6, max_length=64)
 
 
-class OwnerTransferBody(BaseModel):
-    new_owner_user_id: str
-    reason: str = Field(min_length=8)
-    mfa_code: str
+class OwnerTransferBody(RequestModel):
+    new_owner_user_id: str = Field(min_length=1, max_length=100)
+    reason: str = Field(min_length=8, max_length=1000)
+    mfa_code: str = Field(min_length=6, max_length=64)
 
 
-class ManualInvoiceBody(BaseModel):
-    organization_id: str
-    subtotal_paise: int = Field(gt=0)
+class ManualInvoiceBody(RequestModel):
+    organization_id: str = Field(min_length=1, max_length=100)
+    subtotal_paise: int = Field(gt=0, le=100_000_000_000)
     gst_rate_bps: int = Field(default=1800, ge=0, le=10000)
-    description: str = Field(min_length=3)
+    description: str = Field(min_length=3, max_length=1000)
     due_at: datetime | None = None
     idempotency_key: str = Field(min_length=8, max_length=160)
 
 
-class OfflinePaymentBody(BaseModel):
-    amount_paise: int = Field(gt=0)
-    method: str = Field(pattern="^(cash|card|bank|upi)$")
+class OfflinePaymentBody(RequestModel):
+    amount_paise: int = Field(gt=0, le=100_000_000_000)
+    method: Literal["cash", "card", "bank", "upi"]
     reference: str = Field(min_length=3, max_length=120)
-    mfa_code: str
+    mfa_code: str = Field(min_length=6, max_length=64)
     idempotency_key: str = Field(min_length=8, max_length=160)
 
 
-class CaptureBody(BaseModel):
-    amount_paise: int = Field(gt=0)
-    mfa_code: str
+class CaptureBody(RequestModel):
+    amount_paise: int = Field(gt=0, le=100_000_000_000)
+    mfa_code: str = Field(min_length=6, max_length=64)
     idempotency_key: str = Field(min_length=8, max_length=160)
 
 
-class SettlementBody(BaseModel):
-    amount_paise: int = Field(gt=0)
-    reason: str = Field(min_length=8)
-    mfa_code: str
+class ReconcileBody(RequestModel):
+    mfa_code: str = Field(min_length=6, max_length=64)
+
+
+class SettlementBody(RequestModel):
+    amount_paise: int = Field(gt=0, le=100_000_000_000)
+    reason: str = Field(min_length=8, max_length=1000)
+    mfa_code: str = Field(min_length=6, max_length=64)
     idempotency_key: str = Field(min_length=8, max_length=160)
 
 
@@ -459,13 +491,13 @@ def _replace_entitlements(db, version_id, values):
 
 
 @router.post("/plans/versions/{version_id}/publish")
-def publish_plan(version_id: str, body: dict, actor=Depends(require_platform_permission("plans.publish")), db: Session = Depends(get_db)):
+def publish_plan(version_id: str, body: PublishPlanBody, actor=Depends(require_platform_permission("plans.publish")), db: Session = Depends(get_db)):
     row = db.get(PlanVersion, version_id)
     if not row: raise HTTPException(404, "Plan version not found")
     if row.status == "published": return serialize(row)
     if row.status != "draft": raise HTTPException(409, "Only a draft can be published")
-    if body.get("version_lock") != row.version_lock: raise HTTPException(409, "This plan draft changed. Refresh and try again")
-    row.status = "published"; row.published_at = now_utc(); row.effective_from = datetime.fromisoformat(body["effective_from"]) if body.get("effective_from") else now_utc(); row.published_by_user_id = actor.id
+    if body.version_lock != row.version_lock: raise HTTPException(409, "This plan draft changed. Refresh and try again")
+    row.status = "published"; row.published_at = now_utc(); row.effective_from = body.effective_from or now_utc(); row.published_by_user_id = actor.id
     _audit(db, actor, "platform.plan_version_published", "plan_version", row.id); db.commit(); return serialize(row)
 
 
@@ -503,7 +535,36 @@ def billing(actor=Depends(require_platform_permission("billing.view")), db: Sess
     payments = db.execute(select(PlatformPayment).order_by(PlatformPayment.created_at.desc()).limit(100)).scalars().all()
     refunds = db.execute(select(PlatformRefund).order_by(PlatformRefund.created_at.desc()).limit(100)).scalars().all()
     settlements = db.execute(select(PlatformSettlement).order_by(PlatformSettlement.created_at.desc()).limit(100)).scalars().all()
-    return {"summary": {"collected_paise": db.scalar(select(func.coalesce(func.sum(PlatformPayment.amount_paise), 0)).where(PlatformPayment.status == "captured")) or 0, "outstanding_paise": db.scalar(select(func.coalesce(func.sum(Invoice.amount_paise), 0)).where(Invoice.status.in_(["created", "issued", "past_due"]))) or 0, "failed": db.scalar(select(func.count(Invoice.id)).where(Invoice.status == "failed")) or 0}, "invoices": [serialize(row) for row in invoices], "payments": [serialize(row) for row in payments], "refunds": [serialize(row) for row in refunds], "settlements": [serialize(row) for row in settlements], "provider": {"mode": settings.RAZORPAY_MODE, "configured": settings.RAZORPAY_MODE == "mock" or bool(settings.razorpay_credentials()[0])}}
+    setting = db.execute(select(PlatformSetting).where(PlatformSetting.key == "payment_gateway")).scalar_one_or_none()
+    return {"summary": {"collected_paise": db.scalar(select(func.coalesce(func.sum(PlatformPayment.amount_paise), 0)).where(PlatformPayment.status == "captured")) or 0, "outstanding_paise": db.scalar(select(func.coalesce(func.sum(Invoice.amount_paise), 0)).where(Invoice.status.in_(["created", "issued", "past_due"]))) or 0, "failed": db.scalar(select(func.count(Invoice.id)).where(Invoice.status == "failed")) or 0}, "invoices": [serialize(row) for row in invoices], "payments": [serialize(row) for row in payments], "refunds": [serialize(row) for row in refunds], "settlements": [serialize(row) for row in settlements], "provider": {**gateway_inventory(db), "version": setting.version if setting else 1}}
+
+
+@router.put("/billing/gateway")
+def select_payment_gateway(
+    body: GatewaySelectionBody,
+    actor=Depends(require_platform_permission("billing.manage")),
+    db: Session = Depends(get_db),
+):
+    gateway_config(body.provider, require_configured=True, require_webhook=True)
+    row = db.execute(select(PlatformSetting).where(
+        PlatformSetting.key == "payment_gateway",
+    ).with_for_update()).scalar_one_or_none()
+    current_version = row.version if row else 1
+    if body.version != current_version:
+        raise HTTPException(409, "Payment gateway settings changed. Refresh and try again")
+    previous = str((row.value if row else {}).get("provider") or settings.PAYMENT_GATEWAY)
+    if not row:
+        row = PlatformSetting(key="payment_gateway", value={"provider": body.provider}, version=1)
+        db.add(row); db.flush()
+    elif previous != body.provider:
+        row.value = {"provider": body.provider}
+        row.version += 1
+    _audit(
+        db, actor, "platform.payment_gateway_changed", "platform_setting", row.id,
+        changes={"before": previous, "after": body.provider},
+    )
+    db.commit(); db.refresh(row)
+    return {**gateway_inventory(db), "version": row.version}
 
 
 @router.post("/billing/payments/{payment_id}/refund")
@@ -514,7 +575,8 @@ def refund(payment_id: str, body: RefundBody, actor=Depends(require_platform_per
     payment = db.get(PlatformPayment, payment_id)
     if not payment or payment.status not in {"captured", "partially_refunded"}: raise HTTPException(409, "Payment cannot be refunded")
     already = db.scalar(select(func.coalesce(func.sum(PlatformRefund.amount_paise), 0)).where(PlatformRefund.payment_id == payment.id, PlatformRefund.status.in_(["requested", "approved", "processed"]))) or 0
-    if body.amount_paise > payment.amount_paise - already: raise HTTPException(400, "Refund exceeds the remaining payment amount")
+    if body.amount_paise > payment.amount_paise - already:
+        raise validation_problem("amount_paise", "Refund exceeds the remaining payment amount")
     row = PlatformRefund(organization_id=payment.organization_id, payment_id=payment.id, amount_paise=body.amount_paise, reason=body.reason, requested_by_user_id=actor.id, idempotency_key=body.idempotency_key)
     db.add(row); db.flush()
     threshold = int(_setting(db, "financial_approvals", {"refund_threshold_paise": 1000000}).get("refund_threshold_paise", 1000000))
@@ -545,7 +607,8 @@ def record_offline_payment(invoice_id: str, body: OfflinePaymentBody, actor=Depe
     invoice = db.get(Invoice, invoice_id)
     if not invoice or invoice.status in {"void", "refunded"}: raise HTTPException(409, "Invoice cannot accept a payment")
     paid = db.scalar(select(func.coalesce(func.sum(PlatformPayment.amount_paise), 0)).where(PlatformPayment.invoice_id == invoice.id, PlatformPayment.status == "captured")) or 0
-    if body.amount_paise > invoice.amount_paise - paid: raise HTTPException(400, "Payment exceeds the outstanding invoice amount")
+    if body.amount_paise > invoice.amount_paise - paid:
+        raise validation_problem("amount_paise", "Payment exceeds the outstanding invoice amount")
     row = PlatformPayment(organization_id=invoice.organization_id, invoice_id=invoice.id, provider="offline", provider_payment_id=f"offline:{body.idempotency_key}", mode="manual", amount_paise=body.amount_paise, currency=invoice.currency, status="captured", method=body.method, captured_at=now_utc(), meta={"reference": body.reference})
     db.add(row); db.flush(); total = paid + body.amount_paise; invoice.status = "paid" if total >= invoice.amount_paise else "partially_paid"; invoice.paid_at = now_utc() if invoice.status == "paid" else None
     _audit(db, actor, "platform.offline_payment_recorded", "payment", row.id, invoice.organization_id, {"amount_paise": body.amount_paise, "method": body.method}); db.commit(); return serialize(row)
@@ -553,13 +616,38 @@ def record_offline_payment(invoice_id: str, body: OfflinePaymentBody, actor=Depe
 
 def _execute_refund(db, refund, actor):
     payment = db.get(PlatformPayment, refund.payment_id)
-    if settings.RAZORPAY_MODE != "mock" and payment.provider_payment_id:
+    if payment.provider == "offline":
+        refund.provider_refund_id = f"offline-refund-{refund.id}"
+        refund.status = "processed"
+    elif payment.mode != "mock" and payment.provider_payment_id:
         try:
-            from app.services.razorpay_provider import razorpay_provider
-            key, secret, _ = settings.razorpay_credentials(payment.mode)
-            result = razorpay_provider(key, secret).refund_payment(payment.provider_payment_id, {"amount": refund.amount_paise, "notes": {"edvatiq_refund_id": refund.id}})
-            refund.provider_refund_id = result.get("id"); refund.status = result.get("status", "processed")
-        except Exception as exc: raise HTTPException(502, "The payment provider could not process this refund") from exc
+            config = gateway_config(payment.provider, payment.mode)
+            if payment.provider == "razorpay":
+                from app.services.razorpay_provider import razorpay_provider
+                result = razorpay_provider(config.client_id, config.secret).refund_payment(payment.provider_payment_id, {"amount": refund.amount_paise, "notes": {"edvatiq_refund_id": refund.id}})
+                refund.provider_refund_id = result.get("id")
+                refund.status = result.get("status", "processed")
+            elif payment.provider == "cashfree":
+                if not payment.provider_order_id:
+                    raise HTTPException(409, "This Cashfree payment has no order reference")
+                result = cashfree_provider(
+                    config.client_id, config.secret, config.mode, settings.CASHFREE_API_VERSION,
+                ).refund_order(payment.provider_order_id, {
+                    "refund_amount": paise_to_rupees(refund.amount_paise),
+                    "refund_id": f"edv_{refund.id.replace('-', '')}"[:40],
+                    "refund_note": refund.reason[:100],
+                    "refund_speed": "STANDARD",
+                }, idempotency_key=refund.idempotency_key)
+                provider_refund_id = result.get("cf_refund_id") or result.get("refund_id")
+                refund.provider_refund_id = str(provider_refund_id) if provider_refund_id else None
+                refund.status = cashfree_refund_state(result.get("refund_status"))
+            else:
+                raise HTTPException(409, "This payment provider does not support online refunds")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            provider_error(exc, "refund", payment.provider)
+            raise HTTPException(502, "The payment provider could not process this refund") from exc
     else:
         refund.provider_refund_id = f"mock-refund-{refund.id}"; refund.status = "processed"
     refund.approved_by_user_id = actor.id
@@ -568,8 +656,8 @@ def _execute_refund(db, refund, actor):
 
 
 @router.post("/billing/payments/{payment_id}/reconcile")
-def reconcile_payment(payment_id: str, body: dict, actor=Depends(require_platform_permission("billing.manage")), db: Session = Depends(get_db)):
-    _require_mfa(db, actor, body.get("mfa_code", "")); payment = db.get(PlatformPayment, payment_id)
+def reconcile_payment(payment_id: str, body: ReconcileBody, actor=Depends(require_platform_permission("billing.manage")), db: Session = Depends(get_db)):
+    _require_mfa(db, actor, body.mfa_code); payment = db.get(PlatformPayment, payment_id)
     if not payment: raise HTTPException(404, "Payment not found")
     payment.reconciled_at = now_utc(); _audit(db, actor, "platform.payment_reconciled", "payment", payment.id, payment.organization_id); db.commit(); return serialize(payment)
 
@@ -580,7 +668,10 @@ def capture_payment(payment_id: str, body: CaptureBody, actor=Depends(require_pl
     if not payment: raise HTTPException(404, "Payment not found")
     if payment.status == "captured": return serialize(payment)
     if payment.status != "authorized": raise HTTPException(409, "Only an authorized payment can be captured")
-    if body.amount_paise != payment.amount_paise: raise HTTPException(400, "Capture amount must match the authorized payment")
+    if body.amount_paise != payment.amount_paise:
+        raise validation_problem("amount_paise", "Capture amount must match the authorized payment")
+    if payment.provider != "razorpay":
+        raise HTTPException(409, "Manual capture is not supported for this payment provider")
     if payment.mode != "mock":
         try:
             from app.services.razorpay_provider import razorpay_provider
@@ -754,7 +845,8 @@ def decide_approval(approval_id: str, decision: str, body: ApprovalDecision, act
 @router.get("/operations")
 def operations(actor=Depends(require_platform_permission("operations.view")), db: Session = Depends(get_db)):
     jobs = db.execute(select(Job).order_by(Job.created_at.desc()).limit(100)).scalars().all(); messages = db.execute(select(OutboundMessage).order_by(OutboundMessage.created_at.desc()).limit(100)).scalars().all(); webhooks = db.execute(select(PaymentEvent).order_by(PaymentEvent.created_at.desc()).limit(100)).scalars().all(); documents = db.execute(select(Document).where(Document.status.in_(["pending", "failed"])).order_by(Document.created_at.desc()).limit(100)).scalars().all()
-    return {"health": {"database": "healthy", "payments": "configured" if settings.RAZORPAY_MODE == "mock" or settings.razorpay_credentials()[0] else "setup_needed", "ai": "configured" if settings.AI_API_KEY else "local_mode", "workers": "attention" if any(row.status == "failed" for row in jobs) else "healthy"}, "jobs": [_safe(row, {"payload", "last_error"}) for row in jobs], "messages": [_safe(row, {"recipient", "body", "last_error"}) for row in messages], "webhooks": [_safe(row, {"payload", "error"}) for row in webhooks], "documents": [_safe(row, {"object_key", "extracted_text", "error"}) for row in documents]}
+    payment_gateway = gateway_inventory(db)
+    return {"health": {"database": "healthy", "payments": "configured" if payment_gateway["configured"] else "setup_needed", "ai": "configured" if settings.AI_API_KEY else "local_mode", "workers": "attention" if any(row.status == "failed" for row in jobs) else "healthy"}, "jobs": [_safe(row, {"payload", "last_error"}) for row in jobs], "messages": [_safe(row, {"recipient", "body", "last_error"}) for row in messages], "webhooks": [_safe(row, {"payload", "error"}) for row in webhooks], "documents": [_safe(row, {"object_key", "extracted_text", "error"}) for row in documents]}
 
 
 def _safe(row, hidden):
@@ -797,6 +889,8 @@ def platform_settings(actor=Depends(require_platform_permission("overview.view")
 
 @router.put("/settings/{key}")
 def update_setting(key: str, body: SettingsBody, actor=Depends(require_platform_permission("settings.manage")), db: Session = Depends(get_db)):
+    if key == "payment_gateway":
+        raise HTTPException(409, "Use the Billing gateway control to change the payment provider")
     row = db.execute(select(PlatformSetting).where(PlatformSetting.key == key)).scalar_one_or_none()
     if key == "ai_credit_policy":
         if not row:

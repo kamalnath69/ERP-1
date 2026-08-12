@@ -5,12 +5,13 @@ from typing import Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, EmailStr, Field, model_validator
+from pydantic import EmailStr, Field, model_validator
 from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.schemas.validation import RequestModel
 from app.core.deps import require_entitlements, require_permissions
 from app.models import (
     Client, CollegeAssessment, CollegeAssessmentScore, CollegeAttendanceRecord,
@@ -33,7 +34,7 @@ router = APIRouter(
 )
 
 
-class DepartmentBody(BaseModel):
+class DepartmentBody(RequestModel):
     name: str = Field(min_length=2, max_length=180)
     code: str = Field(min_length=2, max_length=30)
     location_id: str | None = None
@@ -41,7 +42,7 @@ class DepartmentBody(BaseModel):
     description: str | None = Field(default=None, max_length=1000)
 
 
-class ProgramBody(BaseModel):
+class ProgramBody(RequestModel):
     department_id: str
     name: str = Field(min_length=2, max_length=200)
     code: str = Field(min_length=2, max_length=40)
@@ -49,7 +50,7 @@ class ProgramBody(BaseModel):
     duration_semesters: int = Field(default=6, ge=1, le=16)
 
 
-class TermBody(BaseModel):
+class TermBody(RequestModel):
     name: str = Field(min_length=2, max_length=80)
     academic_year: str = Field(min_length=4, max_length=20)
     term_number: int = Field(ge=1, le=16)
@@ -65,7 +66,7 @@ class TermBody(BaseModel):
         return self
 
 
-class CohortBody(BaseModel):
+class CohortBody(RequestModel):
     program_id: str
     name: str = Field(min_length=2, max_length=120)
     code: str = Field(min_length=2, max_length=50)
@@ -75,7 +76,7 @@ class CohortBody(BaseModel):
     advisor_employee_id: str | None = None
 
 
-class CourseBody(BaseModel):
+class CourseBody(RequestModel):
     department_id: str
     name: str = Field(min_length=2, max_length=200)
     code: str = Field(min_length=2, max_length=40)
@@ -83,7 +84,7 @@ class CourseBody(BaseModel):
     course_type: Literal["core", "elective", "lab", "project", "audit"] = "core"
 
 
-class ScheduleSlot(BaseModel):
+class ScheduleSlot(RequestModel):
     weekday: int = Field(ge=0, le=6)
     starts_at: time
     ends_at: time
@@ -96,7 +97,7 @@ class ScheduleSlot(BaseModel):
         return self
 
 
-class OfferingBody(BaseModel):
+class OfferingBody(RequestModel):
     term_id: str
     course_id: str
     cohort_id: str
@@ -112,7 +113,7 @@ class OfferingBody(BaseModel):
         return self
 
 
-class StudentBody(BaseModel):
+class StudentBody(RequestModel):
     first_name: str = Field(min_length=1, max_length=100)
     last_name: str = Field(default="", max_length=100)
     email: EmailStr | None = None
@@ -134,13 +135,13 @@ class StudentBody(BaseModel):
 AttendanceStatus = Literal["present", "absent", "late", "excused"]
 
 
-class AttendanceRecordBody(BaseModel):
+class AttendanceRecordBody(RequestModel):
     student_profile_id: str
     status: AttendanceStatus = "present"
     note: str | None = Field(default=None, max_length=300)
 
 
-class AttendanceSessionBody(BaseModel):
+class AttendanceSessionBody(RequestModel):
     offering_id: str
     held_on: date = Field(default_factory=date.today)
     starts_at: time | None = None
@@ -157,11 +158,11 @@ class AttendanceSessionBody(BaseModel):
         return self
 
 
-class AttendanceRecordsBody(BaseModel):
+class AttendanceRecordsBody(RequestModel):
     records: list[AttendanceRecordBody] = Field(min_length=1)
 
 
-class AssessmentBody(BaseModel):
+class AssessmentBody(RequestModel):
     offering_id: str
     title: str = Field(min_length=2, max_length=180)
     assessment_type: Literal["internal", "assignment", "quiz", "practical", "project", "semester"] = "internal"
@@ -171,24 +172,24 @@ class AssessmentBody(BaseModel):
     status: Literal["draft", "published", "closed"] = "draft"
 
 
-class ScoreBody(BaseModel):
+class ScoreBody(RequestModel):
     student_profile_id: str
     marks_awarded: Decimal | None = Field(default=None, ge=0, max_digits=8, decimal_places=2)
     grade: str | None = Field(default=None, max_length=12)
     feedback: str | None = Field(default=None, max_length=2000)
 
 
-class ScoresBody(BaseModel):
+class ScoresBody(RequestModel):
     scores: list[ScoreBody] = Field(min_length=1)
     publish: bool = False
 
 
-class FeeLineBody(BaseModel):
+class FeeLineBody(RequestModel):
     name: str = Field(min_length=2, max_length=180)
     amount_paise: int = Field(gt=0)
 
 
-class FeePlanBody(BaseModel):
+class FeePlanBody(RequestModel):
     name: str = Field(min_length=2, max_length=180)
     program_id: str | None = None
     cohort_id: str | None = None
@@ -204,7 +205,7 @@ class FeePlanBody(BaseModel):
         return self
 
 
-class StudentFeeBody(BaseModel):
+class StudentFeeBody(RequestModel):
     student_profile_id: str
     fee_plan_id: str
     concession_paise: int = Field(default=0, ge=0)

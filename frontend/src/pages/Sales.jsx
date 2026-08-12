@@ -1,5 +1,7 @@
-import React, { useDeferredValue, useEffect, useMemo, useState } from "react";
+import React, { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, useNavigate, useParams } from "react-router-dom";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { useForm } from "react-hook-form";
 import {
   ArrowLeft, MagnifyingGlass, Minus, Plus, Receipt, ShoppingCart, Trash, Wallet,
 } from "@phosphor-icons/react";
@@ -11,8 +13,8 @@ import {
   PageHeader, PageShell, RemoteCombobox, StatusBadge, Surface, formatMetric,
 } from "@/components/system";
 import { Button } from "@/components/ui/button";
+import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage, FormRootError } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { useAuth } from "@/contexts/AuthContext";
@@ -26,6 +28,7 @@ import { useGetClientDirectoryQuery } from "@/store/api/workspaceApi";
 import { QUERY_POLICIES, withSkip } from "@/store/api/queryPolicies";
 import { cn } from "@/lib/utils";
 import useCursorPagination from "@/hooks/useCursorPagination";
+import { applyApiErrors, checkoutSchema, FORM_OPTIONS } from "@/lib/validation";
 
 
 export default function Sales() {
@@ -117,11 +120,12 @@ function CheckoutDrawer({ open, onOpenChange, locationId, entityName, onCreated 
   const deferredItemSearch = useDeferredValue(itemSearch.trim());
   const [clientSearch, setClientSearch] = useState("");
   const deferredClientSearch = useDeferredValue(clientSearch.trim());
-  const [clientId, setClientId] = useState("walk-in");
   const [selectedClient, setSelectedClient] = useState(WALK_IN_CLIENT);
   const [cart, setCart] = useState([]);
-  const [notes, setNotes] = useState("");
-  const [interstate, setInterstate] = useState("no");
+  const checkoutForm = useForm({ resolver: zodResolver(checkoutSchema), defaultValues: checkoutDefaults(locationId), ...FORM_OPTIONS });
+  const { clearErrors, control, formState, handleSubmit, reset, setError, setValue, watch } = checkoutForm;
+  const clientId = watch("client_id") || "walk-in";
+  const idempotencyKey = useRef(crypto.randomUUID());
   const itemPaging = useCursorPagination(JSON.stringify({ open, q: deferredItemSearch }));
   const clientPaging = useCursorPagination(JSON.stringify({ open, locationId, q: deferredClientSearch }));
   const catalogQuery = useGetCatalogDirectoryQuery({
@@ -147,51 +151,61 @@ function CheckoutDrawer({ open, onOpenChange, locationId, entityName, onCreated 
     ...(clientPaging.items.length ? clientPaging.items : clientsQuery.data?.items || []),
   ], [clientPaging.items, clientsQuery.data?.items]);
   const total = cart.reduce((sum, line) => sum + previewTotal(line.item, line.quantity), 0);
-  const add = (item) => setCart((current) => {
+  const updateCart = (updater) => {
+    const next = updater(cart);
+    setCart(next);
+    setValue("lines", next.map((line) => ({ item_id: line.item.id, quantity: line.quantity, discount: "" })), { shouldDirty: true, shouldValidate: true });
+    return next;
+  };
+  const add = (item) => updateCart((current) => {
     const match = current.find((line) => line.item.id === item.id);
     return match ? current.map((line) => line.item.id === item.id ? { ...line, quantity: line.quantity + 1 } : line) : [...current, { item, quantity: 1 }];
   });
-  const setQuantity = (itemId, quantity) => setCart((current) => current.map((line) => line.item.id === itemId ? { ...line, quantity: Math.max(1, quantity) } : line));
-  const reset = () => {
+  const setQuantity = (itemId, value) => updateCart((current) => current.map((line) => line.item.id === itemId ? { ...line, quantity: Math.max(1, value) } : line));
+  const resetCheckout = () => {
     setCart([]);
-    setClientId("walk-in");
     setSelectedClient(WALK_IN_CLIENT);
-    setNotes("");
-    setInterstate("no");
     setItemSearch("");
     setClientSearch("");
+    reset(checkoutDefaults(locationId));
+    idempotencyKey.current = crypto.randomUUID();
     itemPaging.reset();
     clientPaging.reset();
   };
-  const submit = async (event) => {
-    event.preventDefault();
-    if (!cart.length) return;
+  useEffect(() => {
+    if (!open) return;
+    resetCheckout();
+  }, [locationId, open]);
+  const submit = handleSubmit(async (values) => {
+    clearErrors("root.server");
     try {
       const invoice = await createSale({
-        location_id: locationId,
-        client_id: clientId === "walk-in" ? null : clientId,
-        lines: cart.map((line) => ({ item_id: line.item.id, quantity_milli: line.quantity * 1000, discount_paise: 0 })),
+        location_id: values.location_id,
+        client_id: values.client_id === "walk-in" ? null : values.client_id,
+        lines: values.lines,
         discount_paise: 0,
-        interstate: interstate === "yes",
-        notes: notes || null,
+        interstate: values.interstate,
+        notes: values.notes || null,
         issue: true,
-        idempotency_key: crypto.randomUUID(),
+        idempotency_key: idempotencyKey.current,
       }).unwrap();
       toast.success("Invoice issued");
-      reset();
+      resetCheckout();
       onOpenChange(false);
       onCreated(invoice);
     } catch (error) {
-      toast.error(error?.data?.detail || "Invoice could not be issued. Your cart is still here.");
+      const normalized = applyApiErrors(error, setError, { fallback: "Invoice could not be issued. Your cart is still here." });
+      setError("root.server", { type: "server", message: normalized.message });
     }
-  };
-  return <DrawerForm open={open} onOpenChange={onOpenChange} title="Quick checkout" description="Choose items, confirm who is buying, and review the live total before issuing.">
-    <form onSubmit={submit} className="space-y-6">
-      <Field label={entityName}><RemoteCombobox
-        value={clientId}
+  });
+  const pending = formState.isSubmitting || createState.isLoading;
+  return <DrawerForm open={open} onOpenChange={(nextOpen) => { if (!nextOpen && pending) return; onOpenChange(nextOpen); }} title="Quick checkout" description="Choose items, confirm who is buying, and review the live total before issuing.">
+    <Form {...checkoutForm}><form noValidate onSubmit={submit} className="space-y-6">
+      <FormField control={control} name="client_id" render={({ field }) => <FormItem><FormLabel>{entityName}</FormLabel><RemoteCombobox
+        value={field.value || "walk-in"}
         selectedItem={selectedClient}
         items={clientOptions}
-        onValueChange={(value, item) => { setClientId(value); setSelectedClient(item); }}
+        onValueChange={(value, item) => { field.onChange(value); setSelectedClient(item); }}
         onSearchChange={setClientSearch}
         getLabel={(client) => client.display_name || `${client.first_name || ""} ${client.last_name || ""}`.trim()}
         getDescription={(client) => client.id === "walk-in" ? "Issue without linking a profile" : client.client_number}
@@ -203,20 +217,21 @@ function CheckoutDrawer({ open, onOpenChange, locationId, entityName, onCreated 
         onLoadMore={() => clientPaging.loadMore(clientsQuery.data?.next_cursor)}
         onRetry={clientsQuery.refetch}
         disabled={!open || !locationId}
-      /></Field>
-      <Field label="Add products or services"><div className="relative"><MagnifyingGlass className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" /><Input value={itemSearch} onChange={(event) => setItemSearch(event.target.value)} className="pl-10" placeholder="Search name or SKU" /></div></Field>
+      /><FormMessage /></FormItem>} />
+      <div className="space-y-2"><label className="text-sm font-medium" htmlFor="sale-item-search">Add products or services</label><div className="relative"><MagnifyingGlass className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" /><Input id="sale-item-search" value={itemSearch} onChange={(event) => setItemSearch(event.target.value)} className="pl-10" placeholder="Search name or SKU" /></div></div>
       <div className="grid max-h-56 gap-2 overflow-y-auto premium-scrollbar sm:grid-cols-2">
         {catalogQuery.isLoading && !items.length ? Array.from({ length: 4 }, (_, index) => <div key={index} className="h-24 animate-pulse rounded-2xl bg-secondary" />) : items.map((item) => <button type="button" key={item.id} onClick={() => add(item)} className="surface-card surface-interactive p-4 text-left"><div className="flex items-start justify-between gap-3"><div><div className="font-semibold">{item.name}</div><div className="mt-1 text-xs text-muted-foreground">{item.sku} · {sentence(item.item_type)}</div></div><Plus /></div><div className="mt-3 font-display text-xl font-semibold">{money(previewTotal(item, 1))}</div></button>)}
         {!catalogQuery.isLoading && !items.length && <div className="col-span-full rounded-xl bg-secondary/50 px-4 py-6 text-center text-sm text-muted-foreground">No products or services match this search.</div>}
       </div>
       {catalogQuery.data?.has_more && <Button type="button" variant="outline" size="sm" className="w-full" disabled={catalogQuery.isFetching} onClick={() => itemPaging.loadMore(catalogQuery.data?.next_cursor)}>{catalogQuery.isFetching ? "Loading..." : "Load more products and services"}</Button>}
-      <div className="space-y-2">
-        {!cart.length ? <EmptyState compact icon={ShoppingCart} title="Your cart is empty" description="Select a product or service above." /> : cart.map((line) => <Surface key={line.item.id} className="p-4"><div className="flex items-start justify-between gap-3"><div><div className="font-semibold">{line.item.name}</div><div className="mt-1 text-xs text-muted-foreground">{money(previewTotal(line.item, line.quantity))}</div></div><Button type="button" size="icon" variant="ghost" onClick={() => setCart((current) => current.filter((row) => row.item.id !== line.item.id))} aria-label={`Remove ${line.item.name}`}><Trash /></Button></div><div className="mt-3 flex items-center gap-2"><Button type="button" size="icon" variant="outline" onClick={() => setQuantity(line.item.id, line.quantity - 1)} aria-label="Decrease quantity"><Minus /></Button><span className="min-w-9 text-center font-mono">{line.quantity}</span><Button type="button" size="icon" variant="outline" onClick={() => setQuantity(line.item.id, line.quantity + 1)} aria-label="Increase quantity"><Plus /></Button></div></Surface>)}
-      </div>
-      <div className="grid gap-4 sm:grid-cols-2"><Field label="Tax treatment"><Select value={interstate} onValueChange={setInterstate}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="no">CGST + SGST</SelectItem><SelectItem value="yes">IGST</SelectItem></SelectContent></Select></Field><Field label="Invoice note"><Textarea value={notes} onChange={(event) => setNotes(event.target.value)} maxLength={2000} placeholder="Optional note" /></Field></div>
+      <FormField control={control} name="lines" render={() => <FormItem><div className="space-y-2">
+        {!cart.length ? <EmptyState compact icon={ShoppingCart} title="Your cart is empty" description="Select a product or service above." /> : cart.map((line) => <Surface key={line.item.id} className="p-4"><div className="flex items-start justify-between gap-3"><div><div className="font-semibold">{line.item.name}</div><div className="mt-1 text-xs text-muted-foreground">{money(previewTotal(line.item, line.quantity))}</div></div><Button type="button" size="icon" variant="ghost" onClick={() => updateCart((current) => current.filter((row) => row.item.id !== line.item.id))} aria-label={`Remove ${line.item.name}`}><Trash /></Button></div><div className="mt-3 flex items-center gap-2"><Button type="button" size="icon" variant="outline" onClick={() => setQuantity(line.item.id, line.quantity - 1)} aria-label="Decrease quantity"><Minus /></Button><span className="min-w-9 text-center font-mono">{line.quantity}</span><Button type="button" size="icon" variant="outline" onClick={() => setQuantity(line.item.id, line.quantity + 1)} aria-label="Increase quantity"><Plus /></Button></div></Surface>)}
+      </div><FormMessage /></FormItem>} />
+      <div className="grid gap-4 sm:grid-cols-2"><FormField control={control} name="interstate" render={({ field }) => <FormItem><FormLabel>Tax treatment</FormLabel><Select value={field.value ? "yes" : "no"} onValueChange={(value) => field.onChange(value === "yes")}><FormControl><SelectTrigger><SelectValue /></SelectTrigger></FormControl><SelectContent><SelectItem value="no">CGST + SGST</SelectItem><SelectItem value="yes">IGST</SelectItem></SelectContent></Select><FormMessage /></FormItem>} /><ValidatedSaleField control={control} name="notes" label="Invoice note"><Textarea maxLength={2000} placeholder="Optional note" /></ValidatedSaleField></div>
       <Surface className="flex items-center justify-between p-5"><div><div className="text-sm text-muted-foreground">Estimated total</div><div className="mt-1 text-xs text-muted-foreground">Final tax is calculated securely when issued.</div></div><div className="font-display text-3xl font-semibold">{money(total)}</div></Surface>
-      <Button disabled={createState.isLoading || !cart.length || !locationId} className="w-full">{createState.isLoading ? "Issuing invoice..." : "Review and issue invoice"}</Button>
-    </form>
+      <FormRootError error={formState.errors.root?.server} />
+      <Button type="submit" disabled={!locationId} loading={pending} loadingText="Issuing invoice..." className="w-full">Review and issue invoice</Button>
+    </form></Form>
   </DrawerForm>;
 }
 
@@ -267,7 +282,8 @@ function MoneyRow({ label, value, strong, hidden }) {
   return <div className={cn("flex items-center justify-between gap-4 py-1.5 text-sm", strong && "mt-2 border-t pt-4 font-display text-xl font-semibold")}><span>{label}</span><span>{money(value)}</span></div>;
 }
 
-function Field({ label, children }) { return <div className="space-y-2"><Label>{label}</Label>{children}</div>; }
+function ValidatedSaleField({ control, name, label, children }) { return <FormField control={control} name={name} render={({ field }) => <FormItem><FormLabel>{label}</FormLabel><FormControl>{React.cloneElement(children, { ...field, value: field.value ?? "" })}</FormControl><FormMessage /></FormItem>} />; }
+function checkoutDefaults(locationId) { return { location_id: locationId || "", client_id: "walk-in", interstate: false, notes: "", lines: [] }; }
 function money(paise) { return formatMetric(paise, "money"); }
 function quantity(value) { return (Number(value || 0) / 1000).toLocaleString("en-IN", { maximumFractionDigits: 3 }); }
 function sentence(value) { return String(value || "").replaceAll("_", " ").replace(/\b\w/g, (character) => character.toUpperCase()); }

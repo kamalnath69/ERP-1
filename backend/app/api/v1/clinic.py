@@ -1,13 +1,15 @@
 """Outpatient clinic workflows with practitioner-signing safeguards."""
 from datetime import date, datetime, timezone
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import Field, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.v1.business import serialize
 from app.core.database import get_db
+from app.schemas.validation import RequestModel
 from app.core.deps import require_permissions
 from app.models import (
     Allergy, Appointment, CatalogItem, Client, Diagnosis, Dispense, Employee, EmployeeLocation, Encounter,
@@ -38,94 +40,101 @@ def editable_encounter(db, user, encounter_id):
     return row
 
 
-class PatientBody(BaseModel):
+class PatientBody(RequestModel):
     client_id: str
-    abha_number: str | None = None
-    blood_group: str | None = None
+    abha_number: str | None = Field(default=None, max_length=30)
+    blood_group: Literal["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"] | None = None
     emergency_contact: dict = Field(default_factory=dict)
     consent: dict = Field(default_factory=dict)
-    medical_summary: str | None = None
+    medical_summary: str | None = Field(default=None, max_length=10000)
 
 
-class EncounterBody(BaseModel):
+class EncounterBody(RequestModel):
     location_id: str
     patient_id: str
     practitioner_employee_id: str
     appointment_id: str | None = None
-    chief_complaint: str | None = None
+    chief_complaint: str | None = Field(default=None, max_length=5000)
 
 
-class EncounterUpdate(BaseModel):
-    chief_complaint: str | None = None
-    clinical_notes: str | None = None
-    assessment: str | None = None
-    plan: str | None = None
+class EncounterUpdate(RequestModel):
+    chief_complaint: str | None = Field(default=None, max_length=5000)
+    clinical_notes: str | None = Field(default=None, max_length=15000)
+    assessment: str | None = Field(default=None, max_length=10000)
+    plan: str | None = Field(default=None, max_length=10000)
     follow_up_on: date | None = None
-    version: int
+    version: int = Field(ge=1)
 
 
-class VitalBody(BaseModel):
+class VitalBody(RequestModel):
     values: dict
 
 
-class AllergyBody(BaseModel):
+class AllergyBody(RequestModel):
     patient_id: str
-    substance: str
-    reaction: str | None = None
-    severity: str = "unknown"
+    substance: str = Field(min_length=1, max_length=180)
+    reaction: str | None = Field(default=None, max_length=1000)
+    severity: Literal["unknown", "mild", "moderate", "severe", "critical"] = "unknown"
 
 
-class DiagnosisBody(BaseModel):
-    code: str | None = None
-    description: str
+class DiagnosisBody(RequestModel):
+    code: str | None = Field(default=None, max_length=40)
+    description: str = Field(min_length=2, max_length=2000)
     is_primary: bool = False
     ai_suggested: bool = False
 
 
-class PrescriptionItemBody(BaseModel):
+class PrescriptionItemBody(RequestModel):
     medicine_item_id: str | None = None
-    medicine_name: str
-    dosage: str
-    frequency: str
-    duration: str
-    instructions: str | None = None
+    medicine_name: str = Field(min_length=1, max_length=180)
+    dosage: str = Field(min_length=1, max_length=120)
+    frequency: str = Field(min_length=1, max_length=120)
+    duration: str = Field(min_length=1, max_length=120)
+    instructions: str | None = Field(default=None, max_length=2000)
 
 
-class PrescriptionBody(BaseModel):
+class PrescriptionBody(RequestModel):
     encounter_id: str
-    items: list[PrescriptionItemBody] = Field(min_length=1)
-    notes: str | None = None
+    items: list[PrescriptionItemBody] = Field(min_length=1, max_length=100)
+    notes: str | None = Field(default=None, max_length=5000)
     ai_drafted: bool = False
 
 
-class LabTestBody(BaseModel):
-    name: str
-    code: str
+class LabTestBody(RequestModel):
+    name: str = Field(min_length=2, max_length=180)
+    code: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9._/-]+$")
     price_paise: int = Field(default=0, ge=0)
     reference_ranges: dict = Field(default_factory=dict)
 
 
-class LabOrderBody(BaseModel):
+class LabOrderBody(RequestModel):
     encounter_id: str
     test_id: str
-    notes: str | None = None
+    notes: str | None = Field(default=None, max_length=5000)
 
 
-class LabResultBody(BaseModel):
+class LabResultBody(RequestModel):
     values: dict
-    interpretation: str | None = None
+    interpretation: str | None = Field(default=None, max_length=10000)
 
 
-class DispenseItemBody(BaseModel):
+class DispenseItemBody(RequestModel):
     prescription_item_id: str
     quantity_milli: int = Field(gt=0)
-    batch_number: str = ""
+    batch_number: str = Field(default="", max_length=120)
 
 
-class DispenseBody(BaseModel):
+class DispenseBody(RequestModel):
     location_id: str
     prescription_id: str
-    items: list[DispenseItemBody] = Field(min_length=1)
+    items: list[DispenseItemBody] = Field(min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def unique_items(self):
+        item_ids = [item.prescription_item_id for item in self.items]
+        if len(set(item_ids)) != len(item_ids):
+            raise ValueError("Each prescription item can be dispensed only once per request")
+        return self
 
 
 @router.get("/summary")

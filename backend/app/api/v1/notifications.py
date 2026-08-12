@@ -79,7 +79,7 @@ def list_notifications(
 @router.get("/page")
 def notification_page(
     status: str = Query("all", pattern="^(all|unread|action_required|delivery_issues)$"),
-    q: str | None = None,
+    q: str | None = Query(default=None, max_length=120),
     cursor: str | None = None,
     limit: int = Query(25, ge=1, le=100),
     user=Depends(get_current_user),

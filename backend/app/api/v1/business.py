@@ -1,17 +1,18 @@
 """Shared multi-industry business operations."""
 import re
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, EmailStr, Field, model_validator
+from pydantic import EmailStr, Field, field_validator, model_validator
 from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.database import get_db
+from app.schemas.validation import RequestModel, valid_phone
 from app.core.deps import get_current_user, require_any_permission, require_permissions
 from app.core.security import hash_password
 from app.models import (
@@ -36,32 +37,49 @@ from app.schemas import validate_strong_password
 router = APIRouter(tags=["business"])
 
 
-class LocationBody(BaseModel):
-    name: str
-    code: str
-    address: str | None = None
-    city: str | None = None
-    state: str | None = None
-    postal_code: str | None = None
-    phone: str | None = None
-    gstin: str | None = None
+class LocationBody(RequestModel):
+    name: str = Field(min_length=2, max_length=200)
+    code: str = Field(min_length=1, max_length=40, pattern=r"^[A-Za-z0-9._/-]+$")
+    address: str | None = Field(default=None, max_length=500)
+    city: str | None = Field(default=None, max_length=120)
+    state: str | None = Field(default=None, max_length=100)
+    postal_code: str | None = Field(default=None, max_length=20)
+    phone: str | None = Field(default=None, max_length=40)
+    gstin: str | None = Field(default=None, min_length=15, max_length=15, pattern=r"^\d{2}[A-Za-z]{5}\d{4}[A-Za-z][A-Za-z0-9]Z[A-Za-z0-9]$")
     is_primary: bool = False
 
 
-class EmployeeBody(BaseModel):
-    employee_number: str | None = None
-    first_name: str
-    last_name: str = ""
+class LocationUpdateBody(RequestModel):
+    name: str = Field(min_length=2, max_length=200)
+    address: str | None = Field(default=None, max_length=500)
+    city: str | None = Field(default=None, max_length=120)
+    state: str | None = Field(default=None, max_length=100)
+    postal_code: str | None = Field(default=None, max_length=20)
+    phone: str | None = Field(default=None, max_length=40)
+    gstin: str | None = Field(default=None, min_length=15, max_length=15, pattern=r"^\d{2}[A-Za-z]{5}\d{4}[A-Za-z][A-Za-z0-9]Z[A-Za-z0-9]$")
+    is_active: bool = True
+    version: int = Field(ge=1)
+
+
+class EmployeeBody(RequestModel):
+    employee_number: str | None = Field(default=None, max_length=50)
+    first_name: str = Field(min_length=1, max_length=100)
+    last_name: str = Field(default="", max_length=100)
     email: EmailStr | None = None
-    phone: str | None = None
-    designation: str | None = None
-    specialties: list[str] = Field(default_factory=list)
+    phone: str | None = Field(default=None, max_length=30)
+    designation: str | None = Field(default=None, max_length=120)
+    specialties: list[str] = Field(default_factory=list, max_length=50)
     salary_paise: int | None = Field(default=None, ge=0)
     joining_date: date | None = None
     location_ids: list[str] = Field(min_length=1)
     create_login: bool = False
-    password: str | None = None
-    role_ids: list[str] = Field(default_factory=list)
+    password: str | None = Field(default=None, max_length=128)
+    role_ids: list[str] = Field(default_factory=list, max_length=100)
+
+    @field_validator("phone")
+    @classmethod
+    def validate_phone(cls, value):
+        return valid_phone(value)
 
     @model_validator(mode="after")
     def validate_login(self):
@@ -69,22 +87,29 @@ class EmployeeBody(BaseModel):
             if not self.email or not self.password:
                 raise ValueError("Email and a temporary password are required for login access")
             validate_strong_password(self.password)
+            if not self.role_ids:
+                raise ValueError("Choose at least one role for login access")
         return self
 
 
-class ClientBody(BaseModel):
-    first_name: str
-    last_name: str = ""
-    phone: str | None = None
+class ClientBody(RequestModel):
+    first_name: str = Field(min_length=1, max_length=100)
+    last_name: str = Field(default="", max_length=100)
+    phone: str | None = Field(default=None, max_length=30)
     email: EmailStr | None = None
-    address: str | None = None
+    address: str | None = Field(default=None, max_length=1000)
     date_of_birth: date | None = None
-    gender: str | None = None
+    gender: str | None = Field(default=None, max_length=30)
     home_location_id: str | None = None
-    notes: str | None = None
-    tags: list[str] = []
+    notes: str | None = Field(default=None, max_length=5000)
+    tags: list[str] = Field(default_factory=list, max_length=100)
     whatsapp_consent: bool = False
     email_consent: bool = False
+
+    @field_validator("phone")
+    @classmethod
+    def validate_phone(cls, value):
+        return valid_phone(value)
 
     @model_validator(mode="after")
     def consent_requires_phone(self):
@@ -93,72 +118,175 @@ class ClientBody(BaseModel):
         return self
 
 
-class CategoryBody(BaseModel):
-    name: str
-    kind: str = "product"
+class CategoryBody(RequestModel):
+    name: str = Field(min_length=2, max_length=120)
+    kind: Literal["product", "service", "medicine", "lab_test"] = "product"
 
 
-class CatalogBody(BaseModel):
-    name: str
-    sku: str
-    item_type: str
+class CatalogBody(RequestModel):
+    name: str = Field(min_length=2, max_length=180)
+    sku: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9._/-]+$")
+    item_type: Literal["product", "service", "medicine", "lab_test"]
     category_id: str | None = None
-    description: str | None = None
-    hsn_sac: str | None = None
+    description: str | None = Field(default=None, max_length=5000)
+    hsn_sac: str | None = Field(default=None, max_length=20)
     price_paise: int = Field(default=0, ge=0)
     cost_paise: int = Field(default=0, ge=0)
     tax_rate_bps: int = Field(default=0, ge=0, le=10000)
     tax_inclusive: bool = False
-    duration_minutes: int | None = Field(default=None, ge=1)
-    unit: str = "unit"
+    duration_minutes: int | None = Field(default=None, ge=1, le=1440)
+    unit: str = Field(default="unit", min_length=1, max_length=30)
     track_stock: bool = False
 
 
-class StockAdjustBody(BaseModel):
+class OrganizationUpdateBody(RequestModel):
+    name: str = Field(default="", min_length=2, max_length=200)
+    legal_name: str | None = Field(default=None, max_length=220)
+    gstin: str | None = Field(default=None, min_length=15, max_length=15, pattern=r"^\d{2}[A-Za-z]{5}\d{4}[A-Za-z][A-Za-z0-9]Z[A-Za-z0-9]$")
+    timezone: str = Field(default="Asia/Kolkata", min_length=1, max_length=80)
+    contact_email: EmailStr | None = None
+    contact_phone: str | None = Field(default=None, max_length=50)
+    logo_url: str | None = Field(default=None, max_length=500, pattern=r"^https?://")
+    invoice_prefix: str = Field(default="INV", min_length=1, max_length=20, pattern=r"^[A-Za-z0-9-]+$")
+    onboarding_complete: bool = False
+    onboarding_step: int = Field(default=1, ge=0, le=100)
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value):
+        try:
+            ZoneInfo(value)
+        except Exception as exc:
+            raise ValueError("Enter a valid IANA timezone") from exc
+        return value
+
+    @field_validator("contact_phone")
+    @classmethod
+    def validate_contact_phone(cls, value):
+        return valid_phone(value)
+
+
+class EmployeeUpdateBody(RequestModel):
+    first_name: str = Field(default="", min_length=1, max_length=100)
+    last_name: str = Field(default="", max_length=100)
+    email: EmailStr | None = None
+    phone: str | None = Field(default=None, max_length=30)
+    designation: str | None = Field(default=None, max_length=120)
+    specialties: list[str] = Field(default_factory=list, max_length=50)
+    salary_paise: int | None = Field(default=None, ge=0)
+    joining_date: date | None = None
+    status: Literal["active", "on_leave", "inactive"] = "active"
+    location_ids: list[str] = Field(default_factory=list, min_length=1, max_length=100)
+    version: int = Field(ge=1)
+
+    @field_validator("phone")
+    @classmethod
+    def validate_phone(cls, value):
+        return valid_phone(value)
+
+
+class ClientUpdateBody(RequestModel):
+    first_name: str = Field(default="", min_length=1, max_length=100)
+    last_name: str = Field(default="", max_length=100)
+    phone: str | None = Field(default=None, max_length=30)
+    email: EmailStr | None = None
+    address: str | None = Field(default=None, max_length=1000)
+    date_of_birth: date | None = None
+    gender: str | None = Field(default=None, max_length=30)
+    home_location_id: str | None = None
+    notes: str | None = Field(default=None, max_length=5000)
+    tags: list[str] = Field(default_factory=list, max_length=100)
+    whatsapp_consent: bool = False
+    email_consent: bool = False
+    status: Literal["active", "inactive", "blocked"] = "active"
+    version: int = Field(ge=1)
+
+    @field_validator("phone")
+    @classmethod
+    def validate_phone(cls, value):
+        return valid_phone(value)
+
+
+class CatalogUpdateBody(RequestModel):
+    name: str = Field(default="", min_length=2, max_length=180)
+    category_id: str | None = None
+    description: str | None = Field(default=None, max_length=5000)
+    hsn_sac: str | None = Field(default=None, max_length=20)
+    price_paise: int = Field(default=0, ge=0)
+    cost_paise: int = Field(default=0, ge=0)
+    tax_rate_bps: int = Field(default=0, ge=0, le=10000)
+    tax_inclusive: bool = False
+    duration_minutes: int | None = Field(default=None, ge=1, le=1440)
+    unit: str = Field(default="unit", min_length=1, max_length=30)
+    track_stock: bool = False
+    is_active: bool = True
+    version: int = Field(ge=1)
+
+
+class StockAdjustBody(RequestModel):
     location_id: str
     item_id: str
     quantity_delta_milli: int
-    reason: str = Field(min_length=3)
-    batch_number: str = ""
+    reason: str = Field(min_length=3, max_length=500)
+    batch_number: str = Field(default="", max_length=120)
     expires_on: date | None = None
     reorder_level_milli: int | None = Field(default=None, ge=0)
 
+    @field_validator("quantity_delta_milli")
+    @classmethod
+    def non_zero_quantity(cls, value: int) -> int:
+        if value == 0:
+            raise ValueError("Quantity adjustment cannot be zero")
+        return value
 
-class AppointmentBody(BaseModel):
+
+class AppointmentBody(RequestModel):
     location_id: str
     client_id: str
     employee_id: str | None = None
     service_id: str | None = None
     starts_at: datetime
     ends_at: datetime
-    status: str = "scheduled"
-    source: str = "staff"
-    notes: str | None = None
+    status: Literal["scheduled", "confirmed", "checked_in", "in_progress", "completed", "cancelled", "no_show"] = "scheduled"
+    source: Literal["staff", "walk_in", "phone", "online", "ai"] = "staff"
+    notes: str | None = Field(default=None, max_length=5000)
+
+    @model_validator(mode="after")
+    def valid_times(self):
+        if self.ends_at <= self.starts_at:
+            raise ValueError("Appointment end time must be after its start time")
+        return self
 
 
-class AppointmentStatusBody(BaseModel):
-    status: str
-    version: int
+class AppointmentStatusBody(RequestModel):
+    status: Literal["scheduled", "confirmed", "checked_in", "in_progress", "completed", "cancelled", "no_show"]
+    version: int = Field(ge=1)
 
 
-class AppointmentUpdateBody(BaseModel):
+class AppointmentUpdateBody(RequestModel):
     starts_at: datetime
     ends_at: datetime
     employee_id: str | None = None
     service_id: str | None = None
     location_id: str
-    notes: str | None = None
-    version: int
+    notes: str | None = Field(default=None, max_length=5000)
+    version: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def valid_times(self):
+        if self.ends_at <= self.starts_at:
+            raise ValueError("Appointment end time must be after its start time")
+        return self
 
 
-class TaskBody(BaseModel):
-    title: str
-    description: str | None = None
+class TaskBody(RequestModel):
+    title: str = Field(min_length=2, max_length=240)
+    description: str | None = Field(default=None, max_length=5000)
     location_id: str | None = None
     client_id: str | None = None
     assigned_to_user_id: str | None = None
     due_at: datetime | None = None
-    priority: str = "normal"
+    priority: Literal["low", "normal", "high", "urgent"] = "normal"
 
 
 def serialize(row, extra: dict | None = None) -> dict:
@@ -267,12 +395,10 @@ def organization_context(user=Depends(get_current_user), db: Session = Depends(g
 
 
 @router.patch("/organization")
-def update_organization(body: dict, user=Depends(require_permissions("settings.manage")), db: Session = Depends(get_db)):
+def update_organization(body: OrganizationUpdateBody, user=Depends(require_permissions("settings.manage")), db: Session = Depends(get_db)):
     org = organization_for(db, user)
-    allowed = {"name", "legal_name", "gstin", "timezone", "contact_email", "contact_phone", "logo_url", "invoice_prefix", "onboarding_complete", "onboarding_step"}
-    for key, value in body.items():
-        if key in allowed:
-            setattr(org, key, value)
+    for key, value in body.model_dump(exclude_unset=True).items():
+        setattr(org, key, value)
     log_action(db, organization_id=org.id, user_id=user.id, action="organization.update", resource_type="organization", resource_id=org.id)
     db.commit()
     return serialize(org)
@@ -313,15 +439,12 @@ def create_location(body: LocationBody, user=Depends(require_any_permission("set
 
 
 @router.patch("/locations/{location_id}")
-def update_location(location_id: str, body: dict, user=Depends(require_any_permission("settings.manage", "settings.locations.manage")), db: Session = Depends(get_db)):
+def update_location(location_id: str, body: LocationUpdateBody, user=Depends(require_any_permission("settings.manage", "settings.locations.manage")), db: Session = Depends(get_db)):
     row = ensure_location(db, user, location_id)
-    expected = body.pop("version", None)
-    if expected is None or expected != row.version:
+    if body.version != row.version:
         raise HTTPException(409, "Location settings changed on another device")
-    allowed = {"name", "address", "city", "state", "postal_code", "phone", "gstin", "is_active"}
-    for key, value in body.items():
-        if key in allowed:
-            setattr(row, key, value)
+    for key, value in body.model_dump(exclude={"version"}).items():
+        setattr(row, key, value)
     row.version += 1
     log_action(db, organization_id=user.organization_id, user_id=user.id, action="location.update", resource_type="location", resource_id=row.id)
     db.commit()
@@ -471,14 +594,15 @@ def employee_profile(employee_id: str, user=Depends(require_permissions("employe
 
 
 @router.patch("/employees/{employee_id}")
-def update_employee(employee_id: str, body: dict, user=Depends(require_permissions("employees.manage")), db: Session = Depends(get_db)):
+def update_employee(employee_id: str, body: EmployeeUpdateBody, user=Depends(require_permissions("employees.manage")), db: Session = Depends(get_db)):
     row = tenant_get(db, Employee, employee_id, user)
-    if "salary_paise" in body and "employees.compensation.view" not in get_user_permissions(db, user):
+    payload = body.model_dump(exclude_unset=True)
+    if "salary_paise" in payload and "employees.compensation.view" not in get_user_permissions(db, user):
         raise HTTPException(403, "Compensation access is required to change salary")
-    expected = body.pop("version", None)
+    expected = payload.pop("version")
     if expected is None or expected != row.version:
         raise HTTPException(409, "Employee was changed by another user")
-    location_ids = body.pop("location_ids", None)
+    location_ids = payload.pop("location_ids", None)
     if location_ids is not None:
         for location_id in location_ids:
             ensure_location(db, user, location_id)
@@ -493,10 +617,8 @@ def update_employee(employee_id: str, body: dict, user=Depends(require_permissio
         db.query(EmployeeLocation).filter(EmployeeLocation.employee_id == row.id).delete()
         for index, location_id in enumerate(location_ids):
             db.add(EmployeeLocation(employee_id=row.id, location_id=location_id, is_primary=index == 0))
-    allowed = {"first_name", "last_name", "email", "phone", "designation", "specialties", "salary_paise", "joining_date", "status"}
-    for key, value in body.items():
-        if key in allowed:
-            setattr(row, key, value)
+    for key, value in payload.items():
+        setattr(row, key, value)
     row.version += 1
     log_action(db, organization_id=user.organization_id, user_id=user.id, action="employee.update", resource_type="employee", resource_id=row.id)
     db.commit()
@@ -606,29 +728,28 @@ def client_profile(client_id: str, user=Depends(require_permissions("clients.vie
 
 
 @router.patch("/clients/{client_id}")
-def update_client(client_id: str, body: dict, user=Depends(require_permissions("clients.manage")), db: Session = Depends(get_db)):
+def update_client(client_id: str, body: ClientUpdateBody, user=Depends(require_permissions("clients.manage")), db: Session = Depends(get_db)):
     row = tenant_get(db, Client, client_id, user)
-    expected = body.pop("version", None)
+    payload = body.model_dump(exclude_unset=True)
+    expected = payload.pop("version")
     if expected is None or expected != row.version:
         raise HTTPException(409, "Client was changed by another user")
-    allowed = {"first_name", "last_name", "phone", "email", "address", "date_of_birth", "gender", "home_location_id", "notes", "tags", "whatsapp_consent", "email_consent", "status"}
-    if body.get("home_location_id"):
-        ensure_location(db, user, body["home_location_id"])
-    if body.get("whatsapp_consent") and not (body.get("phone") or row.phone):
+    if payload.get("home_location_id"):
+        ensure_location(db, user, payload["home_location_id"])
+    if payload.get("whatsapp_consent") and not (payload.get("phone") or row.phone):
         raise HTTPException(422, "A phone number is required for WhatsApp reminders")
-    consent_changed = "whatsapp_consent" in body and bool(body["whatsapp_consent"]) != row.whatsapp_consent
+    consent_changed = "whatsapp_consent" in payload and bool(payload["whatsapp_consent"]) != row.whatsapp_consent
     if consent_changed:
-        row.whatsapp_consent_at = datetime.now(timezone.utc) if body["whatsapp_consent"] else None
-        row.whatsapp_consent_source = "staff_recorded" if body["whatsapp_consent"] else None
-    for key, value in body.items():
-        if key in allowed:
-            setattr(row, key, value)
+        row.whatsapp_consent_at = datetime.now(timezone.utc) if payload["whatsapp_consent"] else None
+        row.whatsapp_consent_source = "staff_recorded" if payload["whatsapp_consent"] else None
+    for key, value in payload.items():
+        setattr(row, key, value)
     row.version += 1
     if consent_changed:
         log_action(
             db, organization_id=user.organization_id, user_id=user.id,
             action="client.whatsapp_consent_changed", resource_type="client", resource_id=row.id,
-            changes={"enabled": bool(body["whatsapp_consent"]), "source": row.whatsapp_consent_source},
+            changes={"enabled": bool(payload["whatsapp_consent"]), "source": row.whatsapp_consent_source},
         )
     db.commit()
     return serialize(row)
@@ -795,17 +916,16 @@ def catalog_profile(item_id: str, location_id: str | None = None,
 
 
 @router.patch("/catalog/{item_id}")
-def update_catalog_item(item_id: str, body: dict, user=Depends(require_permissions("catalog.manage")), db: Session = Depends(get_db)):
+def update_catalog_item(item_id: str, body: CatalogUpdateBody, user=Depends(require_permissions("catalog.manage")), db: Session = Depends(get_db)):
     row = tenant_get(db, CatalogItem, item_id, user)
-    expected = body.pop("version", None)
+    payload = body.model_dump(exclude_unset=True)
+    expected = payload.pop("version")
     if expected is None or expected != row.version:
         raise HTTPException(409, "Catalog item was changed by another user")
-    allowed = {"name", "category_id", "description", "hsn_sac", "price_paise", "cost_paise", "tax_rate_bps", "tax_inclusive", "duration_minutes", "unit", "track_stock", "is_active"}
-    if body.get("category_id"):
-        tenant_get(db, Category, body["category_id"], user)
-    for key, value in body.items():
-        if key in allowed:
-            setattr(row, key, value)
+    if payload.get("category_id"):
+        tenant_get(db, Category, payload["category_id"], user)
+    for key, value in payload.items():
+        setattr(row, key, value)
     row.version += 1
     log_action(db, organization_id=user.organization_id, user_id=user.id, action="catalog.update", resource_type="catalog_item", resource_id=row.id)
     db.commit()

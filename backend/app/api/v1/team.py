@@ -13,7 +13,7 @@ router = APIRouter(prefix="/employees", tags=["team"])
 @router.get("/directory")
 def team_directory(
     location_id: str | None = None,
-    q: str | None = None,
+    q: str | None = Query(default=None, max_length=100),
     status: str | None = Query(default=None, pattern="^(active|inactive|on_leave)$"),
     limit: int = Query(default=50, ge=1, le=100),
     cursor: str | None = None,

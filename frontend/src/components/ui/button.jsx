@@ -1,11 +1,12 @@
 import * as React from "react"
 import { Slot } from "@radix-ui/react-slot"
 import { cva } from "class-variance-authority";
+import { SpinnerGap } from "@phosphor-icons/react";
 
 import { cn } from "@/lib/utils"
 
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-xl text-sm font-semibold transition-[background-color,color,border-color,box-shadow,transform] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/35 focus-visible:ring-offset-2 focus-visible:ring-offset-background active:translate-y-px disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
+  "relative inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-xl text-sm font-semibold transition-[background-color,color,border-color,box-shadow,transform] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/35 focus-visible:ring-offset-2 focus-visible:ring-offset-background active:translate-y-px disabled:pointer-events-none disabled:opacity-50 aria-disabled:pointer-events-none aria-disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
   {
     variants: {
       variant: {
@@ -34,13 +35,50 @@ const buttonVariants = cva(
   }
 )
 
-const Button = React.forwardRef(({ className, variant, size, asChild = false, ...props }, ref) => {
+const Button = React.forwardRef(({
+  className, variant, size, asChild = false, loading = false, loadingText, disabled, children, onClick, ...props
+}, ref) => {
   const Comp = asChild ? Slot : "button"
+  const [actionPending, setActionPending] = React.useState(false)
+  const actionPendingRef = React.useRef(false)
+  const mounted = React.useRef(true)
+  React.useEffect(() => () => { mounted.current = false }, [])
+
+  const isLoading = loading || actionPending
+  const handleClick = (event) => {
+    if (disabled || loading || actionPendingRef.current) {
+      event.preventDefault()
+      return
+    }
+    const result = onClick?.(event)
+    if (result && typeof result.then === "function") {
+      actionPendingRef.current = true
+      setActionPending(true)
+      result.then(
+        () => { actionPendingRef.current = false; if (mounted.current) setActionPending(false) },
+        () => { actionPendingRef.current = false; if (mounted.current) setActionPending(false) },
+      )
+    }
+  }
+
   return (
     <Comp
       className={cn(buttonVariants({ variant, size, className }))}
       ref={ref}
-      {...props} />
+      aria-busy={isLoading || undefined}
+      aria-disabled={asChild && (disabled || isLoading) ? true : undefined}
+      disabled={!asChild ? disabled || isLoading : undefined}
+      onClick={handleClick}
+      {...props}
+    >
+      {asChild ? children : <>
+        <span className={cn("inline-flex items-center justify-center gap-2", isLoading && "invisible")}>{children}</span>
+        {isLoading && <span className="absolute inset-0 inline-flex items-center justify-center gap-2 px-2" role="status">
+          <SpinnerGap className="animate-spin" aria-hidden="true" />
+          {size === "icon" ? <span className="sr-only">{loadingText || "Please wait"}</span> : <span>{loadingText || "Please wait"}</span>}
+        </span>}
+      </>}
+    </Comp>
   );
 })
 Button.displayName = "Button"

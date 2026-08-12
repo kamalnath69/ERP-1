@@ -2,6 +2,9 @@
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from typing import Literal
+
+from app.schemas.validation import RequestModel, valid_phone
 
 COMMON_PASSWORDS = {"password", "password123", "qwerty123", "admin123", "welcome123", "letmein123"}
 
@@ -18,22 +21,28 @@ class ORMBase(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-class RegisterOrgRequest(BaseModel):
+class RegisterOrgRequest(RequestModel):
     organization_name: str = Field(min_length=2, max_length=200)
     organization_slug: str = Field(min_length=2, max_length=80, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-    industry: str
+    industry: Literal["gym", "salon", "clinic", "college", "restaurant", "retail", "grocery", "other"]
     admin_email: EmailStr
     admin_password: str = Field(min_length=10, max_length=128)
-    admin_first_name: str
-    admin_last_name: str = ""
-    location_name: str = "Main Location"
-    city: str | None = None
+    admin_first_name: str = Field(min_length=1, max_length=100)
+    admin_last_name: str = Field(default="", max_length=100)
+    admin_phone: str | None = Field(default=None, max_length=40)
+    location_name: str = Field(default="Main Location", min_length=2, max_length=200)
+    city: str | None = Field(default=None, max_length=120)
     state: str | None = Field(default=None, max_length=100)
 
     @field_validator("admin_password")
     @classmethod
     def strong_password(cls, value: str) -> str:
         return validate_strong_password(value)
+
+    @field_validator("admin_phone")
+    @classmethod
+    def phone_number(cls, value: str | None) -> str | None:
+        return valid_phone(value)
 
 
 class PaidSignupCheckoutRequest(RegisterOrgRequest):
@@ -43,22 +52,22 @@ class PaidSignupCheckoutRequest(RegisterOrgRequest):
     checkout_token: str | None = Field(default=None, min_length=20, max_length=200)
 
 
-class PaidSignupVerifyRequest(BaseModel):
-    checkout_id: str
+class PaidSignupVerifyRequest(RequestModel):
+    checkout_id: str = Field(min_length=1, max_length=100)
     checkout_token: str = Field(min_length=20, max_length=200)
-    razorpay_order_id: str
-    razorpay_payment_id: str
-    razorpay_signature: str
+    razorpay_order_id: str | None = Field(default=None, min_length=1, max_length=200)
+    razorpay_payment_id: str | None = Field(default=None, min_length=1, max_length=200)
+    razorpay_signature: str | None = Field(default=None, min_length=16, max_length=500)
 
 
-class PaidSignupAccessRequest(BaseModel):
+class PaidSignupAccessRequest(RequestModel):
     checkout_token: str = Field(min_length=20, max_length=200)
 
 
-class LoginRequest(BaseModel):
+class LoginRequest(RequestModel):
     email: EmailStr
-    password: str
-    org_slug: str | None = None
+    password: str = Field(min_length=1, max_length=128)
+    org_slug: str | None = Field(default=None, max_length=80, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
     mfa_code: str | None = Field(default=None, min_length=6, max_length=12)
 
 
@@ -67,13 +76,13 @@ class LoginResponse(BaseModel):
     csrf_token: str
 
 
-class RefreshRequest(BaseModel):
-    refresh_token: str | None = None
+class RefreshRequest(RequestModel):
+    refresh_token: str | None = Field(default=None, max_length=4096)
 
 
-class CodeRequest(BaseModel):
+class CodeRequest(RequestModel):
     email: EmailStr
-    org_slug: str | None = None
+    org_slug: str | None = Field(default=None, max_length=80, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 
 class VerifyEmailRequest(CodeRequest):
@@ -106,38 +115,58 @@ class UserOut(ORMBase):
     action_preferences: dict = {}
 
 
-class UserCreate(BaseModel):
+class UserCreate(RequestModel):
     email: EmailStr
-    first_name: str
-    last_name: str = ""
+    first_name: str = Field(min_length=1, max_length=100)
+    last_name: str = Field(default="", max_length=100)
     password: str = Field(min_length=10, max_length=128)
-    phone: str | None = None
-    role_ids: list[str] = []
-    location_ids: list[str] = []
+    phone: str | None = Field(default=None, max_length=30)
+    role_ids: list[str] = Field(default_factory=list, max_length=100)
+    location_ids: list[str] = Field(default_factory=list, max_length=100)
 
     @field_validator("password")
     @classmethod
     def strong_password(cls, value: str) -> str:
         return validate_strong_password(value)
 
+    @field_validator("phone")
+    @classmethod
+    def validate_phone(cls, value):
+        return valid_phone(value)
 
-class UserUpdate(BaseModel):
-    first_name: str | None = None
-    last_name: str | None = None
-    phone: str | None = None
+
+class UserUpdate(RequestModel):
+    first_name: str | None = Field(default=None, min_length=1, max_length=100)
+    last_name: str | None = Field(default=None, max_length=100)
+    phone: str | None = Field(default=None, max_length=30)
     is_active: bool | None = None
-    bio: str | None = None
-    designation: str | None = None
-    avatar_base64: str | None = None
+    bio: str | None = Field(default=None, max_length=5000)
+    designation: str | None = Field(default=None, max_length=200)
+    avatar_base64: str | None = Field(default=None, max_length=500_000, pattern=r"^data:image/(jpeg|png|webp);base64,")
     action_preferences: dict | None = None
 
+    @field_validator("phone")
+    @classmethod
+    def validate_phone(cls, value):
+        return valid_phone(value)
 
-class ProfileUpdate(UserUpdate):
-    pass
+
+class ProfileUpdate(RequestModel):
+    first_name: str = Field(default="", min_length=1, max_length=100)
+    last_name: str = Field(default="", max_length=100)
+    phone: str | None = Field(default=None, max_length=30)
+    bio: str | None = Field(default=None, max_length=5000)
+    designation: str | None = Field(default=None, max_length=200)
+    avatar_base64: str | None = Field(default=None, max_length=500_000, pattern=r"^data:image/(jpeg|png|webp);base64,")
+
+    @field_validator("phone")
+    @classmethod
+    def validate_phone(cls, value):
+        return valid_phone(value)
 
 
-class PasswordChange(BaseModel):
-    current_password: str
+class PasswordChange(RequestModel):
+    current_password: str = Field(min_length=1, max_length=128)
     new_password: str = Field(min_length=10, max_length=128)
 
     @field_validator("new_password")
@@ -146,13 +175,13 @@ class PasswordChange(BaseModel):
         return validate_strong_password(value)
 
 
-class OverrideEntry(BaseModel):
-    permission_id: str
+class OverrideEntry(RequestModel):
+    permission_id: str = Field(min_length=1, max_length=100)
     granted: bool
 
 
-class UserOverridesUpdate(BaseModel):
-    overrides: list[OverrideEntry]
+class UserOverridesUpdate(RequestModel):
+    overrides: list[OverrideEntry] = Field(max_length=500)
 
 
 class PermissionOut(ORMBase):
@@ -173,30 +202,30 @@ class RoleOut(ORMBase):
     version: int = 1
 
 
-class RoleCreate(BaseModel):
-    name: str
-    description: str | None = None
-    permission_ids: list[str] = []
+class RoleCreate(RequestModel):
+    name: str = Field(min_length=2, max_length=100)
+    description: str | None = Field(default=None, max_length=2000)
+    permission_ids: list[str] = Field(default_factory=list, max_length=500)
 
 
-class RoleUpdate(BaseModel):
-    name: str | None = None
-    description: str | None = None
+class RoleUpdate(RequestModel):
+    name: str | None = Field(default=None, min_length=2, max_length=100)
+    description: str | None = Field(default=None, max_length=2000)
     is_active: bool | None = None
-    permission_ids: list[str] | None = None
+    permission_ids: list[str] | None = Field(default=None, max_length=500)
     version: int | None = Field(default=None, ge=1)
 
 
-class AssignRolesRequest(BaseModel):
-    role_ids: list[str]
+class AssignRolesRequest(RequestModel):
+    role_ids: list[str] = Field(max_length=100)
 
 
-class ChatRequest(BaseModel):
-    conversation_id: str | None = None
+class ChatRequest(RequestModel):
+    conversation_id: str | None = Field(default=None, max_length=100)
     message: str = Field(min_length=1, max_length=5000)
-    location_id: str | None = None
+    location_id: str | None = Field(default=None, max_length=100)
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=160)
-    context: dict | None = None
+    context: dict | None = Field(default=None, max_length=100)
 
 
 class ChatMessageOut(ORMBase):
@@ -224,16 +253,16 @@ class ConversationOut(ORMBase):
     archived_at: datetime | None = None
 
 
-class CreateOrderRequest(BaseModel):
-    plan: str
+class CreateOrderRequest(RequestModel):
+    plan: str = Field(min_length=2, max_length=60, pattern=r"^[a-z0-9-]+$")
     billing_interval: str = Field(default="monthly", pattern="^(monthly|annual)$")
 
 
-class VerifyRazorpayPaymentRequest(BaseModel):
-    invoice_id: str
-    razorpay_order_id: str
-    razorpay_payment_id: str
-    razorpay_signature: str
+class VerifyRazorpayPaymentRequest(RequestModel):
+    invoice_id: str = Field(min_length=1, max_length=100)
+    razorpay_order_id: str | None = Field(default=None, min_length=1, max_length=200)
+    razorpay_payment_id: str | None = Field(default=None, min_length=1, max_length=200)
+    razorpay_signature: str | None = Field(default=None, min_length=16, max_length=500)
 
 
 class WebhookEvent(BaseModel):

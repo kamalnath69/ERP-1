@@ -1,4 +1,4 @@
-"""Subscription, invoices, payment events (Razorpay)."""
+"""Subscriptions, invoices, and provider-neutral payment events."""
 from datetime import datetime
 
 from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
@@ -33,11 +33,19 @@ class Subscription(TimestampMixin, Base):
 
 class Invoice(TimestampMixin, Base):
     __tablename__ = "invoices"
+    __table_args__ = (
+        Index("uq_invoice_provider_order", "provider", "provider_order_id", unique=True, postgresql_where=text("provider_order_id IS NOT NULL")),
+        Index("uq_invoice_provider_payment", "provider", "provider_payment_id", unique=True, postgresql_where=text("provider_payment_id IS NOT NULL")),
+    )
 
     id: Mapped[str] = uuid_pk()
     organization_id: Mapped[str] = tenant_fk()
     razorpay_order_id: Mapped[str | None] = mapped_column(String(120))
     razorpay_payment_id: Mapped[str | None] = mapped_column(String(120))
+    provider: Mapped[str] = mapped_column(String(30), default="razorpay", nullable=False)
+    provider_order_id: Mapped[str | None] = mapped_column(String(140))
+    provider_payment_id: Mapped[str | None] = mapped_column(String(140))
+    provider_session_id: Mapped[str | None] = mapped_column(Text)
     amount_paise: Mapped[int] = mapped_column(BigInteger, nullable=False)
     subtotal_paise: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     discount_paise: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
@@ -71,6 +79,7 @@ class PaymentEvent(TimestampMixin, Base):
         UUID_STR, ForeignKey("organizations.id", ondelete="SET NULL"), nullable=True
     )
     event_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    provider: Mapped[str] = mapped_column(String(30), default="razorpay", nullable=False)
     provider_event_id: Mapped[str | None] = mapped_column(String(160), unique=True, index=True)
     provider_mode: Mapped[str] = mapped_column(String(20), default="test", nullable=False)
     status: Mapped[str] = mapped_column(String(30), default="processed", nullable=False)
@@ -82,12 +91,13 @@ class PaymentEvent(TimestampMixin, Base):
 class ProviderPlanMapping(TimestampMixin, Base):
     __tablename__ = "provider_plan_mappings"
     __table_args__ = (UniqueConstraint(
-        "plan_version_id", "billing_interval", "provider_mode", "amount_paise",
+        "plan_version_id", "billing_interval", "provider", "provider_mode", "amount_paise",
         name="uq_provider_plan_price",
     ),)
     id: Mapped[str] = uuid_pk()
     plan_version_id: Mapped[str] = mapped_column(UUID_STR, ForeignKey("plan_versions.id", ondelete="CASCADE"), nullable=False, index=True)
     billing_interval: Mapped[str] = mapped_column(String(20), nullable=False)
+    provider: Mapped[str] = mapped_column(String(30), default="razorpay", nullable=False)
     provider_mode: Mapped[str] = mapped_column(String(20), nullable=False)
     amount_paise: Mapped[int] = mapped_column(BigInteger, nullable=False)
     provider_plan_id: Mapped[str | None] = mapped_column(String(140), index=True)
@@ -105,6 +115,7 @@ class BillingCheckoutAttempt(TimestampMixin, Base):
     subscription_id: Mapped[str | None] = mapped_column(UUID_STR, ForeignKey("subscriptions.id", ondelete="SET NULL"), index=True)
     purchase_type: Mapped[str] = mapped_column(String(30), nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    provider: Mapped[str] = mapped_column(String(30), default="razorpay", nullable=False)
     provider_mode: Mapped[str] = mapped_column(String(20), nullable=False)
     status: Mapped[str] = mapped_column(String(30), default="creating", nullable=False, index=True)
     provider_reference: Mapped[str | None] = mapped_column(String(140), index=True)

@@ -191,8 +191,8 @@ def _schedule_college_jobs(db, now):
 
 
 def _subscription_transition(db, schedule_id):
-    from app.core.config import settings
-    from app.services.billing import activate_subscription_schedule, payment_config, provider_error
+    from app.services.billing import activate_subscription_schedule, provider_error
+    from app.services.payment_gateways import gateway_config
 
     schedule = db.get(SubscriptionSchedule, schedule_id)
     if not schedule or schedule.status != "scheduled":
@@ -201,13 +201,13 @@ def _subscription_transition(db, schedule_id):
     if not subscription:
         schedule.status = "failed"
         return
-    if settings.RAZORPAY_MODE == "mock" or not subscription.razorpay_subscription_id:
+    config = gateway_config(subscription.provider, subscription.provider_mode)
+    if config.mode == "mock" or not subscription.razorpay_subscription_id:
         activate_subscription_schedule(db, subscription)
         return
     try:
         from app.services.razorpay_provider import razorpay_provider
-        _, key_id, key_secret, _ = payment_config()
-        provider = razorpay_provider(key_id, key_secret).fetch_subscription(subscription.razorpay_subscription_id)
+        provider = razorpay_provider(config.client_id, config.secret).fetch_subscription(subscription.razorpay_subscription_id)
     except Exception as exc:
         provider_error(exc, "subscription_reconciliation")
         raise RuntimeError("Payment provider has not confirmed the subscription transition") from exc
@@ -224,19 +224,39 @@ def _subscription_transition(db, schedule_id):
 
 
 def _replay_payment_webhook(db, event_id):
-    from app.services.billing import fulfill_invoice
+    from app.services.billing import fulfill_invoice, rupees_to_paise
     from app.models import Invoice
 
     event = db.get(PaymentEvent, event_id)
     if not event: return
-    data = event.payload or {}; payment = data.get("payload", {}).get("payment", {}).get("entity", {}); order = data.get("payload", {}).get("order", {}).get("entity", {})
-    order_id = payment.get("order_id") or order.get("id")
-    invoice = db.execute(select(Invoice).where(Invoice.razorpay_order_id == order_id)).scalar_one_or_none() if order_id else None
-    if invoice and event.event_type in {"payment.captured", "order.paid"}:
-        received = int(payment.get("amount") or order.get("amount_paid") or 0)
-        currency = payment.get("currency") or order.get("currency")
-        if received == invoice.amount_paise and currency == invoice.currency: fulfill_invoice(db, invoice, payment.get("id"))
-    elif invoice and event.event_type == "payment.failed" and invoice.status != "paid": invoice.status = "failed"
+    data = event.payload or {}
+    if event.provider == "cashfree":
+        envelope = data.get("data") if isinstance(data.get("data"), dict) else {}
+        payment = envelope.get("payment") if isinstance(envelope.get("payment"), dict) else {}
+        order = envelope.get("order") if isinstance(envelope.get("order"), dict) else {}
+        order_id = order.get("order_id")
+        invoice = db.execute(select(Invoice).where(
+            Invoice.provider == "cashfree", Invoice.provider_order_id == order_id,
+        )).scalar_one_or_none() if order_id else None
+        if invoice and event.event_type == "PAYMENT_SUCCESS_WEBHOOK" and payment.get("payment_status") == "SUCCESS":
+            received = rupees_to_paise(payment.get("payment_amount"))
+            currency = payment.get("payment_currency") or order.get("order_currency")
+            if received == invoice.amount_paise and currency == invoice.currency:
+                fulfill_invoice(db, invoice, str(payment.get("cf_payment_id") or ""))
+    else:
+        payment = data.get("payload", {}).get("payment", {}).get("entity", {})
+        order = data.get("payload", {}).get("order", {}).get("entity", {})
+        order_id = payment.get("order_id") or order.get("id")
+        invoice = db.execute(select(Invoice).where(
+            Invoice.provider == "razorpay",
+            or_(Invoice.provider_order_id == order_id, Invoice.razorpay_order_id == order_id),
+        )).scalar_one_or_none() if order_id else None
+        if invoice and event.event_type in {"payment.captured", "order.paid"}:
+            received = int(payment.get("amount") or order.get("amount_paid") or 0)
+            currency = payment.get("currency") or order.get("currency")
+            if received == invoice.amount_paise and currency == invoice.currency:
+                fulfill_invoice(db, invoice, payment.get("id"))
+        elif invoice and event.event_type == "payment.failed" and invoice.status != "paid": invoice.status = "failed"
     event.status = "replayed"; event.processed_at = datetime.now(timezone.utc); event.error = None
 
 

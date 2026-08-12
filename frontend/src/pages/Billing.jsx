@@ -19,7 +19,9 @@ import {
   useVerifyBillingPaymentMutation,
 } from "@/store/api/billingApi";
 import useCursorPagination from "@/hooks/useCursorPagination";
+import { usePendingAction } from "@/hooks/usePendingAction";
 import { loadRazorpayCheckout } from "@/lib/razorpay";
+import { loadCashfreeCheckout } from "@/lib/cashfree";
 
 const AI_COMPARISON_CODES = new Set([
   "documents.knowledge",
@@ -50,6 +52,7 @@ export default function Billing() {
   const [review, setReview] = useState(null);
   const [working, setWorking] = useState(false);
   const [showComparison, setShowComparison] = useState(false);
+  const reviewActions = usePendingAction();
   const invoicePaging = useCursorPagination("billing-invoices");
   const invoiceQuery = useGetBillingInvoicesQuery({ cursor: invoicePaging.cursor, limit: 25 });
   const { accept: acceptInvoicePage } = invoicePaging;
@@ -59,6 +62,7 @@ export default function Billing() {
   const subscription = data?.subscription;
   const scheduled = data?.scheduled_change;
   const payment = data?.payment;
+  const recurringSupported = payment?.recurring_supported !== false;
   const wallet = data?.wallet?.wallet;
   const packs = data?.wallet?.packs || [];
   const recentInvoices = data?.invoices || [];
@@ -70,6 +74,9 @@ export default function Billing() {
   const activePlanId = subscription?.plan || organization?.plan;
   const currentPlan = plans.find((plan) => plan.id === activePlanId);
   const recurringActive = Boolean(subscription?.razorpay_subscription_id && ["active", "authenticated", "paused", "past_due"].includes(subscription?.status));
+  useEffect(() => {
+    if (!recurringSupported && renewalMode !== "one_time") setRenewalMode("one_time");
+  }, [recurringSupported, renewalMode]);
   const annualSaving = useMemo(() => {
     const savings = plans.flatMap((plan) => {
       const monthly = Number(plan.monthly_price_paise || 0);
@@ -91,15 +98,17 @@ export default function Billing() {
   }, [plans]);
 
   const openPlanReview = async (plan) => {
-    try {
-      const quote = await previewPlan({ plan: plan.id, billing_interval: interval }).unwrap();
-      setReview({ kind: "plan", plan, quote });
-    } catch (requestError) {
-      toast.error(message(requestError, "Could not prepare this plan"));
-    }
+    await reviewActions.run(`plan:${plan.id}`, async () => {
+      try {
+        const quote = await previewPlan({ plan: plan.id, billing_interval: interval }).unwrap();
+        setReview({ kind: "plan", plan, quote, idempotencyKey: crypto.randomUUID() });
+      } catch (requestError) {
+        toast.error(message(requestError, "Could not prepare this plan"));
+      }
+    });
   };
 
-  const openPackReview = (pack) => setReview({ kind: "pack", pack, quote: pack.quote });
+  const openPackReview = (pack) => setReview({ kind: "pack", pack, quote: pack.quote, idempotencyKey: crypto.randomUUID() });
 
   const checkoutOptions = (label) => ({
     name: "Edvatiq",
@@ -134,6 +143,24 @@ export default function Billing() {
       await refreshMe(); refetch(); setReview(null); setWorking(false);
       return;
     }
+    if (checkout.provider === "cashfree") {
+      await loadCashfreeCheckout();
+      if (!checkout.payment_session_id) throw new Error("Cashfree did not return a payment session");
+      const cashfree = window.Cashfree({ mode: checkout.checkout_mode || (checkout.mode === "test" ? "sandbox" : "production") });
+      const checkoutResult = await cashfree.checkout({
+        paymentSessionId: checkout.payment_session_id,
+        redirectTarget: "_modal",
+      });
+      const verification = await verifyPayment({ invoice_id: checkout.invoice_id }).unwrap();
+      if (verification.status && verification.status !== "paid") {
+        setWorking(false);
+        toast.info(checkoutResult?.error?.message || "Payment is still being confirmed. Your plan has not changed yet.");
+        return;
+      }
+      toast.success(successText);
+      await refreshMe(); refetch(); setReview(null); setWorking(false);
+      return;
+    }
     await loadRazorpayCheckout();
     const options = checkoutOptions(label);
     if (checkout.checkout_type === "subscription") {
@@ -164,7 +191,7 @@ export default function Billing() {
     setWorking(true);
     try {
       if (review.kind === "pack") {
-        const checkout = await createPackCheckout({ packId: review.pack.id, idempotency_key: crypto.randomUUID() }).unwrap();
+        const checkout = await createPackCheckout({ packId: review.pack.id, idempotency_key: review.idempotencyKey }).unwrap();
         await openProviderCheckout(checkout, `${review.pack.name} AI credits`, "AI credits added to your wallet");
         return;
       }
@@ -180,7 +207,7 @@ export default function Billing() {
       }
       const checkout = await createCheckout({
         plan: review.plan.id, billing_interval: interval, renewal_mode: renewalMode,
-        idempotency_key: crypto.randomUUID(),
+        idempotency_key: review.idempotencyKey,
       }).unwrap();
       await openProviderCheckout(checkout, `${review.plan.name} - ${title(interval)}`, `${review.plan.name} is now active`);
     } catch (requestError) {
@@ -305,13 +332,14 @@ export default function Billing() {
             <Toggle active={interval === "annual"} onClick={() => setInterval("annual")}>Annual {annualSaving > 0 && <span className="ml-1 text-positive">save {annualSaving}%</span>}</Toggle>
           </SegmentedControl>
           <SegmentedControl label="Renewal">
-            <Toggle active={renewalMode === "auto_renew"} onClick={() => setRenewalMode("auto_renew")}>Auto-renew</Toggle>
+            <Toggle disabled={!recurringSupported} active={renewalMode === "auto_renew"} onClick={() => setRenewalMode("auto_renew")}>Auto-renew</Toggle>
             <Toggle active={renewalMode === "one_time"} onClick={() => setRenewalMode("one_time")}>Pay once</Toggle>
           </SegmentedControl>
         </div>
       </div>
+      {!recurringSupported && <p className="-mt-2 text-right text-xs text-muted-foreground">Cashfree is active for secure one-time payments. Automatic renewal is unavailable.</p>}
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4 reveal-stagger">
-        {plans.filter((plan) => plan.id !== "trial").map((plan) => <PlanCard key={plan.id} plan={plan} interval={interval} current={activePlanId === plan.id} disabled={!payment?.configured || isFetching || !plan.purchasable} action={() => openPlanReview(plan)} scheduled={recurringActive && activePlanId !== plan.id} entityLabel={entityLabel} isCollege={isCollege} />)}
+        {plans.filter((plan) => plan.id !== "trial").map((plan) => <PlanCard key={plan.id} plan={plan} interval={interval} current={activePlanId === plan.id} disabled={!payment?.configured || isFetching || !plan.purchasable} loading={reviewActions.isPending(`plan:${plan.id}`)} action={() => openPlanReview(plan)} scheduled={recurringActive && activePlanId !== plan.id} entityLabel={entityLabel} isCollege={isCollege} />)}
       </div>
     </section>
 
@@ -374,7 +402,7 @@ function InvoiceHistory({ invoices, total, hasMore, loading, error, onLoadMore, 
   </section>;
 }
 
-function PlanCard({ plan, interval, current, disabled, action, scheduled, entityLabel = "Clients", isCollege = false }) {
+function PlanCard({ plan, interval, current, disabled, loading, action, scheduled, entityLabel = "Clients", isCollege = false }) {
   const quote = interval === "annual" ? plan.annual_quote : plan.monthly_quote;
   const aiIncluded = Boolean(plan.entitlements?.["module.ai"]);
   const highlights = (plan.features || [])
@@ -406,7 +434,7 @@ function PlanCard({ plan, interval, current, disabled, action, scheduled, entity
       </div>}
     </div>
     <div className="mt-5 flex-1 space-y-2.5">{highlights.map((item) => <div key={item.code} className="flex gap-2 text-sm leading-5"><Check size={17} className="mt-0.5 shrink-0 text-positive" />{item.name}</div>)}</div>
-    <Button type="button" className="mt-5 rounded-xl" variant={current ? "outline" : "default"} disabled={disabled || current} onClick={action}>{actionLabel}{!current && plan.purchasable && <ArrowRight />}</Button>
+    <Button type="button" className="mt-5 rounded-xl" variant={current ? "outline" : "default"} disabled={disabled || current} loading={loading} loadingText="Preparing..." onClick={action}>{actionLabel}{!current && plan.purchasable && <ArrowRight />}</Button>
   </article>;
 }
 
@@ -451,7 +479,7 @@ function ReviewSheet({ review, open, close, working, confirm, renewalMode, inter
         {review.kind === "plan" && <ReviewLine icon={Lightning}>{isSchedule ? scheduled ? "Replaces the currently scheduled change" : "No charge today for a cycle-end change" : renewalMode === "auto_renew" ? "Renews automatically until cancelled" : "Does not renew automatically"}</ReviewLine>}
         <ReviewLine icon={ShieldCheck}>Your access changes only after payment confirmation</ReviewLine>
       </div>
-      <Button className="w-full rounded-xl h-12" disabled={working} onClick={confirm}>{working ? "Preparing secure checkout..." : isSchedule ? "Schedule for next renewal" : `Continue to pay ${money(quote?.total_paise)}`}</Button>
+      <Button className="w-full rounded-xl h-12" loading={working} loadingText="Preparing secure checkout..." onClick={confirm}>{isSchedule ? "Schedule for next renewal" : `Continue to pay ${money(quote?.total_paise)}`}</Button>
     </div>}
   </SheetContent></Sheet>;
 }
@@ -459,7 +487,7 @@ function ReviewSheet({ review, open, close, working, confirm, renewalMode, inter
 function SectionLink({ href, children }) { return <a href={href} className="whitespace-nowrap rounded-xl px-3.5 py-2 text-xs font-semibold text-muted-foreground transition hover:bg-secondary hover:text-foreground sm:text-sm">{children}</a>; }
 function SummaryDetail({ label, value }) { return <div><div className="text-[10px] font-bold uppercase tracking-[.16em] text-primary-foreground/45">{label}</div><div className="mt-1 text-xs font-semibold text-primary-foreground/90 sm:text-sm">{value}</div></div>; }
 function SegmentedControl({ label, children }) { return <div><div className="mb-1 ml-1 text-[9px] font-bold uppercase tracking-[.16em] text-muted-foreground">{label}</div><div role="group" aria-label={label} className="flex rounded-2xl border bg-card p-1 shadow-sm">{children}</div></div>; }
-function Toggle({ active, children, onClick }) { return <button type="button" aria-pressed={active} onClick={onClick} className={`rounded-xl px-3.5 py-2 text-xs font-semibold transition sm:text-sm ${active ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:bg-secondary hover:text-foreground"}`}>{children}</button>; }
+function Toggle({ active, children, onClick, disabled = false }) { return <button type="button" aria-pressed={active} disabled={disabled} onClick={onClick} className={`rounded-xl px-3.5 py-2 text-xs font-semibold transition sm:text-sm disabled:cursor-not-allowed disabled:opacity-45 ${active ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:bg-secondary hover:text-foreground"}`}>{children}</button>; }
 function Stat({ value, label }) { return <div className="rounded-xl bg-secondary/60 p-2.5"><strong className="block text-foreground">{value}</strong><span className="text-muted-foreground">{label}</span></div>; }
 function Capability({ active, label }) { return <span className={`rounded-full px-2 py-1 ${active ? "bg-positive/10 text-positive" : "bg-secondary text-muted-foreground line-through"}`}>{label}</span>; }
 function PriceRow({ label, value, strong, muted }) { return <div className={`flex justify-between p-4 ${strong ? "text-lg font-bold" : ""} ${muted ? "text-muted-foreground" : ""}`}><span>{label}</span><span>{value}</span></div>; }

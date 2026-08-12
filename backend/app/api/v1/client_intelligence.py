@@ -7,13 +7,14 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse
-from pydantic import BaseModel, Field
+from pydantic import Field
 from sqlalchemy import String, case, cast, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.api.v1.business import serialize
 from app.core.config import ROOT_DIR, settings
 from app.core.database import get_db
+from app.schemas.validation import RequestModel
 from app.core.deps import require_permissions
 from app.models import (
     Allergy, Appointment, AuditLog, CatalogItem, ClientCommitment, ClientMemory, ClientSignal,
@@ -31,6 +32,7 @@ from app.services.business_access import ensure_client_access, ensure_location, 
 from app.services.rbac import get_user_permissions, get_user_roles
 from app.services.gym import local_today, reconcile_memberships
 from app.services.cursor_pagination import decode_cursor, encode_cursor, page_size
+from app.services.upload_validation import safe_upload_name, validate_upload_signature
 
 router = APIRouter(tags=["client-intelligence"])
 STORAGE_DIR = ROOT_DIR / "storage"
@@ -46,7 +48,7 @@ VIDEO_TYPES = {"video/mp4", "video/webm"}
 MEMORY_VISIBILITY = {"team", "managers", "assigned_staff", "author_only", "clinical"}
 
 
-class MemoryBody(BaseModel):
+class MemoryBody(RequestModel):
     category: str = Field(min_length=2, max_length=50)
     label: str = Field(min_length=2, max_length=120)
     value: str = Field(min_length=1, max_length=5000)
@@ -57,7 +59,7 @@ class MemoryUpdate(MemoryBody):
     version: int
 
 
-class CommitmentBody(BaseModel):
+class CommitmentBody(RequestModel):
     title: str = Field(min_length=2, max_length=240)
     description: str | None = None
     owner_user_id: str | None = None
@@ -65,13 +67,13 @@ class CommitmentBody(BaseModel):
     reminder_at: datetime | None = None
 
 
-class CommitmentUpdate(BaseModel):
+class CommitmentUpdate(RequestModel):
     status: str = Field(pattern="^(open|completed|cancelled)$")
     completion_note: str | None = None
     version: int
 
 
-class SignalUpdate(BaseModel):
+class SignalUpdate(RequestModel):
     action: str = Field(pattern="^(assign|snooze|resolve|dismiss|reopen)$")
     assigned_to_user_id: str | None = None
     snoozed_until: datetime | None = None
@@ -79,7 +81,7 @@ class SignalUpdate(BaseModel):
     version: int
 
 
-class GoalBody(BaseModel):
+class GoalBody(RequestModel):
     metric_key: str = Field(min_length=2, max_length=80)
     label: str = Field(min_length=2, max_length=160)
     baseline_value: float | None = None
@@ -90,13 +92,13 @@ class GoalBody(BaseModel):
     target_on: date | None = None
 
 
-class GoalUpdate(BaseModel):
+class GoalUpdate(RequestModel):
     current_value: float | None = None
     status: str | None = Field(default=None, pattern="^(active|completed|cancelled)$")
     version: int
 
 
-class SessionBody(BaseModel):
+class SessionBody(RequestModel):
     location_id: str
     workout_plan_id: str | None = None
     trainer_employee_id: str | None = None
@@ -107,7 +109,7 @@ class SessionBody(BaseModel):
     notes: str | None = None
 
 
-class SessionUpdate(BaseModel):
+class SessionUpdate(RequestModel):
     status: str = Field(pattern="^(planned|in_progress|completed|skipped)$")
     exercise_results: list[dict] | None = None
     effort_rating: int | None = Field(default=None, ge=1, le=10)
@@ -115,13 +117,13 @@ class SessionUpdate(BaseModel):
     version: int
 
 
-class CoachingBody(BaseModel):
+class CoachingBody(RequestModel):
     trainer_employee_id: str | None = None
     note: str = Field(min_length=2, max_length=5000)
     visibility: str = "assigned_staff"
 
 
-class SalonProfileBody(BaseModel):
+class SalonProfileBody(RequestModel):
     preferred_employee_id: str | None = None
     preferred_services: list[str] = []
     preferences: dict = {}
@@ -131,19 +133,19 @@ class SalonProfileBody(BaseModel):
     version: int | None = None
 
 
-class CheckInBody(BaseModel):
+class CheckInBody(RequestModel):
     location_id: str
     notes: str | None = None
 
 
-class CheckInCorrection(BaseModel):
+class CheckInCorrection(RequestModel):
     checked_in_at: datetime
     checked_out_at: datetime | None = None
     reason: str = Field(min_length=3, max_length=500)
     version: int
 
 
-class ClientQuestion(BaseModel):
+class ClientQuestion(RequestModel):
     message: str = Field(min_length=1, max_length=3000)
 
 
@@ -976,6 +978,10 @@ async def upload_client_media(
     client = _client(db, user, client_id)
     content_type = (file.content_type or "").lower()
     if content_type not in MEDIA_TYPES: raise HTTPException(415, "Supported formats are JPG, PNG, WebP, MP4, WebM, PDF, DOCX, and TXT")
+    if not media_kind or len(media_kind) > 40 or not media_kind.replace("_", "").isalnum(): raise HTTPException(422, "Invalid media kind")
+    if caption is not None:
+        caption = caption.strip() or None
+        if caption and len(caption) > 500: raise HTTPException(422, "Caption must be 500 characters or fewer")
     if visibility not in MEMORY_VISIBILITY: raise HTTPException(422, "Invalid media visibility")
     permissions = get_user_permissions(db, user)
     if visibility == "clinical" and "clinical.write" not in permissions: raise HTTPException(403, "Clinical permission is required")
@@ -984,10 +990,18 @@ async def upload_client_media(
     content = await file.read(maximum + 1)
     if not content: raise HTTPException(400, "File is empty")
     if len(content) > maximum: raise HTTPException(413, f"File exceeds the {maximum // (1024 * 1024)} MB limit")
-    if content.startswith((b"MZ", b"\x7fELF")): raise HTTPException(400, "Executable content is not allowed")
+    safe_name = safe_upload_name(
+        file.filename,
+        content_type,
+        allowed_extensions={
+            **{key: {value} for key, value in MEDIA_TYPES.items()},
+            "image/jpeg": {".jpg", ".jpeg"},
+        },
+        fallback=f"client{MEDIA_TYPES[content_type]}",
+    )
+    validate_upload_signature(content, content_type)
     location_id = location_id or client.home_location_id
     if location_id: ensure_location(db, user, location_id)
-    safe_name = Path(file.filename or f"client{MEDIA_TYPES[content_type]}").name
     object_key = f"{user.organization_id}/clients/{client.id}/{secrets.token_hex(12)}{MEDIA_TYPES[content_type]}"
     if settings.S3_ENDPOINT_URL and not settings.PROVIDER_MOCK_MODE:
         import boto3

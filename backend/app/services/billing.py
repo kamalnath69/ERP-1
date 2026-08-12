@@ -1,7 +1,10 @@
-"""Deterministic billing, Razorpay integration, and exactly-once fulfillment."""
+"""Deterministic billing, gateway routing, and exactly-once fulfillment."""
+import hashlib
+import hmac
 import logging
 from calendar import monthrange
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -16,29 +19,30 @@ from app.models import (
     SubscriptionSchedule,
 )
 from app.services.wallet import add_credits, apply_plan_credit_grant, ensure_wallet
+from app.services.cashfree_provider import cashfree_provider
+from app.services.payment_gateways import GatewayConfig, active_gateway, gateway_config
 from app.services.razorpay_provider import razorpay_provider
 
 logger = logging.getLogger("edvatiq.billing")
 
 
-def payment_config(require_webhook: bool = False) -> tuple[str, str, str, str]:
-    mode = settings.RAZORPAY_MODE
-    key_id, key_secret, webhook_secret = settings.razorpay_credentials()
-    if mode == "mock":
-        if settings.ENVIRONMENT == "production":
-            raise HTTPException(503, "Online payments are not configured")
-        return mode, "", "", ""
-    expected_prefix = f"rzp_{mode}_"
-    if not key_id or not key_secret:
-        raise HTTPException(503, f"{mode.title()} payments are not configured")
-    if not key_id.startswith(expected_prefix):
-        raise HTTPException(503, f"The configured payment key does not match {mode} mode")
-    if require_webhook and not webhook_secret:
-        raise HTTPException(503, f"The {mode} payment webhook is not configured")
-    return mode, key_id, key_secret, webhook_secret
+def payment_config(
+    require_webhook: bool = False,
+    *,
+    db: Session | None = None,
+    provider: str | None = None,
+    mode: str | None = None,
+) -> tuple[str, str, str, str]:
+    """Compatibility tuple for older callers; new code should use GatewayConfig."""
+    config = (
+        active_gateway(db, require_webhook=require_webhook)
+        if db is not None and provider is None and mode is None
+        else gateway_config(provider or "razorpay", mode, require_webhook=require_webhook)
+    )
+    return config.mode, config.client_id, config.secret, config.webhook_secret
 
 
-def provider_error(exc: Exception, operation: str) -> tuple[str, str]:
+def provider_error(exc: Exception, operation: str, provider: str = "payment_provider") -> tuple[str, str]:
     payload = getattr(exc, "error", None) or {}
     code = str(payload.get("code") or getattr(exc, "status_code", None) or type(exc).__name__)[:100]
     description = str(payload.get("description") or payload.get("reason") or str(exc) or "")
@@ -47,8 +51,8 @@ def provider_error(exc: Exception, operation: str) -> tuple[str, str]:
     request_id = str(getattr(exc, "request_id", "") or "none")[:100]
     safe_description = " ".join(description.split())[:240]
     logger.error(
-        "razorpay_%s_failed code=%s status=%s request_id=%s error_type=%s missing_dependency=%s description=%s",
-        operation, code, status_code or "none", request_id, type(exc).__name__, missing_dependency or "none", safe_description or "none",
+        "%s_%s_failed code=%s status=%s request_id=%s error_type=%s missing_dependency=%s description=%s",
+        provider, operation, code, status_code or "none", request_id, type(exc).__name__, missing_dependency or "none", safe_description or "none",
     )
     if missing_dependency:
         return "provider_dependency_missing", "Online payments are temporarily unavailable"
@@ -58,9 +62,9 @@ def provider_error(exc: Exception, operation: str) -> tuple[str, str]:
     if status_code in {401, 403} or "unauthorized" in lowered or "authentication" in lowered or "credential" in lowered:
         return "provider_authentication", "Online payments are temporarily unavailable"
     if status_code == 429:
-        return "provider_busy", "Razorpay is busy right now. Please wait a moment and retry"
+        return "provider_busy", "The payment provider is busy right now. Please wait a moment and retry"
     if status_code >= 500 or code.upper() in {"SERVER_ERROR", "GATEWAY_ERROR", "PROVIDER_CONNECTION_ERROR"}:
-        return "provider_unavailable", "Razorpay is temporarily unavailable. Please retry in a moment"
+        return "provider_unavailable", "The payment provider is temporarily unavailable. Please retry in a moment"
     if "active" in lowered or "state" in lowered:
         return "invalid_subscription_state", "This subscription is still being updated. Please refresh shortly"
     return code, "The payment provider could not start this checkout. Please try again"
@@ -121,10 +125,10 @@ def plan_price(version: PlanVersion, interval: str) -> int:
 def create_invoice(
     db: Session, organization: Organization, *, purchase_type: str, subtotal_paise: int,
     description: str, tax_enabled: bool, gst_rate_bps: int, billing_interval: str | None,
-    snapshot: dict,
+    snapshot: dict, gateway: GatewayConfig | None = None,
 ) -> Invoice:
     quote = tax_quote(db, organization, subtotal_paise, tax_enabled=tax_enabled, gst_rate_bps=gst_rate_bps)
-    mode = settings.RAZORPAY_MODE
+    config = gateway or gateway_config("razorpay")
     now = datetime.now(timezone.utc)
     invoice = Invoice(
         organization_id=organization.id,
@@ -133,7 +137,8 @@ def create_invoice(
         sgst_paise=quote["sgst_paise"], igst_paise=quote["igst_paise"],
         tax_enabled=quote["tax_enabled"], gst_rate_bps=quote["gst_rate_bps"],
         purchase_type=purchase_type, billing_interval=billing_interval,
-        fulfillment_status="pending", provider_mode=mode, currency="INR", status="created",
+        fulfillment_status="pending", provider=config.provider, provider_mode=config.mode,
+        currency="INR", status="created",
         description=description, billing_snapshot={**quote["billing_profile"], "tax_reason": quote["tax_reason"]},
         plan_snapshot={**snapshot, "tax_enabled": quote["tax_enabled"], "gst_rate_bps": quote["gst_rate_bps"]},
     )
@@ -143,35 +148,136 @@ def create_invoice(
     return invoice
 
 
-def provider_order(db: Session, invoice: Invoice) -> tuple[str | None, str | None]:
-    mode, key_id, key_secret, _ = payment_config()
-    if mode == "mock":
-        return None, None
+def paise_to_rupees(value: int) -> float:
+    return float((Decimal(int(value)) / Decimal(100)).quantize(Decimal("0.01")))
+
+
+def rupees_to_paise(value) -> int:
     try:
-        order = razorpay_provider(key_id, key_secret).create_order({
-            "amount": int(invoice.amount_paise), "currency": invoice.currency,
-            "receipt": invoice.id[:40],
-            "notes": {"invoice_id": invoice.id, "organization_id": invoice.organization_id, "purchase_type": invoice.purchase_type, "mode": mode},
-        })
-        invoice.razorpay_order_id = order["id"]
-        return order["id"], None
+        return int((Decimal(str(value)) * Decimal(100)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise HTTPException(409, "The payment provider returned an invalid amount") from exc
+
+
+def create_provider_order(
+    config: GatewayConfig,
+    *,
+    reference_id: str,
+    amount_paise: int,
+    currency: str,
+    customer: dict,
+    notes: dict,
+    idempotency_key: str,
+) -> dict:
+    if config.mode == "mock":
+        return {
+            "order_id": f"mock-{config.provider}-{reference_id}",
+            "session_id": None,
+        }
+    try:
+        if config.provider == "razorpay":
+            order = razorpay_provider(config.client_id, config.secret).create_order({
+                "amount": int(amount_paise),
+                "currency": currency,
+                "receipt": reference_id[:40],
+                "notes": notes,
+            })
+            return {"order_id": order["id"], "session_id": None}
+
+        phone = str(customer.get("phone") or "").strip()
+        if not phone:
+            raise HTTPException(422, "A billing phone number is required for Cashfree checkout")
+        cashfree_order_id = f"edv_{reference_id.replace('-', '')}"[:45]
+        order = cashfree_provider(
+            config.client_id,
+            config.secret,
+            config.mode,
+            settings.CASHFREE_API_VERSION,
+        ).create_order({
+            "order_id": cashfree_order_id,
+            "order_amount": paise_to_rupees(amount_paise),
+            "order_currency": currency,
+            "customer_details": {
+                "customer_id": str(customer.get("id") or reference_id).replace("-", "")[:50],
+                "customer_name": str(customer.get("name") or "Edvatiq customer")[:100],
+                "customer_email": str(customer.get("email") or "")[:100],
+                "customer_phone": phone[:20],
+            },
+            "order_note": str(notes.get("description") or "Edvatiq checkout")[:200],
+            "order_tags": {key: str(value)[:100] for key, value in notes.items() if value is not None},
+        }, idempotency_key=idempotency_key)
+        payment_session_id = str(order.get("payment_session_id") or "").strip()
+        if not payment_session_id:
+            raise HTTPException(502, "Cashfree did not return a checkout session")
+        return {
+            "order_id": str(order.get("order_id") or cashfree_order_id),
+            "session_id": payment_session_id,
+        }
+    except HTTPException:
+        raise
     except Exception as exc:
-        code, message = provider_error(exc, "order")
-        return None, f"{code}|{message}"
+        code, message = provider_error(exc, "order", config.provider)
+        raise HTTPException(502, message, headers={"X-Edvatiq-Error-Code": code}) from exc
 
 
-def ensure_provider_plan(db: Session, version: PlanVersion, definition: PlanDefinition, interval: str, amount_paise: int) -> ProviderPlanMapping:
-    mode, key_id, key_secret, _ = payment_config()
+def provider_order(
+    db: Session,
+    invoice: Invoice,
+    *,
+    customer: dict | None = None,
+    idempotency_key: str | None = None,
+) -> tuple[str | None, str | None]:
+    config = gateway_config(invoice.provider, invoice.provider_mode)
+    try:
+        order = create_provider_order(
+            config,
+            reference_id=invoice.id,
+            amount_paise=int(invoice.amount_paise),
+            currency=invoice.currency,
+            customer=customer or {"id": invoice.organization_id},
+            notes={
+                "invoice_id": invoice.id,
+                "organization_id": invoice.organization_id,
+                "purchase_type": invoice.purchase_type,
+                "mode": config.mode,
+                "description": invoice.description,
+            },
+            idempotency_key=idempotency_key or invoice.id,
+        )
+        invoice.provider_order_id = order["order_id"]
+        invoice.provider_session_id = order.get("session_id")
+        if config.provider == "razorpay":
+            invoice.razorpay_order_id = order["order_id"]
+        return order["order_id"], None
+    except HTTPException as exc:
+        code = str((exc.headers or {}).get("X-Edvatiq-Error-Code") or "provider_order_failed")
+        return None, f"{code}|{exc.detail}"
+
+
+def ensure_provider_plan(
+    db: Session,
+    version: PlanVersion,
+    definition: PlanDefinition,
+    interval: str,
+    amount_paise: int,
+    *,
+    gateway: GatewayConfig | None = None,
+) -> ProviderPlanMapping:
+    config = gateway or active_gateway(db)
+    if not config.recurring_supported:
+        raise HTTPException(409, "Automatic renewal is not available with the active payment gateway. Choose one-time payment")
+    mode, key_id, key_secret = config.mode, config.client_id, config.secret
     row = db.execute(select(ProviderPlanMapping).where(
         ProviderPlanMapping.plan_version_id == version.id,
         ProviderPlanMapping.billing_interval == interval,
+        ProviderPlanMapping.provider == config.provider,
         ProviderPlanMapping.provider_mode == mode,
         ProviderPlanMapping.amount_paise == amount_paise,
     ).with_for_update()).scalar_one_or_none()
     if row and row.status == "active" and row.provider_plan_id:
         return row
     if not row:
-        row = ProviderPlanMapping(plan_version_id=version.id, billing_interval=interval, provider_mode=mode, amount_paise=amount_paise)
+        row = ProviderPlanMapping(plan_version_id=version.id, billing_interval=interval, provider=config.provider, provider_mode=mode, amount_paise=amount_paise)
         db.add(row)
         db.flush()
     if mode == "mock":
@@ -199,7 +305,10 @@ def ensure_provider_plan(db: Session, version: PlanVersion, definition: PlanDefi
 
 
 def provider_subscription(db: Session, mapping: ProviderPlanMapping, organization: Organization, version: PlanVersion, idempotency_key: str, start_at: datetime | None = None) -> str | None:
-    mode, key_id, key_secret, _ = payment_config()
+    config = gateway_config(mapping.provider, mapping.provider_mode)
+    if not config.recurring_supported:
+        raise HTTPException(409, "Automatic renewal is not supported by this payment gateway")
+    mode, key_id, key_secret = config.mode, config.client_id, config.secret
     if mode == "mock":
         return f"mock-sub-{idempotency_key[-20:]}"
     payload = {
@@ -218,7 +327,10 @@ def provider_subscription(db: Session, mapping: ProviderPlanMapping, organizatio
 
 
 def update_provider_subscription(subscription: Subscription, mapping: ProviderPlanMapping, *, at_cycle_end: bool) -> None:
-    mode, key_id, key_secret, _ = payment_config()
+    config = gateway_config(subscription.provider, subscription.provider_mode)
+    if not config.recurring_supported:
+        raise HTTPException(409, "This subscription cannot be changed through the selected payment gateway")
+    mode, key_id, key_secret = config.mode, config.client_id, config.secret
     if mode == "mock" or not subscription.razorpay_subscription_id:
         return
     try:
@@ -233,7 +345,10 @@ def update_provider_subscription(subscription: Subscription, mapping: ProviderPl
 
 
 def cancel_provider_subscription(subscription: Subscription, *, at_cycle_end: bool = True) -> None:
-    mode, key_id, key_secret, _ = payment_config()
+    config = gateway_config(subscription.provider, subscription.provider_mode)
+    if not config.recurring_supported:
+        raise HTTPException(409, "This subscription cannot be cancelled through the selected payment gateway")
+    mode, key_id, key_secret = config.mode, config.client_id, config.secret
     if mode == "mock" or not subscription.razorpay_subscription_id:
         return
     try:
@@ -243,6 +358,105 @@ def cancel_provider_subscription(subscription: Subscription, *, at_cycle_end: bo
     except Exception as exc:
         _, message = provider_error(exc, "subscription_cancel")
         raise HTTPException(502, message) from exc
+
+
+def checkout_customer(db: Session, organization: Organization, user=None) -> dict:
+    profile = db.execute(
+        select(BillingProfile).where(BillingProfile.organization_id == organization.id)
+    ).scalar_one_or_none()
+    name = (
+        (profile.legal_name if profile else None)
+        or organization.legal_name
+        or organization.name
+    )
+    return {
+        "id": organization.id,
+        "name": name,
+        "email": (profile.billing_email if profile else None) or getattr(user, "email", None),
+        "phone": (profile.billing_phone if profile else None) or getattr(user, "phone", None),
+    }
+
+
+def verify_provider_payment(
+    *,
+    provider: str,
+    mode: str,
+    order_id: str,
+    amount_paise: int,
+    currency: str,
+    payment_id: str | None = None,
+    signature: str | None = None,
+) -> dict:
+    config = gateway_config(provider, mode)
+    if config.mode == "mock":
+        raise HTTPException(404, "Not available")
+    if config.provider == "razorpay":
+        if not payment_id or not signature:
+            raise HTTPException(422, "Payment confirmation details are required")
+        expected = hmac.new(
+            config.secret.encode(),
+            f"{order_id}|{payment_id}".encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(expected, signature):
+            raise HTTPException(400, "Payment verification failed")
+        try:
+            payment = razorpay_provider(config.client_id, config.secret).fetch_payment(payment_id)
+        except Exception as exc:
+            provider_error(exc, "payment_fetch", config.provider)
+            raise HTTPException(502, "Payment is being confirmed. Please refresh shortly") from exc
+        if (
+            payment.get("order_id") != order_id
+            or int(payment.get("amount", 0)) != int(amount_paise)
+            or payment.get("currency") != currency
+        ):
+            raise HTTPException(409, "Payment details do not match this checkout")
+        return {
+            "status": "paid" if payment.get("status") == "captured" else str(payment.get("status") or "pending"),
+            "payment_id": str(payment.get("id") or payment_id),
+            "method": payment.get("method"),
+        }
+
+    provider_client = cashfree_provider(
+        config.client_id,
+        config.secret,
+        config.mode,
+        settings.CASHFREE_API_VERSION,
+    )
+    try:
+        order = provider_client.fetch_order(order_id)
+    except Exception as exc:
+        provider_error(exc, "order_fetch", config.provider)
+        raise HTTPException(502, "Payment is being confirmed. Please refresh shortly") from exc
+    if (
+        str(order.get("order_id") or "") != order_id
+        or rupees_to_paise(order.get("order_amount")) != int(amount_paise)
+        or str(order.get("order_currency") or "") != currency
+    ):
+        raise HTTPException(409, "Payment details do not match this checkout")
+    if order.get("order_status") != "PAID":
+        provider_status = str(order.get("order_status") or "ACTIVE").upper()
+        status = "failed" if provider_status in {"EXPIRED", "TERMINATED", "TERMINATION_REQUESTED"} else "pending"
+        return {"status": status, "payment_id": None, "method": None}
+    try:
+        payments = provider_client.fetch_payments(order_id)
+    except Exception as exc:
+        provider_error(exc, "payment_fetch", config.provider)
+        raise HTTPException(502, "Payment is being confirmed. Please refresh shortly") from exc
+    successful = next((item for item in payments if item.get("payment_status") == "SUCCESS"), None)
+    if not successful:
+        return {"status": "pending", "payment_id": None, "method": None}
+    received = successful.get("payment_amount")
+    if received is not None and rupees_to_paise(received) != int(amount_paise):
+        raise HTTPException(409, "Payment details do not match this checkout")
+    provider_payment_id = str(successful.get("cf_payment_id") or "")
+    if not provider_payment_id:
+        raise HTTPException(409, "Cashfree did not return a payment reference")
+    return {
+        "status": "paid",
+        "payment_id": provider_payment_id,
+        "method": successful.get("payment_group"),
+    }
 
 
 def add_months(value: datetime, months: int) -> datetime:
@@ -262,7 +476,9 @@ def fulfill_invoice(db: Session, invoice: Invoice, payment_id: str | None) -> di
     invoice.status = "paid"
     invoice.paid_at = datetime.now(timezone.utc)
     if payment_id:
-        invoice.razorpay_payment_id = payment_id
+        invoice.provider_payment_id = payment_id
+        if invoice.provider == "razorpay":
+            invoice.razorpay_payment_id = payment_id
     if invoice.purchase_type == "plan":
         version_id = (invoice.plan_snapshot or {}).get("plan_version_id")
         version = db.get(PlanVersion, version_id) if version_id else None
@@ -278,6 +494,7 @@ def fulfill_invoice(db: Session, invoice: Invoice, payment_id: str | None) -> di
         subscription.plan = definition.slug
         subscription.plan_version_id = version.id
         subscription.billing_interval = invoice.billing_interval or "monthly"
+        subscription.provider = invoice.provider
         subscription.provider_mode = invoice.provider_mode
         subscription.status = "active"
         subscription.current_period_start = now
@@ -302,7 +519,8 @@ def fulfill_invoice(db: Session, invoice: Invoice, payment_id: str | None) -> di
     if payment_id and not db.execute(select(PlatformPayment).where(PlatformPayment.provider_payment_id == payment_id)).scalar_one_or_none():
         db.add(PlatformPayment(
             organization_id=organization.id, invoice_id=invoice.id, provider_payment_id=payment_id,
-            provider_order_id=invoice.razorpay_order_id, mode=invoice.provider_mode,
+            provider_order_id=invoice.provider_order_id or invoice.razorpay_order_id,
+            provider=invoice.provider, mode=invoice.provider_mode,
             amount_paise=invoice.amount_paise, currency=invoice.currency, status="captured",
             captured_at=datetime.now(timezone.utc), meta={"purchase_type": invoice.purchase_type},
         ))

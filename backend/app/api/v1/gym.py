@@ -1,15 +1,17 @@
 """Advanced gym operations with lifecycle validation."""
 from datetime import date, datetime, timedelta, timezone
+import math
 from typing import Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import Field, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.database import get_db
+from app.schemas.validation import RequestModel
 from app.core.deps import require_permissions
 from app.models import (
     ClassBooking, Client, DietPlan, Employee, Equipment, FitnessMeasurement, GymCheckIn,
@@ -54,15 +56,15 @@ def _queue_membership_update(db, user, client, plan, membership, status_label):
     )
 
 
-class PlanBody(BaseModel):
-    name: str
-    duration_days: int = Field(gt=0)
+class PlanBody(RequestModel):
+    name: str = Field(min_length=2, max_length=160)
+    duration_days: int = Field(gt=0, le=3650)
     price_paise: int = Field(ge=0)
     joining_fee_paise: int = Field(default=0, ge=0)
-    benefits: list[str] = Field(default_factory=list)
+    benefits: list[str] = Field(default_factory=list, max_length=50)
 
 
-class MembershipBody(BaseModel):
+class MembershipBody(RequestModel):
     location_id: str
     client_id: str
     plan_id: str
@@ -76,8 +78,18 @@ class MembershipBody(BaseModel):
     # Retained only to reject stale callers attempting to override the quote.
     amount_paise: int | None = Field(default=None, ge=0)
 
+    @model_validator(mode="after")
+    def valid_payment(self):
+        if self.payment_option == "partial" and self.partial_payment_paise is None:
+            raise ValueError("A partial payment amount is required")
+        if self.payment_option in {"full", "partial"} and self.payment_method is None:
+            raise ValueError("A payment method is required")
+        if self.payment_option != "partial" and self.partial_payment_paise is not None:
+            raise ValueError("A partial amount is valid only for partial payment")
+        return self
 
-class RenewalBody(BaseModel):
+
+class RenewalBody(RequestModel):
     plan_id: str | None = None
     payment_option: Literal["full", "partial", "later"] = "later"
     partial_payment_paise: int | None = Field(default=None, gt=0)
@@ -86,82 +98,137 @@ class RenewalBody(BaseModel):
     interstate: bool = False
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=90)
 
+    @model_validator(mode="after")
+    def valid_payment(self):
+        if self.payment_option == "partial" and self.partial_payment_paise is None:
+            raise ValueError("A partial payment amount is required")
+        if self.payment_option in {"full", "partial"} and self.payment_method is None:
+            raise ValueError("A payment method is required")
+        if self.payment_option != "partial" and self.partial_payment_paise is not None:
+            raise ValueError("A partial amount is valid only for partial payment")
+        return self
 
-class FreezeBody(BaseModel):
+
+class FreezeBody(RequestModel):
     frozen_from: date
     frozen_until: date
-    version: int
+    version: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def valid_dates(self):
+        if self.frozen_until < self.frozen_from:
+            raise ValueError("Freeze end date must be on or after its start date")
+        return self
 
 
-class CancelBody(BaseModel):
-    reason: str = Field(min_length=3)
-    version: int
+class CancelBody(RequestModel):
+    reason: str = Field(min_length=3, max_length=2000)
+    version: int = Field(ge=1)
     timing: Literal["now", "term_end"] = "now"
     cancel_scheduled_renewal: bool = True
 
 
-class CancellationRevokeBody(BaseModel):
-    version: int
+class CancellationRevokeBody(RequestModel):
+    version: int = Field(ge=1)
 
 
-class CheckInBody(BaseModel):
+class CheckInBody(RequestModel):
     location_id: str
     membership_id: str
-    method: str = "staff"
+    method: Literal["staff", "qr", "manual"] = "staff"
 
 
-class TrainerBody(BaseModel):
+class TrainerBody(RequestModel):
     client_id: str
     trainer_employee_id: str
     starts_on: date = Field(default_factory=date.today)
     ends_on: date | None = None
 
+    @model_validator(mode="after")
+    def valid_dates(self):
+        if self.ends_on and self.ends_on < self.starts_on:
+            raise ValueError("Assignment end date cannot be before its start date")
+        return self
 
-class MeasurementBody(BaseModel):
+
+class MeasurementBody(RequestModel):
     client_id: str
     measured_on: date = Field(default_factory=date.today)
-    metrics: dict
-    notes: str | None = None
+    metrics: dict = Field(min_length=1, max_length=50)
+    notes: str | None = Field(default=None, max_length=5000)
+
+    @model_validator(mode="after")
+    def valid_metrics(self):
+        for key, value in self.metrics.items():
+            if not isinstance(key, str) or not key.strip() or len(key) > 80:
+                raise ValueError("Measurement keys must be 1 to 80 characters")
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                raise ValueError(f"Measurement {key} must be a finite number")
+        return self
 
 
-class WorkoutBody(BaseModel):
+class WorkoutBody(RequestModel):
     client_id: str
     trainer_employee_id: str | None = None
-    name: str
-    schedule: list[dict]
+    name: str = Field(min_length=2, max_length=180)
+    schedule: list[dict] = Field(min_length=1, max_length=200)
     starts_on: date = Field(default_factory=date.today)
     ends_on: date | None = None
 
+    @model_validator(mode="after")
+    def valid_dates(self):
+        if self.ends_on and self.ends_on < self.starts_on:
+            raise ValueError("Workout end date cannot be before its start date")
+        return self
 
-class DietBody(BaseModel):
+
+class DietBody(RequestModel):
     client_id: str
-    name: str
-    meals: list[dict]
-    notes: str | None = None
+    name: str = Field(min_length=2, max_length=180)
+    meals: list[dict] = Field(min_length=1, max_length=200)
+    notes: str | None = Field(default=None, max_length=5000)
     starts_on: date = Field(default_factory=date.today)
     ends_on: date | None = None
 
+    @model_validator(mode="after")
+    def valid_dates(self):
+        if self.ends_on and self.ends_on < self.starts_on:
+            raise ValueError("Diet end date cannot be before its start date")
+        return self
 
-class ClassBody(BaseModel):
+
+class ClassBody(RequestModel):
     location_id: str
     trainer_employee_id: str | None = None
-    name: str
+    name: str = Field(min_length=2, max_length=180)
     starts_at: datetime
     ends_at: datetime
-    capacity: int = Field(gt=0)
+    capacity: int = Field(gt=0, le=10000)
+
+    @model_validator(mode="after")
+    def valid_times(self):
+        if self.ends_at <= self.starts_at:
+            raise ValueError("Class end time must be after its start time")
+        return self
 
 
-class BookingBody(BaseModel):
+class BookingBody(RequestModel):
     client_id: str
 
 
-class EquipmentBody(BaseModel):
+class EquipmentBody(RequestModel):
     location_id: str
-    name: str
-    asset_code: str
+    name: str = Field(min_length=2, max_length=180)
+    asset_code: str = Field(min_length=1, max_length=100)
     purchased_on: date | None = None
     next_service_on: date | None = None
-    notes: str | None = None
+    notes: str | None = Field(default=None, max_length=5000)
+
+    @model_validator(mode="after")
+    def valid_service_date(self):
+        if self.purchased_on and self.next_service_on and self.next_service_on < self.purchased_on:
+            raise ValueError("Next service date cannot be before the purchase date")
+        return self
 
 
 def _payment_for_response(payment: SalePayment | None) -> dict | None:

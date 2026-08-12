@@ -1,5 +1,7 @@
 import React, { useDeferredValue, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { useForm } from "react-hook-form";
 import { ArrowDown, ArrowUp, ArrowsLeftRight, MagnifyingGlass, Package, Warning } from "@phosphor-icons/react";
 import { toast } from "sonner";
 import { useAuth } from "@/contexts/AuthContext";
@@ -7,6 +9,7 @@ import { useBusiness } from "@/contexts/BusinessContext";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage, FormRootError } from "@/components/ui/form";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CursorListFooter, DataTable, DrawerForm, EmptyState, ErrorState, FilterBar, MetricStrip, PageHeader, PageShell, RemoteCombobox, StatusBadge } from "@/components/system";
@@ -14,6 +17,7 @@ import StockAdjustmentDialog from "@/components/StockAdjustmentDialog";
 import { useGetInventoryLevelsPageQuery, useGetInventoryMovementsPageQuery, useTransferStockMutation } from "@/store/api/workspaceApi";
 import { QUERY_POLICIES, withSkip } from "@/store/api/queryPolicies";
 import useCursorPagination from "@/hooks/useCursorPagination";
+import { applyApiErrors, FORM_OPTIONS, stockTransferSchema } from "@/lib/validation";
 
 export default function Inventory() {
   const { can } = useAuth();
@@ -94,6 +98,97 @@ const movementColumns = [
 ];
 
 function TransferDrawer({ open, onOpenChange, activeLocationId, locations, onComplete }) {
+  const [itemSearch, setItemSearch] = useState("");
+  const deferredItemSearch = useDeferredValue(itemSearch.trim());
+  const [selectedLevel, setSelectedLevel] = useState(null);
+  const form = useForm({
+    resolver: zodResolver(stockTransferSchema),
+    defaultValues: transferDefaults(activeLocationId),
+    ...FORM_OPTIONS,
+  });
+  const { clearErrors, control, formState, handleSubmit, reset, setError, setValue, watch } = form;
+  const sourceLocationId = watch("source_location_id");
+  const destinationLocationId = watch("destination_location_id");
+  const itemId = watch("item_id");
+  const itemPaging = useCursorPagination(JSON.stringify({ open, source: sourceLocationId, q: deferredItemSearch }));
+  const itemQuery = useGetInventoryLevelsPageQuery({
+    locationId: sourceLocationId,
+    q: deferredItemSearch,
+    state: "in_stock",
+    cursor: itemPaging.cursor,
+    limit: 25,
+  }, withSkip(QUERY_POLICIES.reference, !open || !sourceLocationId));
+  const { accept: acceptItems } = itemPaging;
+  useEffect(() => { acceptItems(itemQuery.data); }, [acceptItems, itemQuery.data]);
+  useEffect(() => {
+    if (!open) return;
+    reset(transferDefaults(activeLocationId));
+    setSelectedLevel(null);
+    setItemSearch("");
+    itemPaging.reset();
+  }, [activeLocationId, open, reset]);
+  const itemLevels = itemPaging.items.length ? itemPaging.items : itemQuery.data?.items || [];
+  const uniqueLevels = [...new Map(itemLevels.map((row) => [row.item.id, row])).values()];
+  const [transfer, transferState] = useTransferStockMutation();
+  const pending = formState.isSubmitting || transferState.isLoading;
+
+  const submit = handleSubmit(async (values) => {
+    clearErrors("root.server");
+    if (selectedLevel && values.quantity_milli > Number(selectedLevel.quantity_milli || 0)) {
+      setError("quantity", { type: "validate", message: "Quantity cannot exceed the stock available at the source" }, { shouldFocus: true });
+      return;
+    }
+    try {
+      await transfer({
+        item_id: values.item_id,
+        source_location_id: values.source_location_id,
+        destination_location_id: values.destination_location_id,
+        quantity_milli: values.quantity_milli,
+        batch_number: values.batch_number || "",
+        reason: values.reason,
+      }).unwrap();
+      onComplete?.();
+      toast.success("Stock transferred");
+      reset(transferDefaults(activeLocationId));
+      onOpenChange(false);
+    } catch (error) {
+      const normalized = applyApiErrors(error, setError, { aliases: { quantity_milli: "quantity" }, fallback: "Could not transfer stock" });
+      if (!Object.keys(normalized.fieldErrors).length) setError("root.server", { type: "server", message: normalized.message });
+    }
+  });
+
+  const changeSource = (value) => {
+    setValue("source_location_id", value, { shouldDirty: true, shouldValidate: true });
+    if (destinationLocationId === value) setValue("destination_location_id", "", { shouldDirty: true, shouldValidate: true });
+    setValue("item_id", "", { shouldDirty: true, shouldValidate: true });
+    setValue("batch_number", "", { shouldDirty: true });
+    setSelectedLevel(null);
+    setItemSearch("");
+    itemPaging.reset();
+  };
+
+  return <DrawerForm open={open} onOpenChange={(nextOpen) => { if (!nextOpen && pending) return; onOpenChange(nextOpen); }} title="Transfer stock" description="Search the selected source location and move available stock with a complete ledger trail."><Form {...form}><form noValidate onSubmit={submit} className="space-y-4">
+    <div className="grid gap-4 sm:grid-cols-2">
+      <FormField control={control} name="source_location_id" render={({ field }) => <FormItem><FormLabel>From</FormLabel><Select value={field.value} onValueChange={changeSource}><FormControl><SelectTrigger><SelectValue placeholder="Source" /></SelectTrigger></FormControl><SelectContent>{locations.map((location) => <SelectItem key={location.id} value={location.id}>{location.name}</SelectItem>)}</SelectContent></Select><FormMessage /></FormItem>} />
+      <FormField control={control} name="destination_location_id" render={({ field }) => <FormItem><FormLabel>To</FormLabel><Select value={field.value} onValueChange={field.onChange}><FormControl><SelectTrigger><SelectValue placeholder="Destination" /></SelectTrigger></FormControl><SelectContent>{locations.filter((location) => location.id !== sourceLocationId).map((location) => <SelectItem key={location.id} value={location.id}>{location.name}</SelectItem>)}</SelectContent></Select><FormMessage /></FormItem>} />
+    </div>
+    <FormField control={control} name="item_id" render={({ field }) => <FormItem><FormLabel>Item</FormLabel><RemoteCombobox value={field.value} selectedItem={selectedLevel} items={uniqueLevels} onValueChange={(value, level) => { field.onChange(value); setValue("batch_number", level?.batch_number || "", { shouldDirty: true }); setSelectedLevel(level); }} onSearchChange={setItemSearch} getValue={(level) => level.item.id} getLabel={(level) => level.item.name} getDescription={(level) => `${level.item.sku} · ${quantity(level.quantity_milli)} ${level.item.unit} available`} placeholder={sourceLocationId ? "Search available stock" : "Choose a source first"} searchPlaceholder="Search item, SKU, or batch" emptyText="No matching stock at this location" loading={itemQuery.isFetching} error={itemQuery.isError} hasMore={Boolean(itemQuery.data?.has_more)} onLoadMore={() => itemPaging.loadMore(itemQuery.data?.next_cursor)} onRetry={itemQuery.refetch} disabled={!sourceLocationId} /><FormMessage /></FormItem>} />
+    <div className="grid gap-4 sm:grid-cols-2"><ValidatedInventoryField control={control} name="quantity" label="Quantity"><Input inputMode="decimal" aria-label="Transfer quantity" /></ValidatedInventoryField><ValidatedInventoryField control={control} name="batch_number" label="Batch"><Input /></ValidatedInventoryField></div>
+    <ValidatedInventoryField control={control} name="reason" label="Reason"><Input /></ValidatedInventoryField>
+    <FormRootError error={formState.errors.root?.server} />
+    <Button type="submit" loading={pending} loadingText="Transferring..." className="w-full">Transfer stock</Button>
+  </form></Form></DrawerForm>;
+}
+
+function ValidatedInventoryField({ control, name, label, children }) {
+  return <FormField control={control} name={name} render={({ field }) => <FormItem><FormLabel>{label}</FormLabel><FormControl>{React.cloneElement(children, { ...field, value: field.value ?? "" })}</FormControl><FormMessage /></FormItem>} />;
+}
+
+function transferDefaults(activeLocationId) {
+  return { item_id: "", source_location_id: activeLocationId || "", destination_location_id: "", quantity: "", batch_number: "", reason: "Location transfer" };
+}
+
+function LegacyTransferDrawer({ open, onOpenChange, activeLocationId, locations, onComplete }) {
   const [itemSearch, setItemSearch] = useState("");
   const deferredItemSearch = useDeferredValue(itemSearch.trim());
   const [selectedLevel, setSelectedLevel] = useState(null);

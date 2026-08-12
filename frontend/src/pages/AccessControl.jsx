@@ -1,13 +1,15 @@
 import React, { useDeferredValue, useEffect, useMemo, useState } from "react";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { useForm } from "react-hook-form";
 import { useAuth } from "@/contexts/AuthContext";
 import { useBusiness } from "@/contexts/BusinessContext";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage, FormRootError } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
-  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialog, AlertDialogCancel, AlertDialogContent,
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import {
@@ -29,6 +31,7 @@ import {
   usePreviewAccessMutation, useSaveAccessMutation, useUpdateRoleMutation,
 } from "@/features/access/accessApi";
 import { cn } from "@/lib/utils";
+import { accessConfigurationSchema, applyApiErrors, FORM_OPTIONS, roleSchema } from "@/lib/validation";
 import useCursorPagination from "@/hooks/useCursorPagination";
 
 const emptyConfig = { role_ids: [], permission_overrides: [], location_mode: "full", location_ids: [], client_mode: "all", client_ids: [], selected_clients: [], version: 1 };
@@ -54,6 +57,7 @@ export default function AccessControl() {
   const [permissionSearch, setPermissionSearch] = useState("");
   const [accessUser, setAccessUser] = useState(null);
   const [config, setConfig] = useState(emptyConfig);
+  const [configError, setConfigError] = useState("");
   const [configReady, setConfigReady] = useState(false);
   const [roleEditor, setRoleEditor] = useState(null);
   const [confirmation, setConfirmation] = useState(null);
@@ -92,14 +96,21 @@ export default function AccessControl() {
 
   useEffect(() => {
     if (!accessUser || !configReady) return undefined;
-    const timer = setTimeout(() => previewAccess({ userId: accessUser.id, configuration: config }), 350);
+    const parsed = accessConfigurationSchema.safeParse(config);
+    if (!parsed.success) {
+      previewState.reset();
+      setConfigError(parsed.error.issues[0]?.message || "Review the selected access scope");
+      return undefined;
+    }
+    setConfigError("");
+    const timer = setTimeout(() => previewAccess({ userId: accessUser.id, configuration: parsed.data }), 350);
     return () => clearTimeout(timer);
   }, [accessUser, config, configReady, previewAccess]);
 
   if (workspace.isError && !data) return <PageShell><ErrorState title="Access control could not be loaded" description={workspace.error?.data?.detail} retry={workspace.refetch} /></PageShell>;
 
   const openAccess = async (person) => {
-    setAccessUser(person); setConfigReady(false); previewState.reset();
+    setAccessUser(person); setConfigReady(false); setConfigError(""); previewState.reset();
     try {
       const loaded = await loadConfiguration(person.id, true).unwrap();
       setConfig({ ...emptyConfig, ...loaded }); setConfigReady(true);
@@ -108,10 +119,15 @@ export default function AccessControl() {
     }
   };
   const saveConfiguration = async () => {
+    const parsed = accessConfigurationSchema.safeParse(config);
+    if (!parsed.success) {
+      setConfigError(parsed.error.issues[0]?.message || "Review the selected access scope");
+      return;
+    }
     try {
-      await saveAccess({ userId: accessUser.id, configuration: config }).unwrap();
+      await saveAccess({ userId: accessUser.id, configuration: parsed.data }).unwrap();
       toast.success("Access updated"); setAccessUser(null); setConfigReady(false);
-    } catch (error) { toast.error(error?.data?.detail || "Could not update access"); }
+    } catch (error) { setConfigError(error?.data?.detail || "Could not update access"); }
   };
   const openRole = (role = null, mode = "create") => {
     const source = role || {};
@@ -121,14 +137,14 @@ export default function AccessControl() {
       permission_ids: source.permission_ids || [], version: source.version,
     });
   };
-  const saveRoleEditor = async () => {
-    const payload = { name: roleEditor.name.trim(), description: roleEditor.description.trim() || null, permission_ids: roleEditor.permission_ids };
+  const saveRoleEditor = async (values) => {
+    const payload = { name: values.name, description: values.description || null, permission_ids: values.permission_ids };
     try {
       if (roleEditor.mode === "create") await createRole(payload).unwrap();
       if (roleEditor.mode === "edit") await updateRole({ roleId: roleEditor.sourceId, version: roleEditor.version, ...payload }).unwrap();
       if (roleEditor.mode === "duplicate") await duplicateRole({ roleId: roleEditor.sourceId, ...payload }).unwrap();
       toast.success(roleEditor.mode === "edit" ? "Role updated" : "Role created"); setRoleEditor(null);
-    } catch (error) { toast.error(error?.data?.detail || "Could not save role"); }
+    } catch (error) { throw error; }
   };
   const applyRoleAction = async () => {
     const { role, action } = confirmation;
@@ -169,19 +185,20 @@ export default function AccessControl() {
       <TabsContent value="audit" className="mt-5"><DataTable loading={audit.isLoading && !auditPaging.items.length} rows={auditPaging.items} columns={[{ key: "summary", label: "Change", render: (row) => <div><div className="font-semibold">{row.summary || humanize(row.action)}</div><div className="mt-1 text-xs text-muted-foreground">{humanize(row.action)}</div></div> }, { key: "actor", label: "Changed by" }, { key: "created_at", label: "When", render: (row) => new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(row.created_at)) }]} empty={<EmptyState variant="section" alignment="left" icon={ShieldCheck} title="No access changes recorded" description="Role and personal-access changes will appear here." />} />{(auditPaging.items.length > 0 || audit.data?.has_more) && <CursorListFooter count={auditPaging.items.length} noun="changes" hasMore={Boolean(audit.data?.has_more)} loading={audit.isFetching} error={audit.isError} onLoadMore={() => auditPaging.loadMore(audit.data?.next_cursor)} onRetry={audit.refetch} />}</TabsContent>
     </Tabs>
 
-    <DrawerForm open={Boolean(accessUser)} onOpenChange={(open) => { if (!open) { setAccessUser(null); setConfigReady(false); } }} title={accessUser ? `Access for ${accessUser.first_name} ${accessUser.last_name}` : "Access"} description="Role defaults and personal scope are saved together.">
+    <DrawerForm open={Boolean(accessUser)} onOpenChange={(open) => { if (!open && !saveState.isLoading) { setAccessUser(null); setConfigReady(false); setConfigError(""); } }} title={accessUser ? `Access for ${accessUser.first_name} ${accessUser.last_name}` : "Access"} description="Role defaults and personal scope are saved together.">
       {!configReady ? <div className="space-y-4">{[1, 2, 3].map((item) => <div key={item} className="h-24 animate-pulse rounded-2xl bg-secondary" />)}</div> : <div className="space-y-7">
         <EditorSection number="1" title="Responsibilities" copy="Choose one or more roles as the starting point."><div className="grid gap-3 sm:grid-cols-2">{roles.filter((role) => role.is_active).map((role) => <Choice key={role.id} checked={config.role_ids.includes(role.id)} title={role.name} copy={`${role.permission_ids.length} permitted actions`} onClick={() => toggleConfig(setConfig, "role_ids", role.id)} />)}</div></EditorSection>
         <EditorSection number="2" title={isCollege ? "Campus reach" : "Location reach"} copy={isCollege ? "All campuses includes campuses added later. Restricted access stays within your selection." : "All locations includes locations added later. Restricted access stays within your selection."}><Mode value={config.location_mode} onChange={(value) => setConfig((current) => ({ ...current, location_mode: value, location_ids: value === "full" ? [] : current.location_ids }))} options={[["full", isCollege ? "All campuses" : "All locations"], ["restricted", isCollege ? "Selected campuses" : "Selected locations"]]} />{config.location_mode === "restricted" && <div className="mt-3 grid gap-3 sm:grid-cols-2">{locations.map((location) => <Choice key={location.id} checked={config.location_ids.includes(location.id)} title={location.name} copy={location.city || location.code} onClick={() => toggleConfig(setConfig, "location_ids", location.id)} />)}</div>}</EditorSection>
         <EditorSection number="3" title={`${entityLabel} reach`} copy={isCollege ? "Choose all students in permitted campuses, assigned students, or a fixed selection." : `Choose every ${entityLabel.toLowerCase()} in permitted locations, assigned relationships, or a fixed selection.`}><Mode value={config.client_mode} onChange={(value) => setConfig((current) => ({ ...current, client_mode: value, client_ids: value === "selected" ? current.client_ids : [] }))} options={[["all", `All ${entityLabel.toLowerCase()}`], ["assigned", "Assigned only"], ["selected", "Selected only"]]} />{config.client_mode === "selected" && <ClientPicker selectedClients={config.selected_clients || []} selected={config.client_ids} onToggle={(id) => toggleConfig(setConfig, "client_ids", id)} entityLabel={entityLabel} />}</EditorSection>
         <EditorSection number="4" title="Personal adjustments" copy="Use sparingly. A personal block always wins over a role allowance."><div className="space-y-3">{Object.entries(groupBy(permissions, "module")).map(([module, list]) => <details className="overflow-hidden rounded-2xl border" key={module}><summary className="cursor-pointer bg-secondary px-4 py-3 font-semibold capitalize">{humanize(module)}</summary><div className="divide-y">{list.map((permission) => { const override = config.permission_overrides.find((item) => item.permission_id === permission.id); const mode = override ? override.granted ? "allow" : "deny" : "inherit"; return <div className="flex flex-col justify-between gap-3 p-3 sm:flex-row sm:items-center" key={permission.id}><div><div className="text-sm font-medium">{permission.label}</div><div className="mt-1 text-xs text-muted-foreground">Role default: {rolePermissionIds.has(permission.id) ? "allowed" : "not allowed"}</div></div><select className={cn("h-9 rounded-xl border bg-background px-3 text-sm", mode === "deny" && "text-danger", mode === "allow" && "text-positive")} value={mode} onChange={(event) => setOverride(setConfig, permission.id, event.target.value)}><option value="inherit">Use role default</option><option value="allow">Allow personally</option><option value="deny">Block personally</option></select></div>; })}</div></details>)}</div></EditorSection>
         <AccessPreview loading={previewState.isLoading} error={previewState.error} preview={previewState.data} localCount={effectiveIds.size} warnings={dependencyWarnings} entitySingular={entitySingular} />
-        <Button className="h-12 w-full" disabled={saveState.isLoading || previewState.isLoading || Boolean(previewState.error) || dependencyWarnings.length > 0} onClick={saveConfiguration}>{saveState.isLoading ? <><SpinnerGap className="mr-2 animate-spin" />Saving access</> : "Save access"}</Button>
+        <FormRootError error={configError} />
+        <Button className="h-12 w-full" loading={saveState.isLoading} loadingText="Saving access..." disabled={previewState.isLoading || Boolean(previewState.error) || dependencyWarnings.length > 0} onClick={saveConfiguration}>Save access</Button>
       </div>}
     </DrawerForm>
 
     <RoleEditor editor={roleEditor} setEditor={setRoleEditor} groups={groupBy(permissions, "module")} onSave={saveRoleEditor} saving={createState.isLoading || updateState.isLoading || duplicateState.isLoading} />
-    <AlertDialog open={Boolean(confirmation)} onOpenChange={(open) => !open && setConfirmation(null)}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{confirmation?.action === "delete" ? "Delete this role?" : `${confirmation?.role?.is_active ? "Deactivate" : "Activate"} this role?`}</AlertDialogTitle><AlertDialogDescription>{confirmation?.action === "delete" ? "The role has no assigned people and will be removed permanently." : `${confirmation?.role?.user_count || 0} people currently use this role. Their effective access may change immediately.`}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Keep role</AlertDialogCancel><AlertDialogAction disabled={deleteState.isLoading || updateState.isLoading} onClick={applyRoleAction}>Confirm</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
+    <AlertDialog open={Boolean(confirmation)} onOpenChange={(open) => { if (!open && !deleteState.isLoading && !updateState.isLoading) setConfirmation(null); }}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{confirmation?.action === "delete" ? "Delete this role?" : `${confirmation?.role?.is_active ? "Deactivate" : "Activate"} this role?`}</AlertDialogTitle><AlertDialogDescription>{confirmation?.action === "delete" ? "The role has no assigned people and will be removed permanently." : `${confirmation?.role?.user_count || 0} people currently use this role. Their effective access may change immediately.`}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel disabled={deleteState.isLoading || updateState.isLoading}>Keep role</AlertDialogCancel><Button variant={confirmation?.action === "delete" ? "destructive" : "default"} loading={deleteState.isLoading || updateState.isLoading} loadingText="Updating..." onClick={applyRoleAction}>Confirm</Button></AlertDialogFooter></AlertDialogContent></AlertDialog>
   </PageShell>;
 }
 
@@ -191,10 +208,25 @@ function AccessPreview({ loading, error, preview, localCount, warnings, entitySi
 
 function RoleEditor({ editor, setEditor, groups, onSave, saving }) {
   const [search, setSearch] = useState("");
+  const roleForm = useForm({ resolver: zodResolver(roleSchema), defaultValues: { name: "", description: "", permission_ids: [] }, ...FORM_OPTIONS });
+  const permissionIds = roleForm.watch("permission_ids") || [];
+  useEffect(() => {
+    if (!editor) return;
+    roleForm.reset({ name: editor.name || "", description: editor.description || "", permission_ids: editor.permission_ids || [] });
+    setSearch("");
+  }, [editor, roleForm]);
   if (!editor) return null;
   const filtered = Object.fromEntries(Object.entries(groups).map(([module, rows]) => [module, rows.filter((row) => row.label.toLowerCase().includes(search.toLowerCase()))]).filter(([, rows]) => rows.length));
-  const toggle = (id) => setEditor((current) => ({ ...current, permission_ids: current.permission_ids.includes(id) ? current.permission_ids.filter((value) => value !== id) : [...current.permission_ids, id] }));
-  return <Dialog open onOpenChange={(open) => !open && setEditor(null)}><DialogContent className="premium-scrollbar max-h-[92vh] overflow-y-auto sm:max-w-4xl"><DialogHeader><DialogTitle className="font-display text-3xl">{editor.mode === "edit" ? "Edit role" : editor.mode === "duplicate" ? "Customize role template" : "Create role"}</DialogTitle></DialogHeader><div className="space-y-5"><div className="grid gap-4 sm:grid-cols-2"><Field label="Role name"><Input value={editor.name} onChange={(event) => setEditor({ ...editor, name: event.target.value })} /></Field><Field label="Description"><Input value={editor.description} onChange={(event) => setEditor({ ...editor, description: event.target.value })} /></Field></div><div className="relative"><MagnifyingGlass className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" /><Input value={search} onChange={(event) => setSearch(event.target.value)} className="pl-10" placeholder="Search permissions" /></div>{Object.entries(filtered).map(([module, list]) => <section className="rounded-2xl border p-4" key={module}><h3 className="font-semibold capitalize">{humanize(module)}</h3><div className="mt-3 grid gap-2 sm:grid-cols-2">{list.map((permission) => <label className="flex cursor-pointer gap-3 rounded-xl p-2 hover:bg-secondary" key={permission.id}><input type="checkbox" checked={editor.permission_ids.includes(permission.id)} onChange={() => toggle(permission.id)} /><span className="text-sm">{permission.label}</span></label>)}</div></section>)}<Button className="w-full" disabled={saving || editor.name.trim().length < 2} onClick={onSave}>{saving ? "Saving role..." : "Save role"}</Button></div></DialogContent></Dialog>;
+  const toggle = (id) => roleForm.setValue("permission_ids", permissionIds.includes(id) ? permissionIds.filter((value) => value !== id) : [...permissionIds, id], { shouldDirty: true, shouldValidate: true });
+  const submit = roleForm.handleSubmit(async (values) => {
+    roleForm.clearErrors("root.server");
+    try { await onSave(values); }
+    catch (error) {
+      const normalized = applyApiErrors(error, roleForm.setError, { fallback: "Could not save role" });
+      if (!Object.keys(normalized.fieldErrors).length) roleForm.setError("root.server", { type: "server", message: normalized.message });
+    }
+  });
+  return <Dialog open onOpenChange={(open) => { if (!open && !saving && !roleForm.formState.isSubmitting) setEditor(null); }}><DialogContent className="premium-scrollbar max-h-[92vh] overflow-y-auto sm:max-w-4xl"><DialogHeader><DialogTitle className="font-display text-3xl">{editor.mode === "edit" ? "Edit role" : editor.mode === "duplicate" ? "Customize role template" : "Create role"}</DialogTitle></DialogHeader><Form {...roleForm}><form noValidate onSubmit={submit} className="space-y-5"><div className="grid gap-4 sm:grid-cols-2"><ValidatedField control={roleForm.control} name="name" label="Role name"><Input autoFocus /></ValidatedField><ValidatedField control={roleForm.control} name="description" label="Description"><Input /></ValidatedField></div><div className="relative"><MagnifyingGlass className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" /><Input value={search} onChange={(event) => setSearch(event.target.value)} className="pl-10" placeholder="Search permissions" /></div><FormField control={roleForm.control} name="permission_ids" render={() => <FormItem>{Object.entries(filtered).map(([module, list]) => <section className="rounded-2xl border p-4" key={module}><h3 className="font-semibold capitalize">{humanize(module)}</h3><div className="mt-3 grid gap-2 sm:grid-cols-2">{list.map((permission) => <label className="flex cursor-pointer gap-3 rounded-xl p-2 hover:bg-secondary" key={permission.id}><input type="checkbox" checked={permissionIds.includes(permission.id)} onChange={() => toggle(permission.id)} /><span className="text-sm">{permission.label}</span></label>)}</div></section>)}<FormMessage /></FormItem>} /><FormRootError error={roleForm.formState.errors.root?.server} /><Button type="submit" className="w-full" loading={saving || roleForm.formState.isSubmitting} loadingText="Saving role...">Save role</Button></form></Form></DialogContent></Dialog>;
 }
 
 function RoleComparison({ roles, permissions }) {
@@ -227,7 +259,7 @@ function ClientPicker({ selectedClients, selected, onToggle, entityLabel }) {
 function EditorSection({ number, title, copy, children }) { return <section><div className="mb-4 flex gap-3"><div className="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-accent font-bold text-accent-foreground">{number}</div><div><h3 className="font-display text-2xl font-semibold">{title}</h3><p className="mt-1 text-sm text-muted-foreground">{copy}</p></div></div>{children}</section>; }
 function Choice({ checked, title, copy, onClick }) { return <button type="button" onClick={onClick} className={cn("rounded-2xl border p-4 text-left transition-colors", checked ? "border-accent bg-accent/5 ring-2 ring-accent/15" : "bg-card hover:bg-secondary/50")}><div className="flex justify-between gap-3"><span className="font-medium">{title}</span><span className={cn("grid h-5 w-5 place-items-center rounded-md border", checked && "border-accent bg-accent text-accent-foreground")}>{checked && <CheckCircle size={15} weight="fill" />}</span></div><div className="mt-1 text-xs text-muted-foreground">{copy}</div></button>; }
 function Mode({ value, onChange, options }) { return <div className="flex flex-wrap gap-2">{options.map(([id, label]) => <Button type="button" key={id} variant={value === id ? "default" : "outline"} onClick={() => onChange(id)}>{label}</Button>)}</div>; }
-function Field({ label, children }) { return <div className="space-y-2"><Label>{label}</Label>{children}</div>; }
+function ValidatedField({ control, name, label, children }) { return <FormField control={control} name={name} render={({ field }) => <FormItem><FormLabel>{label}</FormLabel><FormControl>{React.cloneElement(children, { ...field, value: field.value ?? "" })}</FormControl><FormMessage /></FormItem>} />; }
 function toggleConfig(setConfig, key, value) { setConfig((current) => ({ ...current, [key]: current[key].includes(value) ? current[key].filter((id) => id !== value) : [...current[key], value] })); }
 function setOverride(setConfig, permissionId, mode) { setConfig((current) => ({ ...current, permission_overrides: mode === "inherit" ? current.permission_overrides.filter((item) => item.permission_id !== permissionId) : [...current.permission_overrides.filter((item) => item.permission_id !== permissionId), { permission_id: permissionId, granted: mode === "allow" }] })); }
 function groupBy(rows, key) { return rows.reduce((result, row) => ({ ...result, [row[key] || "other"]: [...(result[row[key] || "other"] || []), row] }), {}); }

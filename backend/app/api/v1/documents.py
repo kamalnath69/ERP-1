@@ -8,19 +8,21 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse
-from pydantic import BaseModel, Field
+from pydantic import Field
 from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.api.v1.business import serialize
 from app.core.config import ROOT_DIR, settings
 from app.core.database import get_db
+from app.schemas.validation import RequestModel
 from app.core.deps import require_entitlements, require_permissions
 from app.models import Client, Document, DocumentChunk, Job, Organization, OutboundMessage
 from app.services.business_access import ensure_client_access, ensure_location, tenant_get
 from app.services.cursor_pagination import decode_cursor, encode_cursor, page_size
 from app.services.entitlements import entitlement_value
 from app.services.rbac import user_has_permissions
+from app.services.upload_validation import safe_upload_name, validate_upload_signature
 
 router = APIRouter(tags=["documents-and-communications"])
 STORAGE_DIR = ROOT_DIR / "storage"
@@ -31,7 +33,7 @@ ALLOWED_TYPES = {
 MAX_BYTES = 20 * 1024 * 1024
 
 
-class MessageBody(BaseModel):
+class MessageBody(RequestModel):
     client_id: str
     channel: str = "whatsapp"
     body: str = Field(min_length=1, max_length=800)
@@ -120,9 +122,24 @@ async def upload_document(
 ):
     content_type = (file.content_type or "").lower()
     if content_type not in ALLOWED_TYPES: raise HTTPException(415, "Only PDF, DOCX, TXT, JPG, and PNG files are accepted")
+    safe_name = safe_upload_name(
+        file.filename,
+        content_type,
+        allowed_extensions={
+            **{key: {value} for key, value in ALLOWED_TYPES.items()},
+            "image/jpeg": {".jpg", ".jpeg"},
+        },
+        fallback=f"document{ALLOWED_TYPES[content_type]}",
+    )
     if location_id: ensure_location(db, user, location_id)
     if visibility not in {"team", "managers", "author_only", "clinical"}: raise HTTPException(422, "Invalid document visibility")
     if visibility == "clinical" and not user_has_permissions(db, user, ["clinical.write"]): raise HTTPException(403, "Clinical document access is required")
+    if entity_type is not None and (not entity_type.strip() or len(entity_type.strip()) > 50 or not entity_type.replace("_", "").isalnum()):
+        raise HTTPException(422, "Invalid document entity type")
+    if entity_id is not None and (not entity_id.strip() or len(entity_id.strip()) > 80):
+        raise HTTPException(422, "Invalid document entity identifier")
+    if bool(entity_type) != bool(entity_id):
+        raise HTTPException(422, "Document entity type and identifier must be provided together")
     if entity_type in {"client", "patient"} and entity_id:
         ensure_client_access(db, user, tenant_get(db, Client, entity_id, user))
     content = await file.read(MAX_BYTES + 1)
@@ -133,8 +150,8 @@ async def upload_document(
     storage_limit_mb = entitlement_value(db, organization, "limits.storage_mb")
     if storage_limit_mb is not None and used + len(content) > int(storage_limit_mb) * 1024 * 1024:
         raise HTTPException(402, "Document storage allowance reached for the current plan")
-    if content.startswith((b"MZ", b"\x7fELF")): raise HTTPException(400, "Executable content is not allowed")
-    checksum = hashlib.sha256(content).hexdigest(); safe_name = Path(file.filename or "document").name
+    validate_upload_signature(content, content_type)
+    checksum = hashlib.sha256(content).hexdigest()
     object_key = f"{user.organization_id}/{secrets.token_hex(12)}{ALLOWED_TYPES[content_type]}"
     if settings.S3_ENDPOINT_URL and not settings.PROVIDER_MOCK_MODE:
         import boto3

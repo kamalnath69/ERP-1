@@ -11,7 +11,7 @@ from time import perf_counter
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import Field, field_validator
 from sqlalchemy import and_, case, delete, func, or_, select
 from sqlalchemy.orm import Session
 
@@ -25,6 +25,7 @@ from app.ai.local_intent import ENGINE_VERSION, interpret_business_query, normal
 from app.ai.personalization import load_assistant_preferences
 from app.ai.tools import run_result_page
 from app.core.database import get_db
+from app.schemas.validation import RequestModel
 from app.core.deps import require_permissions
 from app.models import (
     AIAction, AIIntentResolution, AIMessageFeedback, AIResultSession, AISavedView, AIUsage, AIWallet,
@@ -45,11 +46,11 @@ logger = logging.getLogger("edvatiq.ai")
 router = APIRouter(prefix="/ai", tags=["ai"])
 
 
-class ConfirmAction(BaseModel):
+class ConfirmAction(RequestModel):
     confirmation_token: str | None = None
 
 
-class SavedViewBody(BaseModel):
+class SavedViewBody(RequestModel):
     name: str = Field(min_length=2, max_length=160)
     description: str | None = Field(default=None, max_length=500)
     query_spec: dict
@@ -58,18 +59,18 @@ class SavedViewBody(BaseModel):
     version: int | None = None
 
 
-class FeedbackBody(BaseModel):
+class FeedbackBody(RequestModel):
     rating: str = Field(pattern="^(helpful|not_helpful)$")
     reason: str | None = Field(default=None, max_length=500)
 
 
-class ResultQueryBody(BaseModel):
+class ResultQueryBody(RequestModel):
     query_spec: dict
     cursor: str | None = None
     limit: int = Field(default=25, ge=1, le=100)
 
 
-class ConversationUpdate(BaseModel):
+class ConversationUpdate(RequestModel):
     title: str | None = Field(default=None, max_length=120)
     pinned: bool | None = None
     archived: bool | None = None

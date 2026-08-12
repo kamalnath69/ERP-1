@@ -19,6 +19,7 @@ vi.mock("@/lib/api", () => ({
 }));
 
 vi.mock("@/lib/razorpay", () => ({ loadRazorpayCheckout: vi.fn() }));
+vi.mock("@/lib/cashfree", () => ({ loadCashfreeCheckout: vi.fn() }));
 
 const catalog = {
   trial_enabled: false,
@@ -80,13 +81,12 @@ test("uses payment-first signup and never calls free registration when Trial is 
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 420)); });
   await act(async () => { buttonWith(container, "Continue").click(); });
 
-  inputs = container.querySelectorAll("input");
   await act(async () => {
-    inputValue(inputs[0], "Kavya");
-    inputValue(inputs[1], "Raman");
-    inputValue(inputs[2], "owner@example.com");
-    inputValue(inputs[3], "StrongPass123");
-    inputValue(inputs[4], "StrongPass123");
+    inputValue(container.querySelector("#admin-first-name"), "Kavya");
+    inputValue(container.querySelector("#admin-last-name"), "Raman");
+    inputValue(container.querySelector("#admin-email"), "owner@example.com");
+    inputValue(container.querySelector("#admin-password"), "StrongPass123");
+    inputValue(container.querySelector("#admin-password-confirm"), "StrongPass123");
   });
   await act(async () => { buttonWith(container, "Continue").click(); await Promise.resolve(); });
 

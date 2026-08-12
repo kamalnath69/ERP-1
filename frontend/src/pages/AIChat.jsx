@@ -6,6 +6,8 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { useForm } from "react-hook-form";
 import { useDispatch, useSelector } from "react-redux";
 import { useSearchParams } from "react-router-dom";
 import api from "@/lib/api";
@@ -15,6 +17,7 @@ import { useBusiness } from "@/contexts/BusinessContext";
 import SecondarySidebarLayout, { SecondarySidebarTrigger } from "@/components/layout/SecondarySidebarLayout";
 import AssistantPersonalizationSheet from "@/components/ai/AssistantPersonalizationSheet";
 import { Button } from "@/components/ui/button";
+import { FieldError } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -119,6 +122,9 @@ import {
 } from "@/store/api/aiCacheApi";
 import { baseApi } from "@/store/api/baseApi";
 import { QUERY_POLICIES, withSkip } from "@/store/api/queryPolicies";
+import {
+  conversationRenameSchema, feedbackReasonSchema, FORM_OPTIONS, validateFile,
+} from "@/lib/validation";
 import {
   selectAISidebarCollapsed,
   setAISidebarCollapsed,
@@ -348,6 +354,11 @@ export default function AIChat() {
     async (text, explicitContext = null) => {
       const question = (text || input).trim();
       if (!question || streaming) return;
+      if (question.length > 5000) {
+        toast.error("Keep your message within 5,000 characters");
+        inputRef.current?.focus();
+        return;
+      }
       if (activeConversation?.archived_at) {
         toast.error("Restore this chat before sending a new message");
         return;
@@ -530,8 +541,8 @@ export default function AIChat() {
     setRenameTitle(item.title || "");
   };
 
-  const saveRename = async () => {
-    const title = renameTitle.trim().replace(/\s+/g, " ");
+  const saveRename = async (value = renameTitle) => {
+    const title = value.trim().replace(/\s+/g, " ");
     if (!renameTarget || !title) return;
     const updated = await changeConversation(
       renameTarget,
@@ -603,9 +614,9 @@ export default function AIChat() {
     saveFeedback(message, rating);
   };
 
-  const submitNegativeFeedback = async () => {
+  const submitNegativeFeedback = async (value = feedbackReason) => {
     if (!feedbackTarget) return;
-    if (await saveFeedback(feedbackTarget, "not_helpful", feedbackReason)) {
+    if (await saveFeedback(feedbackTarget, "not_helpful", value)) {
       setFeedbackTarget(null);
       setFeedbackReason("");
     }
@@ -704,8 +715,16 @@ export default function AIChat() {
   };
 
   const upload = async (event) => {
+    const inputElement = event.target;
     const file = event.target.files?.[0];
     if (!file) return;
+    const validation = validateFile(file, {
+      label: "Document",
+      maxBytes: 20 * 1024 * 1024,
+      extensions: [".pdf", ".docx", ".txt", ".jpg", ".jpeg", ".png"],
+      mimeTypes: ["application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "text/plain", "image/jpeg", "image/png"],
+    });
+    if (validation) { toast.error(validation); inputElement.value = ""; return; }
     setUploading(true);
     const form = new FormData();
     form.append("file", file);
@@ -719,7 +738,7 @@ export default function AIChat() {
       toast.error(error.response?.data?.detail || "Could not upload document");
     } finally {
       setUploading(false);
-      event.target.value = "";
+      inputElement.value = "";
     }
   };
 
@@ -970,6 +989,7 @@ export default function AIChat() {
             <textarea
               ref={inputRef}
               rows={1}
+              maxLength={5000}
               className="premium-scrollbar min-h-10 max-h-32 flex-1 resize-none bg-transparent px-2 py-2.5 text-sm leading-5 outline-none"
               placeholder={conversationReadOnly ? "Start or restore a chat to continue" : isCollege ? "Ask about students, readiness, attendance, coding, or placements..." : "Ask about sales, clients, stock, appointments or documents..."}
               value={input}
@@ -1500,38 +1520,36 @@ function HistoryMenu({
   );
 }
 
-function RenameConversationDialog({ target, title, busy, onTitleChange, close, confirm }) {
-  const normalized = title.trim();
+function RenameConversationDialog({ target, title, busy, onTitleChange: _onTitleChange, close, confirm }) {
+  const form = useForm({ resolver: zodResolver(conversationRenameSchema), defaultValues: { title: "" }, ...FORM_OPTIONS });
+  const { formState, handleSubmit, register, reset, watch } = form;
+  useEffect(() => { if (target) reset({ title: title || "" }); }, [target?.id, title, reset]);
+  const value = watch("title") || "";
+  const submit = handleSubmit(({ title: nextTitle }) => confirm(nextTitle));
   return (
-    <Dialog open={!!target} onOpenChange={(open) => !open && close()}>
+    <Dialog open={!!target} onOpenChange={(open) => !open && !busy && close()}>
       <DialogContent>
-        <form
-          className="space-y-5"
-          onSubmit={(event) => {
-            event.preventDefault();
-            confirm();
-          }}
-        >
+        <form noValidate className="space-y-5" onSubmit={submit}>
           <DialogHeader>
             <DialogTitle>Rename chat</DialogTitle>
             <DialogDescription>Use a short title that makes this conversation easy to find.</DialogDescription>
           </DialogHeader>
           <Input
             autoFocus
-            value={title}
             maxLength={120}
-            onChange={(event) => onTitleChange(event.target.value)}
+            {...register("title")}
             aria-label="Chat title"
+            aria-invalid={Boolean(formState.errors.title)}
+            aria-describedby="rename-chat-error"
           />
+          <FieldError id="rename-chat-error" error={formState.errors.title} />
           <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
             <span>1 to 120 characters</span>
-            <span className="tabular-nums">{title.length}/120</span>
+            <span className="tabular-nums">{value.length}/120</span>
           </div>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={close} disabled={busy}>Cancel</Button>
-            <Button type="submit" disabled={busy || !normalized}>
-              {busy ? "Saving..." : "Save title"}
-            </Button>
+            <Button type="submit" loading={busy || formState.isSubmitting} loadingText="Saving title...">Save title</Button>
           </DialogFooter>
         </form>
       </DialogContent>
@@ -1539,10 +1557,16 @@ function RenameConversationDialog({ target, title, busy, onTitleChange, close, c
   );
 }
 
-function FeedbackDialog({ target, reason, busy, onReasonChange, close, confirm }) {
+function FeedbackDialog({ target, reason, busy, onReasonChange: _onReasonChange, close, confirm }) {
+  const form = useForm({ resolver: zodResolver(feedbackReasonSchema), defaultValues: { reason: "" }, ...FORM_OPTIONS });
+  const { formState, handleSubmit, register, reset, watch } = form;
+  useEffect(() => { if (target) reset({ reason: reason || "" }); }, [target?.id, reason, reset]);
+  const value = watch("reason") || "";
+  const submit = handleSubmit(({ reason: nextReason }) => confirm(nextReason));
   return (
-    <Dialog open={!!target} onOpenChange={(open) => !open && close()}>
+    <Dialog open={!!target} onOpenChange={(open) => !open && !busy && close()}>
       <DialogContent>
+        <form noValidate onSubmit={submit} className="space-y-5">
         <DialogHeader>
           <DialogTitle>What could be better?</DialogTitle>
           <DialogDescription>
@@ -1553,17 +1577,18 @@ function FeedbackDialog({ target, reason, busy, onReasonChange, close, confirm }
           autoFocus
           rows={4}
           maxLength={500}
-          value={reason}
-          onChange={(event) => onReasonChange(event.target.value)}
+          {...register("reason")}
+          aria-invalid={Boolean(formState.errors.reason)}
+          aria-describedby="feedback-reason-error"
           placeholder="For example: the answer missed the customer linked to this invoice."
         />
-        <div className="text-right text-xs tabular-nums text-muted-foreground">{reason.length}/500</div>
+        <FieldError id="feedback-reason-error" error={formState.errors.reason} />
+        <div className="text-right text-xs tabular-nums text-muted-foreground">{value.length}/500</div>
         <DialogFooter>
           <Button type="button" variant="outline" onClick={close} disabled={busy}>Cancel</Button>
-          <Button type="button" onClick={confirm} disabled={busy}>
-            {busy ? "Sending..." : "Send feedback"}
-          </Button>
+          <Button type="submit" loading={busy || formState.isSubmitting} loadingText="Sending feedback...">Send feedback</Button>
         </DialogFooter>
+        </form>
       </DialogContent>
     </Dialog>
   );
