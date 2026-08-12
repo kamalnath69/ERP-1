@@ -9,7 +9,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://erp-1-r978.onrender.com/api/:path*"
+      "destination": "https://erp-1-backend-seven.vercel.app/api/:path*"
     },
     {
       "source": "/(.*)",
