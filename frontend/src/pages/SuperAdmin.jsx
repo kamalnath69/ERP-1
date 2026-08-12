@@ -5,6 +5,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ValidatedActionDialog } from "@/components/forms/ValidatedActionDialog";
+import LegalConsole from "@/components/super/LegalConsole";
 import { usePendingAction, useStableIdempotencyKey } from "@/hooks/usePendingAction";
 import {
   approvalDecisionSchema, organizationDeletionSchema, ownerTransferSchema,
@@ -21,7 +22,8 @@ const sections = [
   ["overview", "Overview", ChartLineUp], ["organizations", "Organizations", Buildings],
   ["plans", "Plans", Stack], ["billing", "Billing", CreditCard], ["wallet", "AI Wallet", Wallet],
   ["team", "Platform Team", Users], ["support", "Support", Lifebuoy],
-  ["operations", "Operations", Pulse], ["audit", "Audit", Scroll], ["settings", "Settings", Gear],
+  ["operations", "Operations", Pulse], ["audit", "Audit", Scroll],
+  ["legal", "Legal & leads", ShieldCheck], ["settings", "Settings", Gear],
 ];
 
 export default function SuperAdmin() {
@@ -59,6 +61,7 @@ function Section({ name }) {
   if (name === "support") return <Support />;
   if (name === "operations") return <Operations />;
   if (name === "audit") return <Audit />;
+  if (name === "legal") return <LegalConsole />;
   if (name === "settings") return <Settings />;
   return <Overview />;
 }

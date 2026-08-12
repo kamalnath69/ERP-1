@@ -17,6 +17,7 @@ from app.models import (
 from app.services.audit import log_action
 from app.services.auth_security import token_hash
 from app.services.billing import fulfill_invoice
+from app.services.public_site import attach_checkout_acceptance
 
 
 ACTIVE_CHECKOUT_STATUSES = {"creating", "ready", "paid"}
@@ -271,6 +272,7 @@ def finalize_signup(
     )
     db.add(owner)
     db.flush()
+    attach_checkout_acceptance(db, checkout.id, organization.id, owner.id)
     location = Location(
         organization_id=organization.id,
         name=checkout.location_name,

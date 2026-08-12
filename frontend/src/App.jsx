@@ -4,11 +4,15 @@ import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import { BusinessProvider, useBusiness } from "@/contexts/BusinessContext";
 import { Toaster } from "@/components/ui/sonner";
 import AppLayout from "@/components/layout/AppLayout";
+import PublicSiteLayout from "@/components/public/PublicSiteLayout";
 import RouteGate from "@/components/routing/RouteGate";
 import { NotFoundPage } from "@/pages/SystemPages";
 import { PageSkeleton } from "@/components/system";
 
 const Landing = lazy(() => import("@/pages/Landing"));
+const DocsPage = lazy(() => import("@/pages/DocsPage"));
+const SecurityPage = lazy(() => import("@/pages/PublicPages").then((module) => ({ default: module.SecurityPage })));
+const LegalPage = lazy(() => import("@/pages/PublicPages").then((module) => ({ default: module.LegalPage })));
 const Login = lazy(() => import("@/pages/Login"));
 const Register = lazy(() => import("@/pages/Register"));
 const VerifyEmail = lazy(() => import("@/pages/VerifyEmail"));
@@ -72,7 +76,19 @@ const protectedPage = (Page) => <RequireAuth><Suspense fallback={<PageSkeleton /
 
 export default function App() {
   return <AuthProvider><BusinessProvider><BrowserRouter><Toaster richColors closeButton position="top-right" /><Suspense fallback={<PageSkeleton className="p-6" />}><Routes>
-    <Route path="/" element={<Landing />} />
+    <Route element={<PublicSiteLayout />}>
+      <Route index element={<Landing />} />
+      <Route path="/about" element={<Navigate to="/#about" replace />} />
+      <Route path="/contact" element={<Navigate to="/#contact" replace />} />
+      <Route path="/security" element={<SecurityPage />} />
+      <Route path="/docs/*" element={<DocsPage />} />
+      <Route path="/terms" element={<LegalPage kind="terms" />} />
+      <Route path="/terms/:version" element={<LegalPage kind="terms" />} />
+      <Route path="/privacy" element={<LegalPage kind="privacy" />} />
+      <Route path="/privacy/:version" element={<LegalPage kind="privacy" />} />
+      <Route path="/refund-policy" element={<LegalPage kind="refund" />} />
+      <Route path="/refund-policy/:version" element={<LegalPage kind="refund" />} />
+    </Route>
     <Route path="/login" element={<Login />} />
     <Route path="/register" element={<Register />} />
     <Route path="/verify-email" element={<VerifyEmail />} />

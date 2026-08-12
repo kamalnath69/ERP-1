@@ -33,6 +33,15 @@ const catalog = {
   }],
 };
 
+const legal = {
+  ready: true,
+  documents: {
+    terms: { id: "terms-v1", version: 1 },
+    privacy: { id: "privacy-v1", version: 1 },
+    refund: { id: "refund-v1", version: 1 },
+  },
+};
+
 function inputValue(input, value) {
   const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
   setter.call(input, value);
@@ -46,6 +55,7 @@ function buttonWith(container, text) {
 test("uses payment-first signup and never calls free registration when Trial is disabled", async () => {
   mocks.get.mockImplementation((url) => {
     if (url === "/billing/public/plans") return Promise.resolve({ data: catalog });
+    if (url === "/public/legal/current") return Promise.resolve({ data: legal });
     if (url === "/auth/organization-id/availability") return Promise.resolve({ data: { available: true, message: "Available", suggestions: [] } });
     throw new Error(`Unexpected GET ${url}`);
   });
@@ -93,10 +103,20 @@ test("uses payment-first signup and never calls free registration when Trial is 
   expect(container.textContent).toContain("Trial is currently unavailable");
   const state = container.querySelector('input[placeholder="Tamil Nadu"]');
   await act(async () => { inputValue(state, "Tamil Nadu"); });
+  await act(async () => { container.querySelector("#legal-accepted").click(); });
   await act(async () => { buttonWith(container, "Pay").click(); await Promise.resolve(); await Promise.resolve(); });
 
   expect(mocks.registerOrg).not.toHaveBeenCalled();
-  expect(mocks.post).toHaveBeenCalledWith("/auth/registration/checkout", expect.objectContaining({ plan: "growth", state: "Tamil Nadu" }));
+  expect(mocks.post).toHaveBeenCalledWith("/auth/registration/checkout", expect.objectContaining({
+    plan: "growth",
+    state: "Tamil Nadu",
+    legal_acceptance: {
+      accepted: true,
+      terms_document_id: "terms-v1",
+      privacy_document_id: "privacy-v1",
+      refund_document_id: "refund-v1",
+    },
+  }));
   expect(container.textContent).toContain("Verification reached");
 
   act(() => root.unmount());

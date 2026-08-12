@@ -9,6 +9,7 @@ import {
 import { toast } from "sonner";
 
 import PasswordStrength from "@/components/PasswordStrength";
+import AuthLegalLinks from "@/components/public/AuthLegalLinks";
 import { FieldError, FormRootError } from "@/components/ui/form";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -51,6 +52,7 @@ export default function Register() {
   const [catalog, setCatalog] = useState(null);
   const [catalogError, setCatalogError] = useState("");
   const [catalogAttempt, setCatalogAttempt] = useState(0);
+  const [legal, setLegal] = useState({ loading: true, ready: false, documents: {}, error: "" });
   const [interval, setInterval] = useState(searchParams.get("interval") === "annual" ? "annual" : "monthly");
   const [selectedPlanId, setSelectedPlanId] = useState(searchParams.get("plan") || "");
   const [checkoutSession, setCheckoutSession] = useState(readSavedCheckout);
@@ -68,6 +70,7 @@ export default function Register() {
       city: "", state: "", admin_first_name: "", admin_last_name: "", admin_email: "",
       admin_phone: "",
       admin_password: "", admin_password_confirm: "", plan: selectedPlanId, billing_interval: interval,
+      legal_accepted: false,
     },
   });
   const form = watch();
@@ -89,6 +92,17 @@ export default function Register() {
       .catch((error) => { if (error.code !== "ERR_CANCELED") setCatalogError("Plans could not be loaded. Please try again."); });
     return () => controller.abort();
   }, [catalogAttempt]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setLegal((current) => ({ ...current, loading: true, error: "" }));
+    api.get("/public/legal/current", { signal: controller.signal, forceRefetch: true })
+      .then(({ data }) => setLegal({ loading: false, ready: Boolean(data.ready), documents: data.documents || {}, error: "" }))
+      .catch((error) => {
+        if (error.code !== "ERR_CANCELED") setLegal({ loading: false, ready: false, documents: {}, error: "Registration policies could not be loaded." });
+      });
+    return () => controller.abort();
+  }, []);
 
   useEffect(() => {
     if (!catalog?.plans?.length) return;
@@ -238,6 +252,10 @@ export default function Register() {
   const submit = async (values) => {
     if (step !== 4 || !selectedPlan) return;
     clearErrors("root.server");
+    if (!legal.ready) {
+      setError("root.server", { type: "legal", message: "Registration is temporarily unavailable until the current legal documents are published." });
+      return;
+    }
     if (!isTrial && !values.state?.trim()) {
       setError("state", { type: "required", message: "Billing state is required for the GST invoice" }, { shouldFocus: true });
       return;
@@ -249,8 +267,18 @@ export default function Register() {
     }
     try {
       const {
-        admin_password_confirm: _confirm, plan: _plan, billing_interval: _billingInterval, ...payload
+        admin_password_confirm: _confirm, plan: _plan, billing_interval: _billingInterval,
+        legal_accepted: accepted, ...registration
       } = values;
+      const payload = {
+        ...registration,
+        legal_acceptance: {
+          accepted,
+          terms_document_id: legal.documents.terms.id,
+          privacy_document_id: legal.documents.privacy.id,
+          refund_document_id: legal.documents.refund.id,
+        },
+      };
       if (isTrial) {
         const result = await registerOrg(payload);
         finishRegistration(result);
@@ -324,10 +352,12 @@ export default function Register() {
           {!catalog && !catalogError && <div className="mt-6 grid gap-3 sm:grid-cols-2">{[1, 2, 3, 4].map((item) => <div key={item} className="h-40 animate-pulse rounded-2xl border bg-card" />)}</div>}
           {catalog && <><div className="mt-6 flex w-fit rounded-xl border bg-card p-1">{[["monthly", "Monthly"], ["annual", "Annual"]].map(([value, label]) => <button type="button" key={value} onClick={() => setInterval(value)} className={`rounded-lg px-4 py-2 text-sm font-semibold ${interval === value ? "bg-primary text-primary-foreground" : "text-muted-foreground"}`}>{label}</button>)}</div><div className="mt-4 grid gap-3 sm:grid-cols-2">{catalog.plans.filter((plan) => plan.signup_mode !== "contact").map((plan) => <PlanChoice key={plan.id} plan={plan} interval={interval} selected={selectedPlanId === plan.id} onSelect={() => setSelectedPlanId(plan.id)} />)}</div>{catalog.plans.some((plan) => plan.signup_mode === "contact") && <a href="mailto:sales@edvatiq.com?subject=Edvatiq%20Enterprise" className="mt-3 flex items-center justify-between rounded-xl border bg-card px-4 py-3 text-sm font-semibold">Need enterprise scale? Talk to sales <ArrowRight /></a>}</>}
           {selectedPlan && <div className="mt-5 rounded-2xl border bg-surface-subtle p-4"><div className="flex items-start justify-between gap-4"><div><div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Your selection</div><div className="mt-1 text-lg font-semibold">{selectedPlan.name} / {isTrial ? `${selectedPlan.trial_days || 30}-day trial` : interval}</div></div><div className="text-right"><div className="text-xl font-semibold">{isTrial ? "Free" : selectedQuote ? money(selectedQuote.total_paise) : "Unavailable"}</div>{selectedQuote?.tax_paise > 0 && <div className="text-[11px] text-muted-foreground">Includes {money(selectedQuote.tax_paise)} GST</div>}</div></div>{!isTrial && <div className="mt-4 flex items-start gap-2 border-t pt-4 text-xs text-muted-foreground"><LockKey className="shrink-0" />No workspace or owner account is created until {paymentProvider === "cashfree" ? "Cashfree" : "Razorpay"} confirms the payment.</div>}</div>}
-          <div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row"><Button type="button" variant="outline" disabled={pending} onClick={() => setStep(3)}>Back</Button><Button loading={pending} loadingText="Please wait..." disabled={!selectedPlan || (!isTrial && (!selectedQuote || !catalog?.payment_available))} className="flex-1">{isTrial ? "Create trial workspace" : selectedQuote ? <><CreditCard className="mr-2" />Pay {money(selectedQuote.total_paise)} and create workspace</> : "Plan unavailable"}</Button></div>
+          <div className="mt-5 rounded-xl border bg-card p-4"><label htmlFor="legal-accepted" className="flex cursor-pointer items-start gap-3"><input id="legal-accepted" type="checkbox" className="mt-1 h-4 w-4 rounded border-input accent-[hsl(var(--primary))]" checked={Boolean(form.legal_accepted)} onChange={(event) => setValue("legal_accepted", event.target.checked, { shouldDirty: true, shouldValidate: true })} disabled={!legal.ready || pending} /><span className="text-sm leading-6">I agree to the <Link to="/terms" target="_blank" className="font-semibold underline underline-offset-4">Terms</Link> and acknowledge the <Link to="/privacy" target="_blank" className="font-semibold underline underline-offset-4">Privacy</Link> and <Link to="/refund-policy" target="_blank" className="font-semibold underline underline-offset-4">Refund Policies</Link>.</span></label><FieldError id="legal-accepted-error" error={errors.legal_accepted} />{legal.loading && <p className="mt-2 text-xs text-muted-foreground">Loading current policies...</p>}{legal.error && <p className="mt-2 text-xs text-danger">{legal.error}</p>}{!legal.loading && !legal.ready && !legal.error && <p className="mt-2 text-xs text-warning">New registrations are paused until the current policies are published.</p>}</div>
+          <div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row"><Button type="button" variant="outline" disabled={pending} onClick={() => setStep(3)}>Back</Button><Button loading={pending} loadingText="Please wait..." disabled={!legal.ready || !selectedPlan || (!isTrial && (!selectedQuote || !catalog?.payment_available))} className="flex-1">{isTrial ? "Create trial workspace" : selectedQuote ? <><CreditCard className="mr-2" />Pay {money(selectedQuote.total_paise)} and create workspace</> : "Plan unavailable"}</Button></div>
         </section>}
       </form>
       <p className="mt-6 text-center text-sm text-muted-foreground">Already use Edvatiq? <Link to="/login" className="font-medium text-foreground">Sign in</Link></p>
+      <AuthLegalLinks className="mt-4 pb-3" />
     </div></main>
   </div>;
 }

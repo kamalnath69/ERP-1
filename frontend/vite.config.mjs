@@ -181,6 +181,16 @@ export default defineConfig(({ mode }) => {
                 test: /node_modules[\\/]echarts[\\/]/,
                 priority: 20,
               },
+              {
+                name: "phosphor-vendor",
+                test: /node_modules[\\/]@phosphor-icons[\\/]/,
+                priority: 14,
+              },
+              {
+                name: "radix-vendor",
+                test: /node_modules[\\/]@radix-ui[\\/]/,
+                priority: 12,
+              },
             ],
           },
         },

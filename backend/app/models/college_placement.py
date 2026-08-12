@@ -383,14 +383,22 @@ class CollegeDataConnector(TimestampMixin, Base):
 
 class CollegeImportRun(TimestampMixin, Base):
     __tablename__ = "college_import_runs"
+    __table_args__ = (
+        UniqueConstraint(
+            "credential_id", "idempotency_key",
+            name="uq_college_import_credential_idempotency",
+        ),
+    )
 
     id: Mapped[str] = uuid_pk()
     organization_id: Mapped[str] = tenant_fk()
     connector_id: Mapped[str | None] = mapped_column(UUID_STR, ForeignKey("college_data_connectors.id", ondelete="SET NULL"), index=True)
+    credential_id: Mapped[str | None] = mapped_column(UUID_STR, ForeignKey("college_integration_credentials.id", ondelete="SET NULL"), index=True)
     source_type: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
     resource_type: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(24), default="staged", nullable=False, index=True)
     idempotency_key: Mapped[str | None] = mapped_column(String(180), index=True)
+    request_hash: Mapped[str | None] = mapped_column(String(64))
     mapping: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     staged_rows: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
     validation_errors: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
@@ -420,6 +428,68 @@ class CollegeExternalRecord(TimestampMixin, Base):
     source_hash: Mapped[str | None] = mapped_column(String(128))
     manual_override_fields: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class CollegeClearanceSnapshot(TimestampMixin, Base):
+    __tablename__ = "college_clearance_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "student_profile_id", "as_of", "source_key",
+            name="uq_college_clearance_student_date_source",
+        ),
+    )
+
+    id: Mapped[str] = uuid_pk()
+    organization_id: Mapped[str] = tenant_fk()
+    student_profile_id: Mapped[str] = mapped_column(
+        UUID_STR, ForeignKey("college_student_profiles.id", ondelete="CASCADE"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
+    as_of: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    source_type: Mapped[str] = mapped_column(String(24), default="erp", nullable=False)
+    source_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    external_id: Mapped[str | None] = mapped_column(String(180), index=True)
+    source_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+
+
+class CollegeIntegrationCredential(TimestampMixin, Base):
+    __tablename__ = "college_integration_credentials"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "name", name="uq_college_integration_credential_name"),
+    )
+
+    id: Mapped[str] = uuid_pk()
+    organization_id: Mapped[str] = tenant_fk()
+    connector_id: Mapped[str] = mapped_column(
+        UUID_STR, ForeignKey("college_data_connectors.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    key_prefix: Mapped[str] = mapped_column(String(40), nullable=False, unique=True, index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    scopes: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_ip: Mapped[str | None] = mapped_column(String(80))
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        UUID_STR, ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+
+
+class CollegeIntegrationRateBucket(Base):
+    __tablename__ = "college_integration_rate_buckets"
+    __table_args__ = (
+        UniqueConstraint("credential_id", "window_start", name="uq_college_integration_rate_window"),
+    )
+
+    id: Mapped[str] = uuid_pk()
+    credential_id: Mapped[str] = mapped_column(
+        UUID_STR, ForeignKey("college_integration_credentials.id", ondelete="CASCADE"), index=True
+    )
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    request_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    record_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
 class CollegeResumeDraft(TimestampMixin, Base):

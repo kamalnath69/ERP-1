@@ -21,6 +21,13 @@ class ORMBase(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class LegalAcceptanceRequest(RequestModel):
+    accepted: Literal[True]
+    terms_document_id: str = Field(min_length=1, max_length=100)
+    privacy_document_id: str = Field(min_length=1, max_length=100)
+    refund_document_id: str = Field(min_length=1, max_length=100)
+
+
 class RegisterOrgRequest(RequestModel):
     organization_name: str = Field(min_length=2, max_length=200)
     organization_slug: str = Field(min_length=2, max_length=80, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -33,6 +40,7 @@ class RegisterOrgRequest(RequestModel):
     location_name: str = Field(default="Main Location", min_length=2, max_length=200)
     city: str | None = Field(default=None, max_length=120)
     state: str | None = Field(default=None, max_length=100)
+    legal_acceptance: LegalAcceptanceRequest
 
     @field_validator("admin_password")
     @classmethod

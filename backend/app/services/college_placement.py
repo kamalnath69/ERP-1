@@ -13,7 +13,7 @@ from app.models import (
     Client, CollegeAssessment, CollegeAssessmentScore, CollegeAttendanceRecord,
     CollegeAttendanceSession, CollegeAttendanceSnapshot, CollegeCareerEvidence,
     CollegeCareerProfile, CollegeCodingSnapshot, CollegeCohort, CollegeCourseOffering,
-    CollegeCodingAccount, CollegeDepartment, CollegePipelineStage, CollegePlacementApplication,
+    CollegeCodingAccount, CollegeClearanceSnapshot, CollegeDepartment, CollegePipelineStage, CollegePlacementApplication,
     CollegePlacementAssessment, CollegePlacementCompany, CollegePlacementOffer,
     CollegePlacementInterview, CollegePlacementOpportunity, CollegePreparationActivity, CollegeProgram,
     CollegeReadinessPolicy, CollegeReadinessSnapshot, CollegeStudentProfile,
@@ -461,13 +461,16 @@ def fee_clearance_by_student(
     ids = list(dict.fromkeys(student_ids))
     summaries = {
         student_id: {
-            "status": "not_assessed",
+            "status": "needs_review",
             "assigned_count": 0,
             "cleared_count": 0,
             "open_invoice_count": 0,
             "outstanding_paise": 0,
             "fee_record_ids": [],
             "invoice_ids": [],
+            "source_type": None,
+            "source_updated_at": None,
+            "is_stale": False,
         }
         for student_id in ids
     }
@@ -505,13 +508,46 @@ def fee_clearance_by_student(
 
     for summary in summaries.values():
         if summary["assigned_count"] == 0:
-            summary["status"] = "not_assessed"
+            summary["status"] = "needs_review"
         elif summary["outstanding_paise"] > 0:
             summary["status"] = "pending"
         elif summary["cleared_count"] == summary["assigned_count"]:
             summary["status"] = "cleared"
         else:
-            summary["status"] = "not_assessed"
+            summary["status"] = "needs_review"
+        if summary["assigned_count"]:
+            summary["source_type"] = "local_fees"
+
+    imported = db.execute(
+        select(CollegeClearanceSnapshot)
+        .where(
+            CollegeClearanceSnapshot.organization_id == organization_id,
+            CollegeClearanceSnapshot.student_profile_id.in_(ids),
+        )
+        .order_by(
+            CollegeClearanceSnapshot.student_profile_id,
+            CollegeClearanceSnapshot.source_updated_at.desc(),
+            CollegeClearanceSnapshot.id.desc(),
+        )
+    ).scalars()
+    latest_imported = _first_by_student(imported)
+    stale_before = datetime.now(timezone.utc) - timedelta(days=7)
+    for student_id, snapshot in latest_imported.items():
+        is_stale = snapshot.source_updated_at < stale_before
+        summaries[student_id] = {
+            "status": "needs_review" if is_stale else snapshot.status,
+            "assigned_count": 0,
+            "cleared_count": 0,
+            "open_invoice_count": 0,
+            "outstanding_paise": 0,
+            "fee_record_ids": [],
+            "invoice_ids": [],
+            "source_type": snapshot.source_type,
+            "source_updated_at": snapshot.source_updated_at,
+            "as_of": snapshot.as_of,
+            "source_record_id": snapshot.id,
+            "is_stale": is_stale,
+        }
     return summaries
 
 

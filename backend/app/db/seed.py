@@ -570,6 +570,8 @@ def seed_platform(db: Session) -> None:
     if not db.execute(select(PlatformUserRole).where(PlatformUserRole.user_id == admin.id, PlatformUserRole.role_id == owner_role.id)).scalar_one_or_none():
         db.add(PlatformUserRole(user_id=admin.id, role_id=owner_role.id))
     attach_organizations_to_control_plane(db)
+    from app.services.public_site import seed_legal_drafts
+    seed_legal_drafts(db)
     db.commit()
 
 

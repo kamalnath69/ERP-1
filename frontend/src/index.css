@@ -173,6 +173,17 @@
     @apply fixed inset-x-3 bottom-[4.8rem] z-30 flex gap-2 overflow-x-auto rounded-2xl border bg-card/95 p-2 shadow-xl backdrop-blur-xl md:static md:inset-auto md:z-auto md:w-fit md:overflow-visible md:border-0 md:bg-transparent md:p-0 md:shadow-none;
   }
   .command-key { @apply hidden rounded-md border bg-card px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground shadow-sm sm:inline-flex; }
+  .public-prose { @apply max-w-none text-[15px] leading-7 text-muted-foreground; }
+  .public-prose h1 { @apply mb-6 scroll-mt-24 text-4xl font-semibold leading-tight text-foreground sm:text-5xl; }
+  .public-prose h2 { @apply mb-3 mt-10 scroll-mt-24 border-t pt-8 text-2xl font-semibold leading-tight text-foreground; }
+  .public-prose h3 { @apply mb-2 mt-7 scroll-mt-24 text-lg font-semibold text-foreground; }
+  .public-prose h4 { @apply mb-2 mt-6 scroll-mt-24 text-base font-semibold text-foreground; }
+  .public-prose p { @apply my-4; }
+  .public-prose ul, .public-prose ol { @apply my-5 space-y-2 pl-6; }
+  .public-prose ul { @apply list-disc; }
+  .public-prose ol { @apply list-decimal; }
+  .public-prose li { @apply pl-1; }
+  .public-prose blockquote { @apply my-6 rounded-r-xl border-l-4 border-accent bg-accent/5 px-5 py-4 text-foreground; }
   .nav-item { @apply flex min-h-10 items-center rounded-xl px-3 text-sm font-medium transition-colors duration-150; }
   .nav-item-idle { @apply text-sidebar-muted hover:bg-secondary hover:text-sidebar-foreground dark:hover:bg-white/[0.06]; }
   .nav-item-active { @apply bg-primary text-primary-foreground shadow-sm; }
@@ -266,5 +277,23 @@
     animation-iteration-count: 1 !important;
     scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
+  }
+}
+
+@media print {
+  .marketing-site > header,
+  .marketing-site > footer,
+  .marketing-site aside,
+  .marketing-site button {
+    display: none !important;
+  }
+  .marketing-site,
+  .marketing-site main,
+  .marketing-site section {
+    background: white !important;
+    color: black !important;
+  }
+  .public-prose {
+    color: black !important;
   }
 }

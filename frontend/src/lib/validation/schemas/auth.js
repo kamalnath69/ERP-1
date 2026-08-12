@@ -55,6 +55,7 @@ export const registrationSchema = matchesField(z.object({
   admin_password_confirm: z.string().min(1, "Confirm your password"),
   plan: requiredText("Plan", { min: 2, max: 60 }),
   billing_interval: z.enum(["monthly", "annual"]),
+  legal_accepted: z.boolean().refine(Boolean, "Agree to the Terms and acknowledge the policies to continue"),
 }), "admin_password", "admin_password_confirm", "Passwords do not match");
 
 export const myProfileSchema = z.object({

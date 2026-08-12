@@ -328,7 +328,7 @@ class OfferBody(RequestModel):
 
 
 class ImportPreviewBody(RequestModel):
-    resource_type: Literal["students", "term_results", "attendance", "skills", "assessments"]
+    resource_type: Literal["students", "term_results", "attendance", "skills", "assessments", "internship_clearance"]
     rows: list[dict] = Field(min_length=1, max_length=5000)
     mapping: dict = Field(default_factory=dict)
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=180)
@@ -354,7 +354,7 @@ class ConnectorBody(RequestModel):
 
 
 class SyncBody(RequestModel):
-    resource_types: list[Literal["students", "term_results", "attendance", "skills", "assessments"]] = Field(default_factory=lambda: ["students", "term_results", "attendance"])
+    resource_types: list[Literal["students", "term_results", "attendance", "skills", "assessments", "internship_clearance"]] = Field(default_factory=lambda: ["students", "term_results", "attendance"])
     idempotency_key: str = Field(default_factory=lambda: str(uuid.uuid4()), min_length=8, max_length=120)
 
 
@@ -1510,7 +1510,7 @@ def preview_import(
 
 @router.post("/imports/csv/preview", status_code=status.HTTP_201_CREATED)
 async def preview_csv_import(
-    resource_type: Literal["students", "term_results", "attendance", "skills", "assessments"] = Form(...),
+    resource_type: Literal["students", "term_results", "attendance", "skills", "assessments", "internship_clearance"] = Form(...),
     mapping_json: str = Form("{}"),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),

@@ -28,6 +28,7 @@ from app.services.auth_security import (
 from app.services.email import send_auth_code_email
 from app.services.billing import create_provider_order, plan_price, verify_provider_payment
 from app.services.payment_gateways import active_gateway, gateway_config
+from app.services.public_site import create_legal_acceptance, validate_legal_acceptance
 from app.services.signup import (
     ACTIVE_CHECKOUT_STATUSES, CHECKOUT_TTL, checkout_response, expire_stale_checkouts,
     finalize_signup, hash_signup_password, organization_modules, public_plan_pair,
@@ -180,6 +181,7 @@ def organization_id_availability(value: str, db: Session = Depends(get_db)):
 @router.post("/register", status_code=201)
 def register_organization(body: RegisterOrgRequest, request: Request, db: Session = Depends(get_db)):
     expire_stale_checkouts(db)
+    legal_documents = validate_legal_acceptance(db, body.legal_acceptance)
     if not trial_signup_available(db):
         db.commit()
         raise HTTPException(status.HTTP_409_CONFLICT, "Free trial is unavailable. Choose a paid plan to create your workspace")
@@ -205,6 +207,16 @@ def register_organization(body: RegisterOrgRequest, request: Request, db: Sessio
     db.add(admin); db.flush()
     location = Location(organization_id=org.id, name=body.location_name, code="MAIN", city=body.city, state=body.state, is_primary=True)
     db.add(location); db.flush(); seed_organization_defaults(db, org, admin, location)
+    create_legal_acceptance(
+        db,
+        documents=legal_documents,
+        subject_email=admin.email,
+        source="trial_registration",
+        organization_id=org.id,
+        user_id=admin.id,
+        ip_address=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
     log_action(db, organization_id=org.id, user_id=admin.id, action="organization.register", resource_type="organization", resource_id=org.id, ip_address=client_ip(request))
     db.commit()
     sent, test_code = _deliver_code(db, admin, "email_verification", request)
@@ -254,6 +266,8 @@ def create_registration_checkout(
             return checkout_response(existing, body.checkout_token, key_id)
         db.commit()
         raise HTTPException(409, "This checkout request cannot be reused. Start a new checkout")
+
+    legal_documents = validate_legal_acceptance(db, body.legal_acceptance)
 
     slug = body.organization_slug.strip().lower()
     lock_organization_slug(db, slug)
@@ -330,6 +344,15 @@ def create_registration_checkout(
         succeeded=True,
     ))
     db.flush()
+    create_legal_acceptance(
+        db,
+        documents=legal_documents,
+        subject_email=checkout.admin_email,
+        source="paid_registration_checkout",
+        signup_checkout_id=checkout.id,
+        ip_address=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
     try:
         order = create_provider_order(
             config,

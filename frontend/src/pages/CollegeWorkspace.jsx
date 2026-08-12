@@ -1,11 +1,12 @@
 import React, { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import { Navigate, useNavigate, useSearchParams } from "react-router-dom";
+import { Link, Navigate, useNavigate, useSearchParams } from "react-router-dom";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
 import {
-  Archive, ArrowRight, Books, Briefcase, Buildings, CalendarCheck, ChartBar,
-  CheckCircle, Code, Database, FileArrowUp, Funnel, GraduationCap, ListChecks,
-  MagnifyingGlass, Medal, Plus, ShieldCheck, Sparkle, Student, Target, UsersThree,
+  Archive, ArrowClockwise, ArrowRight, Books, Briefcase, Buildings, CalendarCheck,
+  ChartBar, CheckCircle, Code, Copy, Database, FileArrowUp, Funnel, GraduationCap,
+  Key, ListChecks, MagnifyingGlass, Medal, Plus, ShieldCheck, Sparkle, Student,
+  Target, Trash, UsersThree,
 } from "@phosphor-icons/react";
 import { toast } from "sonner";
 
@@ -13,11 +14,14 @@ import SecondarySidebarLayout, {
   SecondarySidebarGroup, SecondarySidebarHeader, SecondarySidebarItem,
   SecondarySidebarNav, SecondarySidebarTrigger,
 } from "@/components/layout/SecondarySidebarLayout";
+import { ValidatedActionDialog } from "@/components/forms/ValidatedActionDialog";
 import {
   CursorListFooter, DataTable, DrawerForm, EmptyState, ErrorState, FilterBar,
   SegmentControl, StatusBadge, Surface,
 } from "@/components/system";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage, FormRootError } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -27,24 +31,28 @@ import { useAuth } from "@/contexts/AuthContext";
 import {
   useCommitCollegeImportMutation, useCreateCollegeApplicationMutation,
   useCreateCollegeAssessmentMutation, useCreateCollegeAttendanceMutation,
-  useCreateCollegeCompanyMutation, useCreateCollegeIntegrationMutation,
+  useCreateCollegeCompanyMutation, useCreateCollegeIntegrationCredentialMutation,
+  useCreateCollegeIntegrationMutation,
   useCreateCollegeOpportunityMutation, useGetCollegeAcademicEvidencePageQuery,
   useGetCollegeApplicationsQuery, useGetCollegeAssessmentRegisterQuery,
   useGetCollegeAssessmentsPageQuery, useGetCollegeAttendanceRegisterQuery,
   useGetCollegeAttendanceSessionsPageQuery, useGetCollegeCohortsPageQuery,
   useGetCollegeCompaniesQuery, useGetCollegeImportsQuery,
-  useGetCollegeIntegrationsQuery, useGetCollegeInternshipClearancePageQuery,
+  useGetCollegeIntegrationCredentialsQuery, useGetCollegeIntegrationsQuery,
+  useGetCollegeInternshipClearancePageQuery,
   useGetCollegeLeaderboardsQuery, useGetCollegeOpportunitiesQuery,
   useGetCollegePipelineStagesQuery, useGetCollegeReadinessPolicyQuery,
   useGetCollegeReferencesQuery, useGetCollegeStudentIntelligenceQuery,
   useMoveCollegeApplicationStageMutation, usePreviewCollegeCsvImportMutation,
-  useQueueCollegeIntegrationSyncMutation, useSaveCollegeAttendanceMutation,
+  useQueueCollegeIntegrationSyncMutation, useRevokeCollegeIntegrationCredentialMutation,
+  useRotateCollegeIntegrationCredentialMutation, useSaveCollegeAttendanceMutation,
   useSaveCollegeScoresMutation,
 } from "@/features/college/collegeApi";
 import useCursorPagination from "@/hooks/useCursorPagination";
 import {
   applyApiErrors, assessmentScoreSchema, attendanceRecordSchema, attendanceSessionSchema,
-  collegeApplicationSchema, collegeAssessmentSchema, collegeConnectorSchema, collegeDriveSchema,
+  collegeApplicationSchema, collegeAssessmentSchema, collegeConnectorSchema,
+  collegeDriveSchema, collegePushCredentialSchema,
   companySchema, FORM_OPTIONS, normalizeApiError,
 } from "@/lib/validation";
 
@@ -73,7 +81,7 @@ const NAVIGATION = [
   ] },
   { label: "Administration", items: [
     { id: "policy", label: "Readiness policy", icon: ShieldCheck, permission: "college.readiness.view" },
-    { id: "clearance", label: "Internship clearance", icon: CheckCircle, permission: "college.fees.view" },
+    { id: "clearance", label: "Internship clearance", icon: CheckCircle, permission: "college.placements.view" },
   ] },
 ];
 
@@ -421,18 +429,62 @@ function ImportsPanel() {
     { key: "rows", label: "Committed", render: (row) => `${row.committed_count}/${row.row_count}` },
     { key: "started", label: "Started", render: (row) => dateTime(row.created_at) },
   ];
-  return <div className="space-y-5"><OwnershipNotice /><Surface className="p-4 sm:p-5"><h2 className="font-semibold">Validate an academic evidence file</h2><p className="mt-1 text-xs text-muted-foreground">Nothing is committed until validation has completed and a staff member confirms the preview.</p><div className="mt-4 grid gap-3 sm:grid-cols-[190px_minmax(0,1fr)_auto]"><Select value={resource} onValueChange={setResource}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["students", "term_results", "attendance", "skills", "assessments"].map((value) => <SelectItem key={value} value={value}>{sentence(value)}</SelectItem>)}</SelectContent></Select><Input type="file" accept=".csv,text/csv" onChange={(event) => setFile(event.target.files?.[0] || null)} /><Button onClick={validate} disabled={!file || previewState.isLoading}>{previewState.isLoading ? "Validating..." : "Preview"}</Button></div>{preview && <div className="mt-4 flex flex-col gap-3 rounded-xl border bg-secondary/30 p-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="font-semibold">{preview.valid_count} of {preview.row_count} rows are ready</div><div className="mt-1 text-xs text-muted-foreground">{preview.failed_count ? `${preview.failed_count} rows need correction.` : "No validation errors found."}</div></div><Button onClick={commitRun} disabled={!preview.valid_count || commitState.isLoading}>{commitState.isLoading ? "Importing..." : "Commit valid rows"}</Button></div>}</Surface><Surface className="overflow-hidden"><PanelToolbar title="Import history" /><DataTable className="rounded-none border-0 shadow-none" rows={rows} columns={columns} loading={query.isLoading && !rows.length} empty={<EmptyState variant="inline" alignment="left" icon={Archive} title="No import runs yet" description="Validated CSV and ERP runs will appear here." />} /><ListFooter query={query} paging={paging} noun="import runs" /></Surface></div>;
+  return <div className="space-y-5"><OwnershipNotice /><Surface className="p-4 sm:p-5"><h2 className="font-semibold">Validate an academic evidence file</h2><p className="mt-1 text-xs text-muted-foreground">Nothing is committed until validation has completed and a staff member confirms the preview.</p><div className="mt-4 grid gap-3 sm:grid-cols-[190px_minmax(0,1fr)_auto]"><Select value={resource} onValueChange={setResource}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["students", "term_results", "attendance", "skills", "assessments", "internship_clearance"].map((value) => <SelectItem key={value} value={value}>{sentence(value)}</SelectItem>)}</SelectContent></Select><Input type="file" accept=".csv,text/csv" onChange={(event) => setFile(event.target.files?.[0] || null)} /><Button onClick={validate} disabled={!file || previewState.isLoading}>{previewState.isLoading ? "Validating..." : "Preview"}</Button></div>{preview && <div className="mt-4 flex flex-col gap-3 rounded-xl border bg-secondary/30 p-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="font-semibold">{preview.valid_count} of {preview.row_count} rows are ready</div><div className="mt-1 text-xs text-muted-foreground">{preview.failed_count ? `${preview.failed_count} rows need correction.` : "No validation errors found."}</div></div><Button onClick={commitRun} disabled={!preview.valid_count || commitState.isLoading}>{commitState.isLoading ? "Importing..." : "Commit valid rows"}</Button></div>}</Surface><Surface className="overflow-hidden"><PanelToolbar title="Import history" /><DataTable className="rounded-none border-0 shadow-none" rows={rows} columns={columns} loading={query.isLoading && !rows.length} empty={<EmptyState variant="inline" alignment="left" icon={Archive} title="No import runs yet" description="Validated CSV and ERP runs will appear here." />} /><ListFooter query={query} paging={paging} noun="import runs" /></Surface></div>;
 }
 
 function IntegrationsPanel() {
-  const [drawer, setDrawer] = useState(false);
-  const query = useGetCollegeIntegrationsQuery();
+  const [mode, setMode] = useState("pull");
+  const [pullDrawer, setPullDrawer] = useState(false);
+  const [credentialDrawer, setCredentialDrawer] = useState(false);
+  const [secret, setSecret] = useState(null);
+  const [rotateTarget, setRotateTarget] = useState(null);
+  const [revokeTarget, setRevokeTarget] = useState(null);
+  const [syncing, setSyncing] = useState(null);
+  const pullQuery = useGetCollegeIntegrationsQuery(undefined, { skip: mode !== "pull" });
+  const credentialQuery = useGetCollegeIntegrationCredentialsQuery(undefined, { skip: mode !== "push" });
   const [sync, syncState] = useQueueCollegeIntegrationSyncMutation();
+  const [rotate] = useRotateCollegeIntegrationCredentialMutation();
+  const [revoke] = useRevokeCollegeIntegrationCredentialMutation();
   const run = async (id) => {
-    try { await sync({ connectorId: id, resourceTypes: ["students", "term_results", "attendance", "skills", "assessments"], idempotencyKey: crypto.randomUUID() }).unwrap(); toast.success("ERP synchronization queued"); }
+    setSyncing(id);
+    try { await sync({ connectorId: id, resourceTypes: ["students", "term_results", "attendance", "skills", "assessments", "internship_clearance"], idempotencyKey: crypto.randomUUID() }).unwrap(); toast.success("ERP synchronization queued"); }
     catch (error) { toast.error(error?.data?.detail || "Synchronization could not be queued"); }
+    finally { setSyncing(null); }
   };
-  return <div className="space-y-5"><OwnershipNotice /><Surface className="overflow-hidden"><PanelToolbar title="Connected College ERP" action={<Button size="sm" onClick={() => setDrawer(true)}><Plus className="mr-2" />Connect ERP</Button>} /><div className="divide-y border-t">{(query.data?.items || []).map((row) => <div key={row.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center"><span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-secondary"><Database /></span><span className="min-w-0 flex-1"><span className="block font-semibold">{row.name}</span><span className="mt-1 block text-xs text-muted-foreground">{row.last_success_at ? `Last successful sync ${dateTime(row.last_success_at)}` : "No successful sync yet"}</span></span><StatusBadge status={row.status} /><Button variant="outline" size="sm" onClick={() => run(row.id)} disabled={!row.api_key_configured || syncState.isLoading}>Sync now</Button></div>)}{!query.isLoading && !query.data?.items?.length && <EmptyState variant="section" alignment="left" icon={Database} title="No ERP connected" description="Connect a credential-protected read-only source, or continue with reviewed CSV imports." primaryAction={<Button variant="outline" onClick={() => setDrawer(true)}>Connect ERP</Button>} className="m-4" />}</div><ConnectorDrawer open={drawer} onClose={() => setDrawer(false)} /></Surface></div>;
+  const rotateCredential = async (values) => {
+    const result = await rotate({ credentialId: rotateTarget.id, version: rotateTarget.version, expiresAt: new Date(values.expires_at).toISOString() }).unwrap();
+    setSecret({ name: result.name, value: result.secret, rotated: true });
+    toast.success("Push credential rotated");
+  };
+  const revokeCredential = async () => {
+    await revoke({ credentialId: revokeTarget.id, version: revokeTarget.version }).unwrap();
+    toast.success("Push credential revoked");
+  };
+  return <div className="space-y-5">
+    <OwnershipNotice />
+    <div className="flex items-center justify-between gap-3"><SegmentControl value={mode} onChange={setMode} items={[{ value: "pull", label: "ERP pulls" }, { value: "push", label: "ERP push API" }]} /><Button asChild variant="ghost" size="sm"><Link target="_blank" to={mode === "pull" ? "/docs/erp-pull" : "/docs/erp-push"}>Integration guide <ArrowRight className="ml-1.5" /></Link></Button></div>
+    {mode === "pull" ? <Surface className="overflow-hidden">
+      <PanelToolbar title="Connected College ERP" action={<Button size="sm" onClick={() => setPullDrawer(true)}><Plus className="mr-2" />Connect ERP</Button>} />
+      <div className="divide-y border-t">{(pullQuery.data?.items || []).map((row) => <div key={row.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center"><span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-secondary"><Database /></span><span className="min-w-0 flex-1"><span className="block font-semibold">{row.name}</span><span className="mt-1 block text-xs text-muted-foreground">{row.last_success_at ? `Last successful sync ${dateTime(row.last_success_at)}` : "No successful sync yet"}</span></span><StatusBadge status={row.status} /><Button variant="outline" size="sm" onClick={() => run(row.id)} loading={syncing === row.id && syncState.isLoading} loadingText="Queuing..." disabled={!row.api_key_configured}>Sync now</Button></div>)}
+        {!pullQuery.isLoading && !pullQuery.data?.items?.length && <EmptyState variant="section" alignment="left" icon={Database} title="No ERP pull connected" description="Connect a credential-protected read-only HTTPS source, or continue with reviewed CSV imports." primaryAction={<Button variant="outline" onClick={() => setPullDrawer(true)}>Connect ERP</Button>} className="m-4" />}
+      </div>
+      <ConnectorDrawer open={pullDrawer} onClose={() => setPullDrawer(false)} />
+    </Surface> : <Surface className="overflow-hidden">
+      <PanelToolbar title="Organization-scoped push credentials" action={<Button size="sm" onClick={() => setCredentialDrawer(true)}><Key className="mr-2" />Create credential</Button>} />
+      <div className="border-t bg-secondary/20 px-4 py-3 text-xs leading-5 text-muted-foreground sm:px-5">Secrets are shown once, stored only as hashes, limited to selected resources, and subject to expiry, revocation, idempotency, and audited rate limits.</div>
+      <div className="divide-y">{(credentialQuery.data?.items || []).map((row) => <div key={row.id} className="flex flex-col gap-3 p-4 sm:p-5 lg:flex-row lg:items-center">
+        <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-secondary"><Key /></span>
+        <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><span className="font-semibold">{row.name}</span><StatusBadge status={row.status} /><code className="rounded bg-secondary px-1.5 py-0.5 text-[10px]">{row.key_prefix}</code></div><p className="mt-1 text-xs text-muted-foreground">{row.scopes.map(sentence).join(", ")} / expires {dateTime(row.expires_at)}{row.last_used_at ? ` / last used ${dateTime(row.last_used_at)}` : " / never used"}</p></div>
+        {row.status === "active" && <div className="flex gap-2"><Button variant="outline" size="sm" onClick={() => setRotateTarget(row)}><ArrowClockwise className="mr-1.5" />Rotate</Button><Button variant="outline" size="sm" onClick={() => setRevokeTarget(row)}><Trash className="mr-1.5" />Revoke</Button></div>}
+      </div>)}
+        {!credentialQuery.isLoading && !credentialQuery.data?.items?.length && <EmptyState variant="section" alignment="left" icon={Key} title="No push credentials" description="Create a short-lived, resource-scoped credential when your College ERP needs to send authoritative evidence to Edvatiq." primaryAction={<Button variant="outline" onClick={() => setCredentialDrawer(true)}>Create credential</Button>} className="m-4" />}
+      </div>
+      <CredentialDrawer open={credentialDrawer} onClose={() => setCredentialDrawer(false)} onCreated={(result) => { setCredentialDrawer(false); setSecret({ name: result.name, value: result.secret, rotated: false }); }} />
+    </Surface>}
+    <SecretDialog secret={secret} onClose={() => setSecret(null)} />
+    <ValidatedActionDialog open={Boolean(rotateTarget)} onOpenChange={(open) => { if (!open) setRotateTarget(null); }} resetKey={rotateTarget?.id} title="Rotate ERP push credential" description={rotateTarget ? `Replace the secret for ${rotateTarget.name}.` : ""} impact="The current secret stops working immediately. Copy the replacement once and update the ERP before its next request." schema={collegePushCredentialSchema.pick({ expires_at: true })} defaultValues={{ expires_at: credentialExpiryValue(rotateTarget?.expires_at) }} fields={[{ name: "expires_at", label: "New expiry", type: "datetime-local" }]} submitLabel="Rotate credential" loadingText="Rotating..." onSubmit={rotateCredential} />
+    <ValidatedActionDialog open={Boolean(revokeTarget)} onOpenChange={(open) => { if (!open) setRevokeTarget(null); }} resetKey={revokeTarget?.id} title="Revoke ERP push credential" description={revokeTarget ? `Stop ${revokeTarget.name} from sending any further evidence.` : ""} impact="Revocation is immediate and cannot be reversed. Historical import runs and audit evidence remain available." schema={collegePushCredentialSchema.pick({}).strict()} defaultValues={{}} fields={[]} submitLabel="Revoke credential" loadingText="Revoking..." variant="destructive" onSubmit={revokeCredential} />
+  </div>;
 }
 
 function ReadinessPolicyPanel() {
@@ -645,6 +697,48 @@ function ConnectorDrawer({ open, onClose }) {
   return <DrawerForm open={open} onOpenChange={(value) => { if (!value && !pending) onClose(); }} title="Connect College ERP" description="Configure a credential-protected read-only HTTPS source."><Form {...form}><form noValidate onSubmit={submit} className="space-y-4"><CollegeFormField control={control} name="name" label="Connection name"><Input /></CollegeFormField><CollegeFormField control={control} name="base_url" label="HTTPS base URL"><Input type="url" /></CollegeFormField><div className="grid gap-4 sm:grid-cols-2"><CollegeSelectField control={control} name="auth_mode" label="Authentication" values={["bearer", "header"]} />{authMode === "header" && <CollegeFormField control={control} name="auth_header" label="Header name"><Input /></CollegeFormField>}<CollegeFormField control={control} name="sync_interval_hours" label="Sync interval (hours)"><Input inputMode="numeric" /></CollegeFormField></div><CollegeFormField control={control} name="api_key" label="API key" description="Stored securely and never returned to the browser."><Input type="password" autoComplete="off" /></CollegeFormField><FormRootError error={formState.errors.root?.server} /><Button type="submit" className="w-full" loading={pending} loadingText="Saving...">Save connector</Button></form></Form></DrawerForm>;
 }
 
+const PUSH_RESOURCES = ["students", "term_results", "attendance", "skills", "assessments", "internship_clearance"];
+
+function CredentialDrawer({ open, onClose, onCreated }) {
+  const [create, state] = useCreateCollegeIntegrationCredentialMutation();
+  const form = useForm({ resolver: zodResolver(collegePushCredentialSchema), defaultValues: { name: "", scopes: ["students"], expires_at: credentialExpiryValue() }, ...FORM_OPTIONS });
+  const { control, formState, handleSubmit, reset, setError } = form;
+  useEffect(() => { if (open) reset({ name: "", scopes: ["students"], expires_at: credentialExpiryValue() }); }, [open, reset]);
+  const pending = formState.isSubmitting || state.isLoading;
+  const submit = handleSubmit(async (values) => {
+    try {
+      const result = await create({ name: values.name, scopes: values.scopes, expires_at: new Date(values.expires_at).toISOString() }).unwrap();
+      toast.success("Push credential created");
+      reset();
+      onCreated(result);
+    } catch (error) {
+      const normalized = applyApiErrors(error, setError, { fallback: "Push credential could not be created" });
+      if (!Object.keys(normalized.fieldErrors).length) setError("root.server", { type: "server", message: normalized.message });
+    }
+  });
+  return <DrawerForm open={open} onOpenChange={(value) => { if (!value && !pending) onClose(); }} title="Create ERP push credential" description="Choose only the authoritative evidence this ERP is allowed to send.">
+    <Form {...form}><form noValidate onSubmit={submit} className="space-y-5">
+      <CollegeFormField control={control} name="name" label="Credential name" description="Use a recognizable system or environment name."><Input autoComplete="off" /></CollegeFormField>
+      <FormField control={control} name="scopes" render={({ field }) => <FormItem><FormLabel>Resource scopes</FormLabel><div className="grid gap-2 sm:grid-cols-2">{PUSH_RESOURCES.map((resource) => {
+        const checked = field.value?.includes(resource);
+        return <label key={resource} className="flex cursor-pointer items-start gap-3 rounded-xl border p-3 transition-colors hover:bg-secondary/40"><Checkbox checked={checked} onCheckedChange={(next) => field.onChange(next ? [...(field.value || []), resource] : (field.value || []).filter((item) => item !== resource))} /><span><span className="block text-sm font-medium">{sentence(resource)}</span><span className="mt-0.5 block text-xs text-muted-foreground">{pushScopeDescription(resource)}</span></span></label>;
+      })}</div><FormMessage /></FormItem>} />
+      <CollegeFormField control={control} name="expires_at" label="Credential expiry" description="Maximum lifetime is two years. Shorter credentials reduce integration risk."><Input type="datetime-local" /></CollegeFormField>
+      <Surface className="flex items-start gap-3 bg-secondary/35 p-4"><ShieldCheck className="mt-0.5 shrink-0" /><p className="text-xs leading-5 text-muted-foreground">The secret appears once after creation. Edvatiq stores only its cryptographic hash and never includes the full value in logs or later responses.</p></Surface>
+      <FormRootError error={formState.errors.root?.server} />
+      <Button type="submit" className="w-full" loading={pending} loadingText="Creating...">Create and reveal secret</Button>
+    </form></Form>
+  </DrawerForm>;
+}
+
+function SecretDialog({ secret, onClose }) {
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(secret.value); toast.success("Credential copied"); }
+    catch { toast.error("Copy failed. Select the credential manually"); }
+  };
+  return <Dialog open={Boolean(secret)} onOpenChange={(open) => { if (!open) onClose(); }}><DialogContent className="sm:max-w-2xl"><DialogHeader><DialogTitle>{secret?.rotated ? "Replacement credential" : "ERP push credential created"}</DialogTitle><DialogDescription>This is the only time the complete secret will be displayed.</DialogDescription></DialogHeader>{secret && <div className="space-y-4"><div className="rounded-xl border border-warning/30 bg-warning-soft p-4 text-sm"><strong>Store it now.</strong> Closing this dialog permanently hides the secret. Create or rotate the credential if it is lost.</div><div><div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{secret.name}</div><div className="mt-2 flex items-start gap-2"><code className="min-w-0 flex-1 break-all rounded-xl bg-foreground p-4 text-xs leading-6 text-background">{secret.value}</code><Button variant="outline" size="icon" onClick={copy} aria-label="Copy credential"><Copy /></Button></div></div><div className="flex justify-end"><Button onClick={onClose}>I have stored it</Button></div></div>}</DialogContent></Dialog>;
+}
+
 function CollegeFormField({ control, name, label, description, children }) {
   return <FormField control={control} name={name} render={({ field }) => <FormItem><FormLabel>{label}</FormLabel><FormControl>{React.cloneElement(children, { ...field, value: field.value ?? "" })}</FormControl>{description && <FormDescription>{description}</FormDescription>}<FormMessage /></FormItem>} />;
 }
@@ -676,6 +770,23 @@ function sentence(value) { return String(value || "").replaceAll("_", " ").repla
 function shortDate(value) { return value ? new Intl.DateTimeFormat("en-IN", { day: "numeric", month: "short", year: "numeric" }).format(new Date(value)) : "Not scheduled"; }
 function dateTime(value) { return value ? new Intl.DateTimeFormat("en-IN", { day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(value)) : "Not scheduled"; }
 function isoToday() { return new Date().toISOString().slice(0, 10); }
+function credentialExpiryValue(value) {
+  let date = value ? new Date(value) : new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
+  if (Number.isNaN(date.getTime()) || date.getTime() <= Date.now() + 5 * 60 * 1000) date = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60 * 1000);
+  return local.toISOString().slice(0, 16);
+}
+function pushScopeDescription(resource) {
+  const descriptions = {
+    students: "Identity and cohort records",
+    term_results: "Academic term outcomes",
+    attendance: "Course or term attendance evidence",
+    skills: "Verified student skills",
+    assessments: "Placement and academic assessments",
+    internship_clearance: "Cleared, pending, or needs review only",
+  };
+  return descriptions[resource];
+}
 function money(value) { return new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(Number(value || 0) / 100); }
 function packageRange(row) { if (!row.package_min_paise && !row.package_max_paise) return "Not disclosed"; return row.package_min_paise === row.package_max_paise ? money(row.package_min_paise) : `${money(row.package_min_paise)} - ${money(row.package_max_paise)}`; }
 function studentEvidenceCell(row) { return <div><div className="font-semibold">{row.student_name}</div><div className="mt-1 text-xs text-muted-foreground">{row.admission_number} / {row.cohort_name}</div></div>; }

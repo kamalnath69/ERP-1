@@ -1,5 +1,5 @@
 """College workspace, academic structure, attendance, assessment, and fee APIs."""
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Literal
 from zoneinfo import ZoneInfo
@@ -12,11 +12,11 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.schemas.validation import RequestModel
-from app.core.deps import require_entitlements, require_permissions
+from app.core.deps import require_any_permission, require_entitlements, require_permissions
 from app.models import (
     Client, CollegeAssessment, CollegeAssessmentScore, CollegeAttendanceRecord,
     CollegeAttendanceSession, CollegeCohort, CollegeCourse, CollegeCourseOffering,
-    CollegeAttendanceSnapshot, CollegeDepartment, CollegeFeePlan, CollegeProgram,
+    CollegeAttendanceSnapshot, CollegeClearanceSnapshot, CollegeDepartment, CollegeFeePlan, CollegeProgram,
     CollegeStudentFee, CollegeStudentProfile, CollegeTerm, CollegeTermResult,
     Employee, Location, SaleInvoice, SaleLine, User,
 )
@@ -934,7 +934,7 @@ def internship_clearance_page(
     cohort_id: str | None = None,
     cursor: str | None = None,
     limit: int = Query(25, ge=1, le=100),
-    user: User = Depends(require_permissions("college.fees.view")),
+    user: User = Depends(require_any_permission("college.placements.view", "college.fees.view")),
     db: Session = Depends(get_db),
 ):
     require_college(db, user)
@@ -956,18 +956,60 @@ def internship_clearance_page(
     ).outerjoin(SaleInvoice, SaleInvoice.id == CollegeStudentFee.invoice_id).where(
         CollegeStudentFee.organization_id == user.organization_id,
     ).group_by(CollegeStudentFee.student_profile_id).subquery()
-    status_expression = case(
+    local_status = case(
         (func.coalesce(fee_summary.c.assigned_count, 0) == 0, "needs_review"),
         (func.coalesce(fee_summary.c.outstanding_paise, 0) > 0, "pending"),
         else_="cleared",
     )
+    ranked_clearance = select(
+        CollegeClearanceSnapshot.student_profile_id,
+        CollegeClearanceSnapshot.status,
+        CollegeClearanceSnapshot.source_type,
+        CollegeClearanceSnapshot.source_updated_at,
+        func.row_number().over(
+            partition_by=CollegeClearanceSnapshot.student_profile_id,
+            order_by=(
+                CollegeClearanceSnapshot.source_updated_at.desc(),
+                CollegeClearanceSnapshot.id.desc(),
+            ),
+        ).label("rank"),
+    ).where(
+        CollegeClearanceSnapshot.organization_id == user.organization_id,
+    ).subquery()
+    latest_clearance = select(
+        ranked_clearance.c.student_profile_id,
+        ranked_clearance.c.status,
+        ranked_clearance.c.source_type,
+        ranked_clearance.c.source_updated_at,
+    ).where(ranked_clearance.c.rank == 1).subquery()
+    stale_before = datetime.now(timezone.utc) - timedelta(days=7)
+    imported_status = case(
+        (latest_clearance.c.source_updated_at < stale_before, "needs_review"),
+        else_=latest_clearance.c.status,
+    )
+    status_expression = case(
+        (latest_clearance.c.student_profile_id.is_not(None), imported_status),
+        else_=local_status,
+    )
+    source_updated_at = func.coalesce(
+        latest_clearance.c.source_updated_at,
+        fee_summary.c.source_updated_at,
+    )
+    source_type = case(
+        (latest_clearance.c.student_profile_id.is_not(None), latest_clearance.c.source_type),
+        (fee_summary.c.student_profile_id.is_not(None), "local_fees"),
+        else_=None,
+    )
     statement = select(
         CollegeStudentProfile, Client, CollegeProgram, CollegeCohort,
-        status_expression.label("clearance_status"), fee_summary.c.source_updated_at,
+        status_expression.label("clearance_status"), source_updated_at.label("source_updated_at"),
+        source_type.label("source_type"),
     ).join(Client, Client.id == CollegeStudentProfile.client_id).join(
         CollegeProgram, CollegeProgram.id == CollegeStudentProfile.program_id,
     ).join(CollegeCohort, CollegeCohort.id == CollegeStudentProfile.cohort_id).outerjoin(
         fee_summary, fee_summary.c.student_profile_id == CollegeStudentProfile.id,
+    ).outerjoin(
+        latest_clearance, latest_clearance.c.student_profile_id == CollegeStudentProfile.id,
     ).where(CollegeStudentProfile.organization_id == user.organization_id)
     if not access.unrestricted:
         statement = statement.where(CollegeStudentProfile.id.in_(access.student_ids))
@@ -1006,6 +1048,8 @@ def internship_clearance_page(
         "cohort_name": row[3].name,
         "clearance_status": row.clearance_status,
         "source_updated_at": row.source_updated_at,
+        "source_type": row.source_type,
+        "is_stale": bool(row.source_type and row.source_updated_at and row.source_updated_at < stale_before),
     } for row in rows]
     next_cursor = encode_cursor(
         scope="college.internship-clearance", organization_id=user.organization_id, filters=filters,

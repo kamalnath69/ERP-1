@@ -29,7 +29,8 @@ from app.models.college import (
 from app.models.college_placement import (
     CollegeApplicationStageEvent, CollegeAttendanceSnapshot, CollegeCareerEvidence,
     CollegeCareerProfile, CollegeCodingAccount, CollegeCodingSnapshot,
-    CollegeDataConnector, CollegeExternalRecord, CollegeImportRun,
+    CollegeClearanceSnapshot, CollegeDataConnector, CollegeExternalRecord, CollegeImportRun,
+    CollegeIntegrationCredential, CollegeIntegrationRateBucket,
     CollegePipelineStage, CollegePlacementApplication, CollegePlacementAssessment,
     CollegePlacementCompany, CollegePlacementInterview, CollegePlacementOffer,
     CollegePlacementOpportunity, CollegePreparationActivity, CollegeReadinessPolicy,
@@ -42,6 +43,7 @@ from app.models.ai import (
     ChatConversation, ChatMessage, ChatTurn,
 )
 from app.models.audit import AuditLog
+from app.models.public_site import DemoRequest, LegalAcceptance, LegalDocument
 from app.models.billing import (
     BillingCheckoutAttempt, Invoice, PaymentEvent, ProviderPlanMapping,
     Subscription, SubscriptionSchedule,

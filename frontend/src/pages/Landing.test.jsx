@@ -1,13 +1,18 @@
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 
+import PublicSiteLayout from "@/components/public/PublicSiteLayout";
 import Landing from "./Landing";
 
 const mocks = vi.hoisted(() => ({ get: vi.fn() }));
 
 vi.mock("@/lib/api", () => ({
   default: { get: mocks.get },
+}));
+
+vi.mock("@/contexts/AuthContext", () => ({
+  useAuth: () => ({ user: null }),
 }));
 
 const paidPlan = {
@@ -26,14 +31,19 @@ const paidPlan = {
   client_limit: 2000,
 };
 
-async function renderLanding(catalog) {
-  mocks.get.mockResolvedValueOnce({ data: catalog });
+async function renderLanding(catalog, { legalReady = true } = {}) {
+  mocks.get.mockImplementation((url) => {
+    if (url === "/public/site") return Promise.resolve({ data: { brand: "Edvatiq", support_email: "sales@edvatiq.com", legal_ready: legalReady, legal_documents: { privacy: { id: "privacy-1" } } } });
+    if (url === "/billing/public/plans") return Promise.resolve({ data: catalog });
+    throw new Error(`Unexpected GET ${url}`);
+  });
+  window.scrollTo = vi.fn();
   global.IS_REACT_ACT_ENVIRONMENT = true;
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
   await act(async () => {
-    root.render(<MemoryRouter><Landing /></MemoryRouter>);
+    root.render(<MemoryRouter><Routes><Route element={<PublicSiteLayout />}><Route index element={<Landing />} /></Route></Routes></MemoryRouter>);
     await Promise.resolve();
   });
   return {
@@ -48,12 +58,14 @@ async function renderLanding(catalog) {
 
 test("shows live paid pricing and paid-onboarding guidance when Trial is disabled", async () => {
   const view = await renderLanding({ plans: [paidPlan], trial_enabled: false, payment_available: true });
-  expect(view.container.textContent).toContain("Paid onboarding is active");
+  expect(view.container.textContent).toContain("Secure paid onboarding");
   expect(view.container.textContent).toContain("Growth");
   expect(view.container.textContent).toContain("Choose Growth");
   expect(view.container.textContent).not.toContain("30-day trial");
   expect(view.container.textContent).toContain("Book a working session");
+  expect(view.container.querySelector("#about")).not.toBeNull();
   expect(view.container.querySelector("#contact")).not.toBeNull();
+  expect(view.container.querySelector("#contact form")).not.toBeNull();
   expect(view.container.querySelector('a[href^="mailto:sales@edvatiq.com"]')).not.toBeNull();
   const growthLink = [...view.container.querySelectorAll("a")].find((link) => link.textContent.includes("Choose Growth"));
   expect(growthLink?.getAttribute("href")).toContain("plan=growth");
@@ -73,5 +85,18 @@ test("offers the published Trial without inventing a hardcoded plan", async () =
   expect(view.container.querySelector('a[href="/register?plan=trial"]')).not.toBeNull();
   const trialLinks = [...view.container.querySelectorAll("a")].filter((link) => link.getAttribute("href")?.includes("plan=trial"));
   expect(trialLinks.some((link) => link.getAttribute("href").includes("interval=monthly"))).toBe(true);
+  view.cleanup();
+});
+
+test("routes visitors to sales while legal publication is incomplete", async () => {
+  const view = await renderLanding(
+    { plans: [paidPlan], trial_enabled: false, payment_available: true },
+    { legalReady: false },
+  );
+  expect(view.container.querySelector('a[href^="/register"]')).toBeNull();
+  expect(view.container.textContent).toContain("Talk to sales");
+  const demoLinks = [...view.container.querySelectorAll("a")].filter((link) => link.textContent.trim() === "Book a demo");
+  expect(demoLinks).toHaveLength(1);
+  expect(demoLinks[0].getAttribute("href")).toBe("/#contact");
   view.cleanup();
 });

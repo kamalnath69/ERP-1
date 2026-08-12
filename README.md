@@ -164,3 +164,24 @@ Deploy only the `frontend` directory to Vercel and keep FastAPI, PostgreSQL, and
 3. Add the final frontend URL to the backend `APP_URL` and `CORS_ORIGINS`, enable secure cookies, then redeploy both services.
 
 The frontend Vercel configuration preserves React Router deep links, proxies API and streaming requests, and applies immutable caching only to hashed static assets.
+
+## Backend deployment lifecycle
+
+Production API instances do not run migrations or seed demo data while handling a cold start. Run database initialization once as a pre-deploy or one-off job:
+
+```powershell
+cd backend
+python -c "from server import init_database; init_database(run_seeding=False)"
+```
+
+Then start the API with both lifecycle flags disabled:
+
+```dotenv
+ENVIRONMENT=production
+RUN_STARTUP_MIGRATIONS=false
+RUN_STARTUP_SEEDING=false
+```
+
+`GET /api/health` verifies that the API loaded. `GET /api/ready` additionally verifies that PostgreSQL is reachable. Workers still require persistent infrastructure even if the HTTP API is temporarily hosted on a serverless platform.
+
+For a Vercel FastAPI deployment, set the project Root Directory to `backend`, leave Build and Output settings empty, and configure at least `DATABASE_URL` and `JWT_SECRET_KEY` for the target environment. Use a pooled PostgreSQL URL, `DATABASE_POOL_SIZE=1`, and `DATABASE_MAX_OVERFLOW=0`. Environment changes apply only to a new deployment.

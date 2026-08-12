@@ -3,12 +3,15 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
+import hashlib
+import json
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import (
-    Client, CollegeAttendanceSnapshot, CollegeCareerEvidence, CollegeCohort,
+    Client, CollegeAttendanceSnapshot, CollegeCareerEvidence, CollegeClearanceSnapshot, CollegeCohort,
     CollegeExternalRecord, CollegeImportRun, CollegePlacementAssessment,
     CollegeProgram, CollegeStudentProfile, CollegeTermResult,
 )
@@ -20,6 +23,7 @@ RESOURCE_FIELDS = {
     "attendance": ("external_id", "admission_number", "scope", "classes_held", "classes_attended", "attendance_percent", "as_of"),
     "skills": ("external_id", "admission_number", "title", "proficiency", "verified", "evidence_url"),
     "assessments": ("external_id", "admission_number", "title", "assessment_type", "score_percent", "assessed_on", "provider"),
+    "internship_clearance": ("external_id", "admission_number", "status", "as_of", "source_updated_at"),
 }
 
 
@@ -91,6 +95,22 @@ def _date(value, field: str, errors: list[str]):
         return None
 
 
+def _datetime(value, field: str, errors: list[str]):
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            errors.append(f"{field} must use ISO 8601 format")
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.isoformat()
+
+
 def validate_row(row: dict, resource_type: str) -> tuple[dict, list[str]]:
     output = dict(row)
     errors = []
@@ -127,6 +147,17 @@ def validate_row(row: dict, resource_type: str) -> tuple[dict, list[str]]:
             errors.append("title is required")
         output["score_percent"] = _decimal(row.get("score_percent"), "score_percent", errors)
         output["assessed_on"] = _date(row.get("assessed_on"), "assessed_on", errors)
+    elif resource_type == "internship_clearance":
+        normalized_status = str(row.get("status") or "").strip().lower()
+        if normalized_status not in {"cleared", "pending", "needs_review"}:
+            errors.append("status must be cleared, pending, or needs_review")
+        output["status"] = normalized_status
+        output["as_of"] = _date(row.get("as_of") or date.today(), "as_of", errors)
+        output["source_updated_at"] = _datetime(
+            row.get("source_updated_at") or datetime.now(timezone.utc),
+            "source_updated_at",
+            errors,
+        )
     return output, errors
 
 
@@ -140,7 +171,9 @@ def stage_rows(
     rows: list[dict],
     mapping: dict,
     connector_id: str | None = None,
+    credential_id: str | None = None,
     idempotency_key: str | None = None,
+    request_hash: str | None = None,
     allowed_student_ids: set[str] | None = None,
     allowed_program_ids: set[str] | None = None,
     allowed_cohort_ids: set[str] | None = None,
@@ -195,10 +228,12 @@ def stage_rows(
     run = CollegeImportRun(
         organization_id=organization_id,
         connector_id=connector_id,
+        credential_id=credential_id,
         source_type=source_type,
         resource_type=resource_type,
         status="ready" if valid_count else "invalid",
         idempotency_key=idempotency_key,
+        request_hash=request_hash,
         mapping=mapping,
         staged_rows=staged,
         validation_errors=validation_errors,
@@ -252,6 +287,12 @@ def _external_link(
             last_seen_at=now,
         )
         db.add(link)
+    if row.get("source_updated_at"):
+        source_updated_at = datetime.fromisoformat(str(row["source_updated_at"]).replace("Z", "+00:00"))
+        link.source_updated_at = source_updated_at.replace(tzinfo=source_updated_at.tzinfo or timezone.utc)
+    link.source_hash = hashlib.sha256(
+        json.dumps(row, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
     return link
 
 
@@ -295,6 +336,7 @@ def commit_run(
         if not item.get("valid"):
             continue
         row = item["data"]
+        savepoint = db.begin_nested()
         try:
             student = _student(db, run.organization_id, str(row["admission_number"]).strip())
             if allowed_student_ids is not None and student and student.id not in allowed_student_ids:
@@ -491,8 +533,45 @@ def commit_run(
                     record.external_id = external_id
                     db.flush()
                     _external_link(db, run, row, "college_placement_assessment", record.id)
+                elif run.resource_type == "internship_clearance":
+                    as_of = date.fromisoformat(row["as_of"])
+                    source_updated_at = datetime.fromisoformat(str(row["source_updated_at"]).replace("Z", "+00:00"))
+                    if source_updated_at.tzinfo is None:
+                        source_updated_at = source_updated_at.replace(tzinfo=timezone.utc)
+                    record, manual_overrides = _linked_record(
+                        db, run, row, CollegeClearanceSnapshot, "college_clearance_snapshot",
+                    )
+                    if not record:
+                        record = db.execute(select(CollegeClearanceSnapshot).where(
+                            CollegeClearanceSnapshot.student_profile_id == student.id,
+                            CollegeClearanceSnapshot.as_of == as_of,
+                            CollegeClearanceSnapshot.source_key == source_key,
+                        )).scalar_one_or_none()
+                    if not record:
+                        record = CollegeClearanceSnapshot(
+                            organization_id=run.organization_id,
+                            student_profile_id=student.id,
+                            as_of=as_of,
+                            source_type=run.source_type,
+                            source_key=source_key,
+                            source_updated_at=source_updated_at,
+                        )
+                        db.add(record)
+                    _apply_import_values(record, {
+                        "status": row["status"],
+                        "as_of": as_of,
+                        "source_updated_at": source_updated_at,
+                    }, manual_overrides)
+                    record.external_id = str(row.get("external_id")) if row.get("external_id") is not None else None
+                    db.flush()
+                    _external_link(db, run, row, "college_clearance_snapshot", record.id)
+            savepoint.commit()
             committed += 1
+        except IntegrityError:
+            savepoint.rollback()
+            failures.append({"row": item.get("row"), "errors": ["Record conflicts with an existing College record"]})
         except (ValueError, TypeError) as exc:
+            savepoint.rollback()
             failures.append({"row": item.get("row"), "errors": [str(exc)]})
     run.committed_count = committed
     run.failed_count = len(failures)

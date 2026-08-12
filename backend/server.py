@@ -7,9 +7,10 @@ from pathlib import Path
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
 from starlette.middleware.cors import CORSMiddleware
 
-from app.api.v1 import access, ai, auth, billing, business, client_intelligence, clients, clinic, college, college_placement, dashboard, documents, gym, inventory, misc, notifications, reports, roles, sales, salon, settings as business_settings, super_admin, team, users
+from app.api.v1 import access, ai, auth, billing, business, client_intelligence, clients, clinic, college, college_integrations, college_placement, dashboard, documents, gym, inventory, misc, notifications, public_site, reports, roles, sales, salon, settings as business_settings, super_admin, team, users
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.services.auth_security import valid_csrf_token
@@ -53,13 +54,16 @@ def _install_asyncio_exception_filter():
     return restore
 
 
-def init_database():
+def init_database(*, run_migrations: bool = True, run_seeding: bool = True):
     from alembic import command
     from alembic.config import Config
     from app.db.seed import create_demo_businesses, seed_client_signal_jobs, seed_platform, seed_welcome_notifications
 
     backend_dir = Path(__file__).resolve().parent
-    command.upgrade(Config(str(backend_dir / "alembic.ini")), "head")
+    if run_migrations:
+        command.upgrade(Config(str(backend_dir / "alembic.ini")), "head")
+    if not run_seeding:
+        return
     with SessionLocal() as db:
         seed_platform(db)
         create_demo_businesses(db)
@@ -72,13 +76,33 @@ def init_database():
 async def lifespan(_app: FastAPI):
     restore_exception_handler = _install_asyncio_exception_filter()
     try:
-        init_database()
+        if settings.RUN_STARTUP_MIGRATIONS or settings.RUN_STARTUP_SEEDING:
+            logger.info(
+                "database_startup_init migrations=%s seeding=%s",
+                settings.RUN_STARTUP_MIGRATIONS,
+                settings.RUN_STARTUP_SEEDING,
+            )
+            await asyncio.to_thread(
+                init_database,
+                run_migrations=settings.RUN_STARTUP_MIGRATIONS,
+                run_seeding=settings.RUN_STARTUP_SEEDING,
+            )
+        else:
+            logger.info("database_startup_init skipped")
         yield
     finally:
         restore_exception_handler()
 
 
-app = FastAPI(title="Edvatiq Business Manager API", version="2.0.0", lifespan=lifespan)
+production = settings.ENVIRONMENT == "production"
+app = FastAPI(
+    title="Edvatiq Business Manager API",
+    version="2.0.0",
+    lifespan=lifespan,
+    docs_url=None if production else "/docs",
+    redoc_url=None if production else "/redoc",
+    openapi_url=None if production else "/openapi.json",
+)
 
 
 @app.middleware("http")
@@ -91,6 +115,7 @@ async def csrf_protection(request: Request, call_next):
         "/api/auth/email/verify", "/api/auth/password/forgot", "/api/auth/password/reset",
         "/api/auth/platform-invite/accept", "/api/auth/registration/checkout",
         "/api/auth/registration/payment/verify",
+        "/api/public/demo-requests",
     }
     public_signup_mock = request.url.path.startswith("/api/auth/registration/checkouts/") and request.url.path.endswith("/mock-pay")
     if unsafe and cookie_authenticated and not bearer_authenticated and request.url.path not in public_auth_paths and not public_signup_mock:
@@ -117,7 +142,7 @@ async def publish_tenant_changes(request: Request, call_next):
 
 
 api = APIRouter(prefix="/api")
-for router in [auth.router, users.router, roles.router, access.router, clients.router, client_intelligence.router, dashboard.router, inventory.router, sales.router, salon.router, business_settings.router, team.router, business.router, gym.router, clinic.router, college.router, college_placement.router, documents.router, notifications.router, ai.router, reports.router, billing.router, super_admin.router, misc.router]:
+for router in [auth.router, users.router, roles.router, access.router, clients.router, client_intelligence.router, dashboard.router, inventory.router, sales.router, salon.router, business_settings.router, team.router, business.router, gym.router, clinic.router, college.router, college_placement.router, college_integrations.credential_router, college_integrations.integration_router, documents.router, notifications.router, ai.router, reports.router, billing.router, public_site.router, public_site.super_router, super_admin.router, misc.router]:
     api.include_router(router)
 
 
@@ -127,6 +152,20 @@ def root(): return {"service": "Edvatiq Business Manager", "version": "2.0.0"}
 
 @api.get("/health")
 def health(): return {"status": "ok"}
+
+
+@api.get("/ready")
+def readiness():
+    try:
+        with SessionLocal() as db:
+            db.execute(text("SELECT 1"))
+    except Exception as exc:
+        logger.error("database_readiness_failed error_type=%s", type(exc).__name__)
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unavailable", "dependency": "database"},
+        )
+    return {"status": "ready"}
 
 
 @app.exception_handler(HTTPException)

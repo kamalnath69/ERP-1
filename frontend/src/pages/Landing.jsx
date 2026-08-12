@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 import { Link } from "react-router-dom";
 import {
   ArrowRight, Barbell, Briefcase, CalendarCheck, ChartLineUp, Check,
@@ -6,7 +6,9 @@ import {
   Sparkle, Stethoscope, Student, UsersThree, WarningCircle,
 } from "@phosphor-icons/react";
 
-import api from "@/lib/api";
+import { usePublicSite } from "@/components/public/PublicSiteLayout";
+import DemoRequestForm from "@/components/public/DemoRequestForm";
+import PageMeta from "@/components/public/PageMeta";
 
 const industries = [
   {
@@ -48,17 +50,8 @@ const journeySteps = [
   ["03", "Act with confidence", "Use grounded AI and connected workflows to take the next step, with permissions and confirmations protecting sensitive actions."],
 ];
 
-const demoBookingUrl = (import.meta.env.VITE_DEMO_BOOKING_URL || "").trim()
-  || "mailto:sales@edvatiq.com?subject=Book%20an%20Edvatiq%20demo&body=Hi%20Edvatiq%20team%2C%0A%0AI%27d%20like%20to%20book%20a%20demo.%0A%0AOrganization%3A%0AIndustry%3A%0ATeam%20size%3A%0A";
-const opensNewWindow = /^https?:\/\//i.test(demoBookingUrl);
-
 function DemoLink({ children, className = "" }) {
-  return <a
-    href={demoBookingUrl}
-    className={className}
-    target={opensNewWindow ? "_blank" : undefined}
-    rel={opensNewWindow ? "noreferrer" : undefined}
-  >{children}</a>;
+  return <Link to="/#contact" className={className}>{children}</Link>;
 }
 
 const money = (paise) => new Intl.NumberFormat("en-IN", {
@@ -67,51 +60,12 @@ const money = (paise) => new Intl.NumberFormat("en-IN", {
   maximumFractionDigits: 0,
 }).format(Number(paise || 0) / 100);
 
-function usePublicPlans() {
-  const [catalog, setCatalog] = useState(null);
-  const [error, setError] = useState("");
-  const [attempt, setAttempt] = useState(0);
-  useEffect(() => {
-    const controller = new AbortController();
-    setError("");
-    api.get("/billing/public/plans", { signal: controller.signal, forceRefetch: true })
-      .then(({ data }) => setCatalog(data))
-      .catch((requestError) => {
-        if (requestError.code !== "ERR_CANCELED") setError("Pricing is temporarily unavailable.");
-      });
-    return () => controller.abort();
-  }, [attempt]);
-  return { catalog, error, retry: () => setAttempt((value) => value + 1) };
-}
-
 export default function Landing() {
-  const { catalog, error, retry } = usePublicPlans();
+  const { site, catalog, error, retry } = usePublicSite();
   const trialEnabled = Boolean(catalog?.trial_enabled);
-  const primaryLabel = catalog ? (trialEnabled ? "Start free" : "View plans") : "View plans";
-  return <div className="marketing-site min-h-screen overflow-hidden bg-background text-foreground">
-    <header className="sticky top-0 z-50 border-b bg-background/85 backdrop-blur-xl">
-      <div className="mx-auto flex h-16 max-w-[1440px] items-center justify-between px-4 sm:px-6 lg:px-8">
-        <Link to="/" className="flex items-center gap-2.5" aria-label="Edvatiq home">
-          <span className="grid h-9 w-9 place-items-center rounded-xl bg-primary text-sm font-bold text-primary-foreground shadow-sm">E</span>
-          <span className="hidden font-marketing text-xl font-semibold min-[360px]:inline">Edvatiq</span>
-        </Link>
-        <nav className="hidden items-center gap-6 text-sm font-medium text-muted-foreground lg:flex" aria-label="Primary navigation">
-          <a className="transition-colors hover:text-foreground" href="#platform">Platform</a>
-          <a className="transition-colors hover:text-foreground" href="#industries">Industries</a>
-          <a className="transition-colors hover:text-foreground" href="#ai">Edvatiq AI</a>
-          <a className="transition-colors hover:text-foreground" href="#pricing">Pricing</a>
-          <a className="transition-colors hover:text-foreground" href="#contact">Book a demo</a>
-        </nav>
-        <div className="flex items-center gap-1 sm:gap-2">
-          <Link to="/login" className="rounded-xl px-3 py-2 text-sm font-semibold transition-colors hover:bg-secondary sm:px-4">Sign in</Link>
-          {trialEnabled
-            ? <Link to="/register?plan=trial" className="rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground shadow-sm transition-transform hover:-translate-y-0.5 sm:px-5">{primaryLabel}</Link>
-            : <a href="#pricing" className="rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground shadow-sm transition-transform hover:-translate-y-0.5 sm:px-5">{primaryLabel}</a>}
-        </div>
-      </div>
-    </header>
-
-    <main>
+  const signupReady = Boolean(site?.legal_ready);
+  return <div className="overflow-hidden">
+    <PageMeta title="Edvatiq | Placement intelligence and focused operations" description="Evidence-backed AI and focused workspaces for colleges, gyms, salons, and clinics." path="/" />
       <section className="soft-glow relative border-b">
         <div className="paper-grid absolute inset-0 opacity-[0.28] [mask-image:linear-gradient(to_bottom,black,transparent_88%)]" />
         <div className="relative mx-auto grid min-h-[calc(100dvh-4rem)] max-w-[1440px] items-center gap-12 px-4 py-14 sm:px-6 lg:grid-cols-12 lg:px-8 lg:py-20">
@@ -127,10 +81,12 @@ export default function Landing() {
               Edvatiq brings daily operations, people intelligence, placement readiness, and grounded AI into one calm workspace for Indian organizations.
             </p>
             <div className="mt-8 flex flex-col gap-3 sm:flex-row">
-              {trialEnabled
+              {!signupReady
+                ? <a href="#platform" className="inline-flex h-12 items-center justify-center gap-2 rounded-xl bg-primary px-6 text-sm font-semibold text-primary-foreground shadow-lg shadow-primary/10 transition-transform hover:-translate-y-0.5">Explore the platform <ArrowRight /></a>
+                : trialEnabled
                 ? <Link to="/register?plan=trial" className="inline-flex h-12 items-center justify-center gap-2 rounded-xl bg-primary px-6 text-sm font-semibold text-primary-foreground shadow-lg shadow-primary/10 transition-transform hover:-translate-y-0.5">Create your workspace <ArrowRight /></Link>
                 : <a href="#pricing" className="inline-flex h-12 items-center justify-center gap-2 rounded-xl bg-primary px-6 text-sm font-semibold text-primary-foreground shadow-lg shadow-primary/10 transition-transform hover:-translate-y-0.5">Choose your plan <ArrowRight /></a>}
-              <DemoLink className="inline-flex h-12 items-center justify-center rounded-xl border bg-card px-6 text-sm font-semibold shadow-sm transition-colors hover:bg-secondary">Book a demo</DemoLink>
+              <a href={!signupReady || trialEnabled ? "#pricing" : "#platform"} className="inline-flex h-12 items-center justify-center rounded-xl border bg-card px-6 text-sm font-semibold shadow-sm transition-colors hover:bg-secondary">{!signupReady || trialEnabled ? "Compare plans" : "Explore product"}</a>
             </div>
             <div className="mt-9 flex flex-wrap gap-x-6 gap-y-3 text-xs font-medium text-muted-foreground">
               {[trialEnabled ? "30-day trial" : "Secure paid onboarding", "GST-ready pricing", "Gym, Salon, Clinic, and College"].map((item) => <span key={item} className="inline-flex items-center gap-2"><CheckCircle className="text-positive" weight="fill" />{item}</span>)}
@@ -165,12 +121,12 @@ export default function Landing() {
         </div>
       </section>
 
-      <section id="workflow" className="border-b bg-surface-subtle">
+      <section id="about" className="scroll-mt-16 border-b bg-surface-subtle">
         <div className="mx-auto grid max-w-[1440px] gap-12 px-4 py-20 sm:px-6 lg:grid-cols-12 lg:px-8 lg:py-28">
           <div className="lg:col-span-4">
-            <div className="overline">A practical rollout</div>
+            <div className="overline">Why Edvatiq</div>
             <h2 className="mt-3 text-4xl font-semibold leading-tight sm:text-5xl">Useful before everything is perfect.</h2>
-            <p className="mt-5 max-w-md text-base leading-7 text-muted-foreground">Start with one valuable workflow, keep existing systems where they belong, and expand when your team is ready.</p>
+            <p className="mt-5 max-w-md text-base leading-7 text-muted-foreground">Edvatiq is an operating layer for clearer decisions. Start with one valuable workflow, keep existing systems where they belong, and expand when your team is ready.</p>
           </div>
           <div className="divide-y overflow-hidden rounded-2xl border bg-card lg:col-span-7 lg:col-start-6">
             {journeySteps.map(([number, title, copy]) => <article key={number} className="grid gap-4 p-5 sm:grid-cols-[3.5rem_1fr] sm:p-7"><span className="font-mono text-xs font-semibold text-accent">{number}</span><div><h3 className="text-xl font-semibold">{title}</h3><p className="mt-2 text-sm leading-6 text-muted-foreground">{copy}</p></div></article>)}
@@ -183,116 +139,76 @@ export default function Landing() {
         <div className="lg:col-span-6 lg:col-start-7"><div className="surface-card overflow-hidden p-2 shadow-xl shadow-primary/5"><div className="rounded-xl bg-primary p-5 text-primary-foreground sm:p-7"><div className="flex items-center justify-between"><span className="inline-flex items-center gap-2 text-sm font-semibold"><Sparkle className="text-accent" weight="fill" />Ask Edvatiq</span><span className="rounded-full border border-primary-foreground/15 px-2.5 py-1 text-[10px] text-primary-foreground/55">Permission scoped</span></div><div className="mt-8 rounded-xl border border-primary-foreground/12 bg-primary-foreground/[0.06] p-4 text-sm text-primary-foreground/72">Who needs support before the next placement drive?</div><div className="mt-3 rounded-xl bg-card p-5 text-foreground shadow-sm"><div className="flex items-center gap-2 text-sm font-semibold"><CirclesFour className="text-accent" />Evidence-linked answer</div><div className="mt-4 space-y-3">{["Readiness and missing evidence", "Authorized student or client records", "English, Tamil, and Tanglish"].map((item) => <div key={item} className="flex items-center gap-3 rounded-lg bg-secondary px-3 py-2.5 text-xs"><CheckCircle className="text-positive" weight="fill" />{item}</div>)}</div></div></div></div></div>
       </section>
 
-      <Pricing catalog={catalog} error={error} retry={retry} />
+      <Pricing catalog={catalog} error={error} retry={retry} signupReady={signupReady} />
 
-      <section id="contact" className="px-4 py-20 sm:px-6 lg:px-8 lg:py-28">
-        <div className="relative mx-auto grid max-w-[1400px] overflow-hidden rounded-[2rem] bg-primary text-primary-foreground shadow-[0_30px_80px_hsl(var(--shadow-color)/.16)] lg:grid-cols-12">
+      <section id="contact" className="scroll-mt-16 px-4 pb-20 pt-12 sm:px-6 lg:px-8 lg:pb-28 lg:pt-16">
+        <div className="relative mx-auto grid max-w-[1400px] items-start overflow-hidden rounded-[2rem] bg-primary text-primary-foreground shadow-[0_30px_80px_hsl(var(--shadow-color)/.16)] lg:grid-cols-12">
           <div className="paper-grid pointer-events-none absolute inset-0 opacity-[0.06]" />
-          <div className="relative p-7 sm:p-10 lg:col-span-7 lg:p-14 xl:p-16">
+          <div className="relative p-7 sm:p-10 lg:col-span-5 lg:p-12 xl:p-14">
             <div className="overline !text-primary-foreground/50">Book a working session</div>
-            <h2 className="mt-3 max-w-3xl text-4xl font-semibold leading-tight sm:text-5xl">See Edvatiq around your real workflow.</h2>
-            <p className="mt-5 max-w-2xl text-sm leading-7 text-primary-foreground/65 sm:text-base">Tell us what your team manages today. We will show the relevant workspace, answer integration questions, and map a sensible first rollout without forcing a generic sales presentation.</p>
-            <div className="mt-8 flex flex-col gap-3 sm:flex-row">
-              <DemoLink className="inline-flex h-12 items-center justify-center gap-2 rounded-xl bg-accent px-6 text-sm font-semibold text-accent-foreground shadow-lg transition-transform hover:-translate-y-0.5">Book a demo <ArrowRight /></DemoLink>
-              <a href="mailto:sales@edvatiq.com" className="inline-flex h-12 items-center justify-center rounded-xl border border-primary-foreground/20 px-6 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary-foreground/10">sales@edvatiq.com</a>
-            </div>
-          </div>
-          <aside className="relative border-t border-primary-foreground/12 bg-primary-foreground/[0.055] p-7 sm:p-10 lg:col-span-5 lg:border-l lg:border-t-0 lg:p-12">
-            <div className="text-sm font-semibold">What the conversation covers</div>
-            <div className="mt-6 space-y-5">
+            <h2 className="mt-3 max-w-3xl text-4xl font-semibold leading-tight sm:text-5xl">Bring the workflow you want to improve.</h2>
+            <p className="mt-5 max-w-xl text-sm leading-7 text-primary-foreground/65 sm:text-base">We will prepare the relevant workspace, discuss data ownership and permissions, and map a practical first rollout around your real work.</p>
+            <div className="mt-9 space-y-5 border-t border-primary-foreground/12 pt-8">
               {[
                 [CalendarCheck, "Your highest-value workflow", "A focused walkthrough for your industry and team roles."],
                 [UsersThree, "Data and rollout fit", "Imports, existing systems, permissions, and practical onboarding."],
                 [LockKey, "A clear commercial path", "The right plan, payment path, and next steps with no hidden setup."],
               ].map(([Icon, title, copy]) => <div key={title} className="flex gap-3.5"><span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-primary-foreground/10 text-accent"><Icon size={18} /></span><div><div className="text-sm font-semibold">{title}</div><p className="mt-1 text-xs leading-5 text-primary-foreground/55">{copy}</p></div></div>)}
             </div>
-          </aside>
+            <a href={`mailto:${site?.support_email || "sales@edvatiq.com"}`} className="mt-9 inline-flex text-sm font-semibold text-accent underline-offset-4 hover:underline">Prefer email? {site?.support_email || "sales@edvatiq.com"}</a>
+          </div>
+          <div className="relative border-t border-primary-foreground/12 p-3 sm:p-5 lg:col-span-7 lg:border-l lg:border-t-0 lg:p-6 xl:p-8"><DemoRequestForm /></div>
         </div>
       </section>
-    </main>
-
-    <SiteFooter />
   </div>;
 }
 
-function Pricing({ catalog, error, retry }) {
+function Pricing({ catalog, error, retry, signupReady }) {
   const [interval, setInterval] = useState("monthly");
   const plans = catalog?.plans || [];
-  return <section id="pricing" className="border-y bg-surface-subtle">
-    <div className="mx-auto max-w-[1440px] px-4 py-20 sm:px-6 lg:px-8 lg:py-28">
-      <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between"><div className="max-w-3xl"><div className="overline">Plans</div><h2 className="mt-3 text-4xl font-semibold leading-tight sm:text-5xl">Start at the size you need.</h2><p className="mt-4 max-w-2xl text-base leading-7 text-muted-foreground">Published prices, included AI credits, and practical limits are shown before you create an account.</p></div><div className="inline-flex w-fit rounded-xl border bg-card p-1" aria-label="Billing period">{[["monthly", "Monthly"], ["annual", "Annual"]].map(([value, label]) => <button key={value} type="button" onClick={() => setInterval(value)} className={`rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${interval === value ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}>{label}</button>)}</div></div>
-      {catalog && !catalog.trial_enabled && <div className="mt-8 flex items-start gap-3 rounded-xl border border-accent/25 bg-accent/8 px-4 py-3 text-sm"><LockKey className="mt-0.5 shrink-0 text-accent" /><div><strong>Paid onboarding is active.</strong> Your workspace and owner account are created only after the initial plan payment is verified.</div></div>}
+  const annualSaving = Math.max(0, ...plans.map((plan) => Number(plan.annual_saving_percent || 0)));
+  const gridClass = plans.length <= 1 ? "max-w-md" : plans.length === 2 ? "max-w-4xl md:grid-cols-2" : plans.length === 3 ? "max-w-6xl md:grid-cols-2 xl:grid-cols-3" : "md:grid-cols-2 xl:grid-cols-4";
+  return <section id="pricing" className="soft-glow relative scroll-mt-16 overflow-hidden border-y bg-card">
+    <div className="paper-grid pointer-events-none absolute inset-0 opacity-[0.13] [mask-image:linear-gradient(to_bottom,black,transparent_65%)]" />
+    <div className="relative mx-auto max-w-[1440px] px-4 py-20 sm:px-6 lg:px-8 lg:py-28">
+      <div className="grid gap-7 lg:grid-cols-12 lg:items-end"><div className="max-w-3xl lg:col-span-7"><div className="overline">Plans and pricing</div><h2 className="mt-3 text-4xl font-semibold leading-tight sm:text-5xl">Choose a clear starting point.</h2><p className="mt-4 max-w-2xl text-base leading-7 text-muted-foreground">Compare tax-inclusive pricing, AI credits, and practical workspace limits before creating an account.</p></div><div className="lg:col-span-4 lg:col-start-9 lg:justify-self-end"><div className="inline-flex rounded-xl border bg-card p-1 shadow-sm" role="group" aria-label="Billing period">{[["monthly", "Monthly"], ["annual", "Annual"]].map(([value, label]) => <button key={value} type="button" aria-pressed={interval === value} onClick={() => setInterval(value)} className={`rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${interval === value ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}>{label}{value === "annual" && annualSaving > 0 && <span className={`ml-2 text-[10px] ${interval === value ? "text-primary-foreground/65" : "text-positive"}`}>save {annualSaving}%</span>}</button>)}</div></div></div>
+      {catalog && !catalog.trial_enabled && <div className="mt-8 flex max-w-3xl items-start gap-3 rounded-xl border bg-card/80 px-4 py-3 text-sm shadow-sm backdrop-blur"><LockKey className="mt-0.5 shrink-0 text-accent" /><div><strong>Secure paid onboarding.</strong> The workspace and owner account are created after the first plan payment is verified.</div></div>}
       {error && <div className="mt-10 flex min-h-32 flex-col items-center justify-center rounded-2xl border bg-card p-6 text-center"><WarningCircle size={28} className="text-accent" /><p className="mt-3 font-semibold">{error}</p><p className="mt-1 text-sm text-muted-foreground">We will not show stale or guessed prices.</p><button type="button" onClick={retry} className="mt-4 rounded-lg border px-4 py-2 text-sm font-semibold">Try again</button></div>}
-      {!catalog && !error && <div className="responsive-card-grid mt-10 gap-4" style={{ "--responsive-card-min": "15rem" }}>{[1, 2, 3, 4].map((item) => <div key={item} className="h-96 animate-pulse rounded-2xl border bg-card" />)}</div>}
-      {catalog && <div className="responsive-card-grid mt-10 gap-4" style={{ "--responsive-card-min": "15rem" }}>{plans.map((plan) => <PlanCard key={plan.id} plan={plan} interval={interval} paymentAvailable={catalog.payment_available} />)}</div>}
-      <p className="mt-6 text-xs leading-5 text-muted-foreground">Paid signup covers the selected first term. Renewal settings can be managed securely from Plan &amp; billing after setup.</p>
+      {!catalog && !error && <div className="mt-10 grid gap-4 md:grid-cols-2 xl:grid-cols-4">{[1, 2, 3, 4].map((item) => <div key={item} className="h-[440px] animate-pulse rounded-[1.35rem] border bg-card" />)}</div>}
+      {catalog && <div className={`mx-auto mt-10 grid items-stretch gap-4 ${gridClass}`}>{plans.map((plan, index) => <PlanCard key={plan.id} plan={plan} index={index} interval={interval} paymentAvailable={catalog.payment_available} signupReady={signupReady} />)}</div>}
+      <div className="mt-7 flex flex-col gap-2 border-t pt-5 text-xs leading-5 text-muted-foreground sm:flex-row sm:items-center sm:justify-between"><span>Paid signup covers the selected first term. Renewals are managed from Plan &amp; billing.</span><span className="inline-flex items-center gap-2 font-medium text-foreground"><CheckCircle className="text-positive" weight="fill" />Published, tax-inclusive pricing</span></div>
     </div>
   </section>;
 }
 
-function PlanCard({ plan, interval, paymentAvailable }) {
+function PlanCard({ plan, index, interval, paymentAvailable, signupReady }) {
   const quote = interval === "annual" ? plan.annual_quote : plan.monthly_quote;
   const isTrial = plan.signup_mode === "trial";
   const isContact = plan.signup_mode === "contact" || !quote;
-  const points = [
+  const configuredPoints = [
     plan.ai_credits != null && `${Number(plan.ai_credits).toLocaleString("en-IN")} AI credits per cycle`,
     plan.location_limit != null && `Up to ${Number(plan.location_limit).toLocaleString("en-IN")} location${Number(plan.location_limit) === 1 ? "" : "s"}`,
     plan.employee_limit != null && `Up to ${Number(plan.employee_limit).toLocaleString("en-IN")} team members`,
     plan.client_limit != null && `Up to ${Number(plan.client_limit).toLocaleString("en-IN")} people records`,
   ].filter(Boolean).slice(0, 4);
+  const points = configuredPoints.length ? configuredPoints : [
+    "Tailored workspace limits",
+    "Integration and rollout planning",
+    "Governance and access design",
+  ];
   const path = `/register?plan=${encodeURIComponent(plan.id)}&interval=${interval}`;
-  return <article className={`relative flex min-h-[430px] flex-col rounded-2xl border bg-card p-5 shadow-sm ${plan.recommended ? "border-primary ring-1 ring-primary/20 xl:-translate-y-2" : ""}`}>
-    {plan.recommended && <span className="absolute right-4 top-4 rounded-full bg-primary px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-primary-foreground">Recommended</span>}
-    <div className="pr-20"><h3 className="text-xl font-semibold">{plan.name}</h3><p className="mt-2 min-h-10 text-xs leading-5 text-muted-foreground">{plan.description}</p></div>
-    <div className="mt-6"><div className="text-3xl font-semibold tracking-tight">{isTrial ? "Free" : isContact ? "Custom" : money(quote.total_paise)}</div><div className="mt-1 text-xs text-muted-foreground">{isTrial ? `${plan.trial_days || 30} days` : isContact ? "Built around your requirements" : `${interval === "annual" ? "per year" : "per month"}, tax-inclusive`}</div>{!isTrial && !isContact && quote.tax_paise > 0 && <div className="mt-1 text-[11px] text-muted-foreground">Includes {money(quote.tax_paise)} GST</div>}{interval === "annual" && plan.annual_saving_percent > 0 && <span className="mt-3 inline-flex rounded-full bg-positive/10 px-2 py-1 text-[10px] font-semibold text-positive">Save {plan.annual_saving_percent}%</span>}</div>
-    <div className="my-6 h-px bg-border" />
-    <ul className="space-y-3 text-xs">{points.map((point) => <li key={point} className="flex gap-2.5"><Check className="mt-0.5 shrink-0 text-positive" weight="bold" />{point}</li>)}</ul>
-    <div className="mt-auto pt-7">{isContact
+  return <article className={`group relative flex min-h-[440px] flex-col overflow-hidden rounded-[1.35rem] border bg-card p-6 shadow-[0_12px_35px_hsl(var(--shadow-color)/.055)] transition-[transform,box-shadow] hover:-translate-y-1 hover:shadow-[0_20px_45px_hsl(var(--shadow-color)/.09)] ${plan.recommended ? "border-primary ring-1 ring-primary/15" : ""}`}>
+    {plan.recommended && <div className="absolute inset-x-0 top-0 h-1 bg-accent" />}
+    <div className="flex items-center justify-between gap-3"><span className="overline">Plan {String(index + 1).padStart(2, "0")}</span>{plan.recommended && <span className="rounded-full bg-primary px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-primary-foreground">Recommended</span>}</div>
+    <div className="mt-5"><h3 className="text-2xl font-semibold">{plan.name}</h3><p className="mt-2 min-h-10 text-xs leading-5 text-muted-foreground">{plan.description}</p></div>
+    <div className="mt-7"><div className="text-4xl font-semibold tracking-[-.04em]">{isTrial ? "Free" : isContact ? "Custom" : money(quote.total_paise)}</div><div className="mt-2 text-xs text-muted-foreground">{isTrial ? `${plan.trial_days || 30}-day access` : isContact ? "Built around your requirements" : `${interval === "annual" ? "Billed annually" : "Billed monthly"} / tax included`}</div>{!isTrial && !isContact && quote.tax_paise > 0 && <div className="mt-1 text-[11px] text-muted-foreground">Includes {money(quote.tax_paise)} GST</div>}{interval === "annual" && plan.annual_saving_percent > 0 && <span className="mt-3 inline-flex rounded-full bg-positive/10 px-2 py-1 text-[10px] font-semibold text-positive">Save {plan.annual_saving_percent}%</span>}</div>
+    <div className="mt-7 border-t pt-5"><div className="overline">Included</div><ul className="mt-4 space-y-3 text-xs">{points.map((point) => <li key={point} className="flex gap-2.5 leading-5"><span className="mt-0.5 grid h-4 w-4 shrink-0 place-items-center rounded-full bg-positive/10"><Check size={10} className="text-positive" weight="bold" /></span>{point}</li>)}</ul></div>
+    <div className="mt-auto pt-7">{isContact || !signupReady
       ? <DemoLink className="flex h-11 items-center justify-center rounded-xl border text-sm font-semibold hover:bg-secondary">Talk to sales</DemoLink>
       : !isTrial && !paymentAvailable
         ? <button type="button" disabled className="h-11 w-full rounded-xl border bg-secondary text-sm font-semibold text-muted-foreground">Checkout unavailable</button>
         : <Link to={path} className={`flex h-11 items-center justify-center gap-2 rounded-xl text-sm font-semibold ${plan.recommended ? "bg-primary text-primary-foreground" : "border hover:bg-secondary"}`}>{isTrial ? "Start free" : `Choose ${plan.name}`} <ArrowRight /></Link>}</div>
   </article>;
-}
-
-function SiteFooter() {
-  return <footer className="bg-primary text-primary-foreground">
-    <div className="mx-auto max-w-[1440px] px-4 pb-8 pt-14 sm:px-6 lg:px-8 lg:pt-16">
-      <div className="grid gap-10 border-b border-primary-foreground/12 pb-12 sm:grid-cols-2 lg:grid-cols-12">
-        <div className="sm:col-span-2 lg:col-span-5">
-          <Link to="/" className="inline-flex items-center gap-2.5" aria-label="Edvatiq home">
-            <span className="grid h-10 w-10 place-items-center rounded-xl bg-primary-foreground text-sm font-bold text-primary">E</span>
-            <span className="font-marketing text-2xl font-semibold">Edvatiq</span>
-          </Link>
-          <p className="mt-5 max-w-md text-sm leading-7 text-primary-foreground/58">Calm operations, placement intelligence, and evidence-backed AI for teams that need clarity before more software.</p>
-          <a href="mailto:sales@edvatiq.com" className="mt-5 inline-flex text-sm font-semibold text-accent hover:underline">sales@edvatiq.com</a>
-        </div>
-        <FooterGroup title="Product" links={[["Platform", "#platform"], ["Edvatiq AI", "#ai"], ["Plans", "#pricing"], ["How it works", "#workflow"]]} />
-        <FooterGroup title="Solutions" links={[["Gym and fitness", "#industries"], ["Salon and spa", "#industries"], ["Outpatient clinic", "#industries"], ["College placement", "#industries"]]} />
-        <div className="lg:col-span-2">
-          <div className="text-xs font-semibold uppercase tracking-[0.15em] text-primary-foreground/40">Get started</div>
-          <div className="mt-5 flex flex-col items-start gap-3 text-sm text-primary-foreground/70">
-            <DemoLink className="hover:text-primary-foreground">Book a demo</DemoLink>
-            <a href="#pricing" className="hover:text-primary-foreground">View plans</a>
-            <Link to="/login" className="hover:text-primary-foreground">Sign in</Link>
-          </div>
-        </div>
-      </div>
-      <div className="flex flex-col gap-3 pt-7 text-xs text-primary-foreground/45 sm:flex-row sm:items-center sm:justify-between">
-        <span>Copyright {new Date().getFullYear()} Edvatiq. All rights reserved.</span>
-        <span>Operations and placement intelligence for Indian organizations.</span>
-      </div>
-    </div>
-  </footer>;
-}
-
-function FooterGroup({ title, links }) {
-  return <nav className="lg:col-span-2" aria-label={`${title} links`}>
-    <div className="text-xs font-semibold uppercase tracking-[0.15em] text-primary-foreground/40">{title}</div>
-    <div className="mt-5 flex flex-col items-start gap-3 text-sm text-primary-foreground/70">
-      {links.map(([label, href]) => <a key={label} href={href} className="hover:text-primary-foreground">{label}</a>)}
-    </div>
-  </nav>;
 }
 
 function ProductPreview() {

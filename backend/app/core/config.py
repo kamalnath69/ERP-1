@@ -9,6 +9,13 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 load_dotenv(ROOT_DIR / ".env")
 
 
+def _required_env(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    return value
+
+
 def _cookie_domain() -> str:
     raw = os.environ.get("AUTH_COOKIE_DOMAIN", "").strip()
     if "://" in raw:
@@ -19,7 +26,7 @@ def _cookie_domain() -> str:
 
 
 def _database_url() -> str:
-    raw = os.environ["DATABASE_URL"].strip()
+    raw = _required_env("DATABASE_URL")
     ssl_mode = os.environ.get("DATABASE_SSLMODE", "").strip()
     if not ssl_mode and "supabase.co" in raw.lower():
         ssl_mode = "require"
@@ -34,8 +41,33 @@ def _cors_origins() -> list[str]:
     return list(dict.fromkeys(origin.strip().rstrip("/") for origin in origins if origin.strip()))
 
 
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be true or false")
+
+
+def _is_serverless_runtime() -> bool:
+    return os.environ.get("VERCEL") == "1" or bool(os.environ.get("AWS_LAMBDA_FUNCTION_NAME"))
+
+
 class Settings:
     ENVIRONMENT: str = os.environ.get("ENVIRONMENT", "development").strip().lower()
+    SERVERLESS_RUNTIME: bool = _is_serverless_runtime()
+    RUN_STARTUP_MIGRATIONS: bool = _bool_env(
+        "RUN_STARTUP_MIGRATIONS",
+        ENVIRONMENT != "production" and not SERVERLESS_RUNTIME,
+    )
+    RUN_STARTUP_SEEDING: bool = _bool_env(
+        "RUN_STARTUP_SEEDING",
+        ENVIRONMENT != "production" and not SERVERLESS_RUNTIME,
+    )
     DATABASE_URL: str = _database_url()
     DATABASE_POOL_SIZE: int = max(1, int(os.environ.get("DATABASE_POOL_SIZE", 5)))
     DATABASE_MAX_OVERFLOW: int = max(0, int(os.environ.get("DATABASE_MAX_OVERFLOW", 5)))
@@ -43,7 +75,7 @@ class Settings:
     DATABASE_POOL_RECYCLE_SECONDS: int = max(30, int(os.environ.get("DATABASE_POOL_RECYCLE_SECONDS", 300)))
     DATABASE_CONNECT_TIMEOUT_SECONDS: int = max(1, int(os.environ.get("DATABASE_CONNECT_TIMEOUT_SECONDS", 10)))
     DATABASE_APPLICATION_NAME: str = os.environ.get("DATABASE_APPLICATION_NAME", "edvatiq_api").strip() or "edvatiq_api"
-    JWT_SECRET_KEY: str = os.environ["JWT_SECRET_KEY"]
+    JWT_SECRET_KEY: str = _required_env("JWT_SECRET_KEY")
     JWT_ALGORITHM: str = os.environ.get("JWT_ALGORITHM", "HS256")
     ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.environ.get("ACCESS_TOKEN_EXPIRE_MINUTES", 60))
     REFRESH_TOKEN_EXPIRE_DAYS: int = int(os.environ.get("REFRESH_TOKEN_EXPIRE_DAYS", 14))

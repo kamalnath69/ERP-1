@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+Disallow: /app/
+Disallow: /super/
+
+Sitemap: https://edvatiq.app/sitemap.xml

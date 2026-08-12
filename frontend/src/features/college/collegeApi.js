@@ -135,7 +135,28 @@ export const collegeApi = baseApi.injectEndpoints({
       queryFn: (_arg, api) => domainRequest({ url: "/college/integrations", method: "GET" }, api),
       providesTags: resourceTags("college"),
     }),
+    getCollegeIntegrationCredentials: builder.query({
+      queryFn: (_arg, api) => domainRequest({ url: "/college/integrations/credentials", method: "GET" }, api),
+      providesTags: resourceTags("college"),
+    }),
     createCollegeIntegration: builder.mutation(mutation("/college/integrations")),
+    createCollegeIntegrationCredential: builder.mutation(mutation("/college/integrations/credentials")),
+    rotateCollegeIntegrationCredential: builder.mutation({
+      queryFn: ({ credentialId, version, expiresAt }, api) => domainRequest({
+        url: `/college/integrations/credentials/${credentialId}/rotate`,
+        method: "POST",
+        data: { version, expires_at: expiresAt || null },
+      }, api),
+      invalidatesTags: collegeTags,
+    }),
+    revokeCollegeIntegrationCredential: builder.mutation({
+      queryFn: ({ credentialId, version }, api) => domainRequest({
+        url: `/college/integrations/credentials/${credentialId}`,
+        method: "DELETE",
+        data: { version },
+      }, api),
+      invalidatesTags: collegeTags,
+    }),
     queueCollegeIntegrationSync: builder.mutation({
       queryFn: ({ connectorId, resourceTypes, idempotencyKey }, api) => domainRequest({
         url: `/college/integrations/${connectorId}/sync`,
@@ -227,7 +248,11 @@ export const {
   useGetCollegeApplicationsQuery,
   useGetCollegeImportsQuery,
   useGetCollegeIntegrationsQuery,
+  useGetCollegeIntegrationCredentialsQuery,
   useCreateCollegeIntegrationMutation,
+  useCreateCollegeIntegrationCredentialMutation,
+  useRotateCollegeIntegrationCredentialMutation,
+  useRevokeCollegeIntegrationCredentialMutation,
   useQueueCollegeIntegrationSyncMutation,
   useCreateCollegeCompanyMutation,
   useCreateCollegeOpportunityMutation,

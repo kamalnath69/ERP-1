@@ -331,6 +331,23 @@ export const collegeConnectorSchema = z.object({
   if (value.auth_header && !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(value.auth_header)) context.addIssue({ code: "custom", path: ["auth_header"], message: "Header name is invalid" });
 });
 
+const collegePushResources = ["students", "term_results", "attendance", "skills", "assessments", "internship_clearance"];
+
+export const collegePushCredentialSchema = z.object({
+  name: requiredText("Credential name", { min: 2, max: 120 }),
+  scopes: z.array(z.enum(collegePushResources))
+    .min(1, "Choose at least one resource scope")
+    .max(collegePushResources.length)
+    .refine((values) => new Set(values).size === values.length, "Resource scopes contain duplicates"),
+  expires_at: z.string().min(1, "Choose an expiry date").superRefine((value, context) => {
+    const expiry = new Date(value);
+    const current = new Date();
+    if (Number.isNaN(expiry.getTime())) context.addIssue({ code: "custom", message: "Expiry date is invalid" });
+    else if (expiry.getTime() <= current.getTime() + 5 * 60 * 1000) context.addIssue({ code: "custom", message: "Expiry must be at least five minutes in the future" });
+    else if (expiry.getTime() > current.getTime() + 730 * 24 * 60 * 60 * 1000) context.addIssue({ code: "custom", message: "Expiry cannot be more than two years in the future" });
+  }),
+});
+
 export const collegeDriveSchema = z.object({
   company_id: requiredText("Company"),
   title: requiredText("Opportunity title", { min: 2, max: 220 }),
