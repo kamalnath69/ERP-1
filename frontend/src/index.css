@@ -184,6 +184,12 @@
   .public-prose ol { @apply list-decimal; }
   .public-prose li { @apply pl-1; }
   .public-prose blockquote { @apply my-6 rounded-r-xl border-l-4 border-accent bg-accent/5 px-5 py-4 text-foreground; }
+  .document-prose { @apply text-[15px] leading-8; }
+  .document-prose h2 { @apply mt-11 border-border/80 pt-9 text-[1.45rem] tracking-[-0.02em]; }
+  .document-prose h2:first-child { @apply mt-0 border-t-0 pt-0; }
+  .document-prose h3 { @apply mt-8 text-[1.05rem]; }
+  .document-prose p { @apply my-4; }
+  .document-prose li::marker { color: hsl(var(--primary) / 0.68); }
   .nav-item { @apply flex min-h-10 items-center rounded-xl px-3 text-sm font-medium transition-colors duration-150; }
   .nav-item-idle { @apply text-sidebar-muted hover:bg-secondary hover:text-sidebar-foreground dark:hover:bg-white/[0.06]; }
   .nav-item-active { @apply bg-primary text-primary-foreground shadow-sm; }
@@ -212,6 +218,10 @@
   @media (min-width: 1024px) {
     .auth-main-inner { padding: 2rem; }
     .auth-register-inner { padding: 2rem clamp(2rem, 5vw, 4rem); }
+  }
+  @media (min-width: 1280px) {
+    .auth-shell-login { grid-template-columns: minmax(20rem, 0.78fr) minmax(0, 1.22fr); }
+    .auth-shell-register { grid-template-columns: minmax(20rem, 0.68fr) minmax(0, 1.32fr); }
   }
   @media (min-width: 1024px) and (max-height: 760px) {
     .auth-aside { padding: 1.75rem 2.25rem; }
@@ -295,5 +305,25 @@
   }
   .public-prose {
     color: black !important;
+  }
+  .document-reading-progress,
+  .document-mobile-navigation,
+  .document-actions,
+  .document-navigation-rail,
+  .document-contents,
+  .document-titlebar nav {
+    display: none !important;
+  }
+  .document-titlebar > div,
+  .document-workspace {
+    max-width: none !important;
+  }
+  .document-workspace {
+    display: block !important;
+    border: 0 !important;
+    box-shadow: none !important;
+  }
+  .document-panel {
+    padding: 1rem 0 0 !important;
   }
 }

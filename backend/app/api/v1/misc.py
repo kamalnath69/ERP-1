@@ -37,7 +37,11 @@ def event_tenant(request: Request) -> str:
 
     with SessionLocal() as db:
         user = db.get(User, payload.get("sub"))
-        if not user or not user.is_active or payload.get("sv") != user.session_version:
+        if (
+            not user or not user.is_active
+            or payload.get("sv") != user.session_version
+            or payload.get("av", user.access_version) != user.access_version
+        ):
             raise HTTPException(status_code=401, detail="Session is no longer active")
         if not user.organization_id:
             raise HTTPException(status_code=400, detail="No organization context")

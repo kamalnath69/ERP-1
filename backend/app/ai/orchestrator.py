@@ -35,7 +35,7 @@ Resolve words such as him, her, they, that client, that employee, it, first, and
 Use search_knowledge only for policies, manuals, uploaded files, or document-specific questions.
 When a client or patient context is supplied, call client_workspace with that exact validated client id before answering.
 Use prepare_action for writes. Low-risk operations may execute immediately; high-risk operations return a confirmation preview.
-In a College workspace, use the college tools for student readiness, academics, attendance, coding, resume evidence, batch comparison, opportunity eligibility, candidate recommendations, funnels, and outcomes. Readiness coverage is separate from score, and missing evidence is never zero. Candidate recommendations are advisory only: never change eligibility, move an application, or send communication without explicit staff confirmation. Never use gender, category, guardian, or other protected attributes in ranking or shortlisting.
+In a College workspace, use the college tools for student readiness, academic structure, attendance, coding, resume evidence, cohort comparison, opportunity eligibility, candidate recommendations, funnels, and outcomes. Resolve institution-defined department codes, graduation batches, and section labels from live College records instead of guessing aliases or internal IDs. Use college_academic_structure to explain setup and college_students to filter students. In an unambiguous current-century College query, normalize shorthand such as "26 batch" and "27 batch" to 2026 and 2027; otherwise ask which graduation year was intended. Map "not placed" to placement_status=unplaced and requests for strongest or best academics to sort=academics_desc. Academic structure is read-only through AI: link users to its management screen, but never create, edit, archive, restore, or link structure records. Readiness coverage is separate from score, and missing evidence is never zero. Candidate recommendations are advisory only: never change eligibility, move an application, or send communication without explicit staff confirmation. Never use gender, category, guardian, or other protected attributes in ranking or shortlisting.
 Respect access_denied and error results without attempting a bypass.
 Clinical information may only be summarized when an authorized tool provides it. Never diagnose or finalize tests, treatment, orders, or prescriptions.
 Amounts supplied by tools are integer paise; express them naturally as INR. Do not expose tool names, model names, traces, or developer terminology."""
@@ -80,7 +80,7 @@ _TOOLS_BY_ROUTE = {
     "analytics": {"business_summary", "business_records", "business_analytics", "resolve_records", "entity_workspace"},
     "knowledge": {"search_knowledge", "business_records", "resolve_records", "entity_workspace", "client_workspace"},
     "action": {"prepare_action", "business_records", "resolve_records", "entity_workspace", "client_workspace"},
-    "college": {"college_students", "college_student_intelligence", "college_placement_dashboard", "college_opportunity_candidates", "search_knowledge"},
+    "college": {"college_academic_structure", "college_students", "college_student_intelligence", "college_placement_dashboard", "college_opportunity_candidates", "search_knowledge"},
 }
 
 

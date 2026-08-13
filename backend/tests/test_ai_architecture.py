@@ -4,9 +4,11 @@ from pydantic import ValidationError
 
 from app.ai.actions import ACTION_REGISTRY
 from app.ai.contracts import AIResponseV1, ResponseBlock, compose_response
+from app.ai.local_intent import interpret_business_query
 from app.ai.orchestrator import classify_route, fast_conversation_reply, tool_schemas_for_route
 from app.api.v1.ai import _updated_context_state, _without_confirmation_tokens
-from app.ai.tools import _normalize_record_spec, _serialize_record
+from app.ai.tools import _academic_match_score, _match_academic_row, _normalize_record_spec, _section_key, _serialize_record
+from app.api.v1.college import CohortBody, _cohort_graduation_year
 
 
 def test_routes_complex_requests_without_model_guesswork():
@@ -37,11 +39,62 @@ def test_each_ai_route_receives_only_relevant_tools():
 def test_college_ai_route_is_evidence_backed_and_read_only():
     assert {tool["name"] for tool in tool_schemas_for_route("college")} == {
         "college_students",
+        "college_academic_structure",
         "college_student_intelligence",
         "college_placement_dashboard",
         "college_opportunity_candidates",
         "search_knowledge",
     }
+    student_tool = next(tool for tool in tool_schemas_for_route("college") if tool["name"] == "college_students")
+    properties = student_tool["parameters"]["properties"]
+    assert {"department", "section", "graduation_years", "cohort_ids", "placement_status", "sort"}.issubset(properties)
+    assert set(properties["sort"]["enum"]) >= {"name", "academics_desc"}
+
+
+def test_college_academic_scope_uses_live_codes_and_clarifies_ambiguity():
+    body = CohortBody(
+        program_id="program-1",
+        name="Artificial Intelligence 2027 / A",
+        code="AIML-2027-A",
+        admission_year=2024,
+        section="A",
+    )
+    assert _cohort_graduation_year(body, SimpleNamespace(duration_semesters=6)) == 2027
+    rows = [
+        SimpleNamespace(id="aiml", name="Artificial Intelligence and Machine Learning", code="AIML"),
+        SimpleNamespace(id="it", name="Information Technology", code="IT"),
+        SimpleNamespace(id="mech", name="Mechanical Engineering", code="MECH"),
+        SimpleNamespace(id="eee", name="Electrical and Electronics Engineering", code="EEE"),
+    ]
+    assert _academic_match_score(rows[0], "AIML") == 1.0
+    matched, error = _match_academic_row(rows, "Mechanical Engineering", "department")
+    assert matched.id == "mech"
+    assert error is None
+
+    ambiguous = [
+        SimpleNamespace(id="it", name="Information Technology", code="IT"),
+        SimpleNamespace(id="industrial", name="Industrial Technology", code="IND-TECH"),
+    ]
+    matched, error = _match_academic_row(ambiguous, "technology", "department")
+    assert matched is None
+    assert error["clarification_required"] is True
+    assert len(error["options"]) == 2
+    assert _section_key("AIML Section A") == "a"
+
+
+def test_college_batch_language_bypasses_generic_inventory_intent():
+    class CollegeDb:
+        def get(self, _model, _identifier):
+            return SimpleNamespace(
+                industry=SimpleNamespace(value="college"),
+                timezone="Asia/Kolkata",
+            )
+
+    result = interpret_business_query(
+        CollegeDb(), SimpleNamespace(organization_id="org-1"), "Show the 2027 batch",
+    )
+    assert result.outcome == "fallback"
+    assert result.reason == "college_structure_requires_college_router"
 
 
 def test_response_composer_only_emits_approved_blocks():

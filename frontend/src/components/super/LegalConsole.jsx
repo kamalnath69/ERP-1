@@ -68,6 +68,7 @@ export default function LegalConsole() {
   const [editing, setEditing] = useState(null);
   const [publishing, setPublishing] = useState(null);
   const [creating, setCreating] = useState(null);
+  const [preparingV2, setPreparingV2] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -102,19 +103,38 @@ export default function LegalConsole() {
     }
   };
 
+  const prepareVersionTwo = async () => {
+    if (preparingV2) return;
+    setPreparingV2(true);
+    try {
+      const response = await api.post("/super-admin/legal/documents/version-two-drafts");
+      const created = response.data.created?.length || 0;
+      const blocked = response.data.blocked?.length || 0;
+      if (created) toast.success(`${created} detailed Version 2 ${created === 1 ? "draft" : "drafts"} prepared`);
+      else toast.info("Version 2 drafts already exist or an earlier draft needs review");
+      if (blocked) toast.warning(`${blocked} ${blocked === 1 ? "policy needs" : "policies need"} the existing draft completed first`);
+      await load();
+    } catch (requestError) {
+      toast.error(requestError.response?.data?.detail || "Version 2 drafts could not be prepared");
+    } finally {
+      setPreparingV2(false);
+    }
+  };
+
   if (loading && !data) return <LegalSkeleton />;
   if (error && !data) return <ErrorState title="Legal controls could not be loaded" retry={load} />;
 
   const counts = data.documents.reduce((result, document) => ({
     ...result, [document.status]: (result[document.status] || 0) + 1,
   }), {});
+  const versionTwoReady = Object.keys(DOCUMENTS).every((kind) => data.documents.some((document) => document.type === kind && document.version >= 2));
 
   return <div className="space-y-6">
     <PageHeader
       eyebrow="Public trust"
       title="Legal publication and demo leads"
       description="Publish authoritative policies, control registration readiness, and follow up on public enquiries from one auditable workspace."
-      actions={<StatusBadge status={data.ready ? "active" : "pending"} label={data.ready ? "Registration ready" : "Registration blocked"} />}
+      actions={<div className="flex flex-wrap items-center gap-2">{!versionTwoReady && <Button variant="outline" loading={preparingV2} loadingText="Preparing V2..." onClick={prepareVersionTwo}><Plus className="mr-1.5" />Prepare detailed V2 drafts</Button>}<StatusBadge status={data.ready ? "active" : "pending"} label={data.ready ? "Registration ready" : "Registration blocked"} /></div>}
     />
     {!data.ready && <Surface className="flex items-start gap-3 border-warning/30 bg-warning-soft p-4">
       <Warning className="mt-0.5 shrink-0 text-warning" size={20} />

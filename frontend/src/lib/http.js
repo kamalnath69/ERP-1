@@ -43,6 +43,7 @@ export function apiErrorMessage(error, fallback = "The request could not be comp
 http.interceptors.response.use((response) => response, async (error) => {
   const original = error.config || {};
   const path = String(original.url || "");
+  const accessChanged = error.response?.data?.detail?.code === "access_changed";
   const refreshExcluded = ["/auth/login", "/auth/register", "/auth/refresh", "/auth/logout", "/auth/email/", "/auth/password/"].some((item) => path.includes(item));
   if (error.response?.status === 401 && !original._retry && !refreshExcluded) {
     original._retry = true;
@@ -52,6 +53,7 @@ http.interceptors.response.use((response) => response, async (error) => {
         headers: { "X-CSRF-Token": cookie("edvatiq_csrf") },
       }).finally(() => { refreshing = null; });
       await refreshing;
+      if (accessChanged) window.dispatchEvent(new CustomEvent("edvatiq:access-changed"));
       return http(original);
     } catch {
       if (!original.suppressAuthRedirect && !window.location.pathname.startsWith("/login")) {

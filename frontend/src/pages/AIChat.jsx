@@ -14,6 +14,7 @@ import api from "@/lib/api";
 import { streamAI } from "@/lib/aiStream";
 import { cn } from "@/lib/utils";
 import { useBusiness } from "@/contexts/BusinessContext";
+import BrandLogo from "@/components/brand/BrandLogo";
 import SecondarySidebarLayout, { SecondarySidebarTrigger } from "@/components/layout/SecondarySidebarLayout";
 import AssistantPersonalizationSheet from "@/components/ai/AssistantPersonalizationSheet";
 import { Button } from "@/components/ui/button";
@@ -1380,7 +1381,7 @@ function Message({ message, isCollege = false, isStreaming, streamStatus, onDele
         ) : (
           <>
             <div className="mb-2.5 flex items-center gap-2.5">
-              <span className="h-8 w-8 rounded-xl bg-primary text-primary-foreground grid place-items-center shadow-sm"><Sparkle size={15} weight="fill" className="text-accent" /></span>
+              <BrandLogo showName={false} markClassName="h-8 w-8 rounded-xl" />
               <div className="min-w-0"><div className="text-sm font-semibold">Edvatiq</div><div className="text-[10px] text-muted-foreground">{isCollege ? "Your placement assistant" : "Your business assistant"}</div></div>
               {onDelete && <HistoryMenu onDelete={onDelete} label="Message options" className="ml-auto" />}
             </div>
@@ -1549,7 +1550,7 @@ function RenameConversationDialog({ target, title, busy, onTitleChange: _onTitle
           </div>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={close} disabled={busy}>Cancel</Button>
-            <Button type="submit" loading={busy || formState.isSubmitting} loadingText="Saving title...">Save title</Button>
+            <Button type="submit" disabled={!formState.isValid} loading={busy || formState.isSubmitting} loadingText="Saving title...">Save title</Button>
           </DialogFooter>
         </form>
       </DialogContent>
@@ -1586,7 +1587,7 @@ function FeedbackDialog({ target, reason, busy, onReasonChange: _onReasonChange,
         <div className="text-right text-xs tabular-nums text-muted-foreground">{value.length}/500</div>
         <DialogFooter>
           <Button type="button" variant="outline" onClick={close} disabled={busy}>Cancel</Button>
-          <Button type="submit" loading={busy || formState.isSubmitting} loadingText="Sending feedback...">Send feedback</Button>
+          <Button type="submit" disabled={!formState.isValid} loading={busy || formState.isSubmitting} loadingText="Sending feedback...">Send feedback</Button>
         </DialogFooter>
         </form>
       </DialogContent>

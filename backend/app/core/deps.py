@@ -50,9 +50,17 @@ def get_current_user(
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="User inactive")
     if payload.get("sv") != user.session_version:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Session has been revoked")
+    if payload.get("av", user.access_version) != user.access_version:
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "access_changed", "message": "Your access changed. Refreshing permissions."},
+        )
     platform_actor = user
     support_token = request.headers.get("x-support-session")
-    if support_token and user.is_super_admin and not user.organization_id:
+    support_session_active = False
+    if support_token:
+        if not user.is_super_admin or user.organization_id:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Support sessions require a platform administrator")
         token_digest = hashlib.sha256(support_token.encode()).hexdigest()
         support = db.execute(select(SupportSession).where(SupportSession.token_hash == token_digest)).scalar_one_or_none()
         if not support or support.platform_user_id != user.id or support.status != "active" or support.expires_at <= datetime.now(timezone.utc):
@@ -69,11 +77,12 @@ def get_current_user(
         request.state.support_session = support
         from app.services.audit import platform_audit_context
         platform_audit_context.set({"platform_actor_user_id": platform_actor.id, "support_session_id": support.id, "effective_user_id": user.id})
+        support_session_active = True
     if user.organization_id:
         org = db.get(Organization, user.organization_id)
         if not org or org.status.value in {"suspended", "cancelled"}:
             raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Organization is not active")
-        if not support_token:
+        if not support_session_active:
             subscription = db.execute(
                 select(Subscription).where(Subscription.organization_id == org.id)
                 .order_by(Subscription.created_at.desc())
@@ -85,7 +94,7 @@ def get_current_user(
                     status.HTTP_402_PAYMENT_REQUIRED,
                     detail="Your 30-day free trial has ended. Choose a plan to continue.",
                 )
-        if not support_token:
+        if not support_session_active:
             from app.services.user_security import mfa_requirement
             security = mfa_requirement(db, user)
             requires_verified_session = security["required"] or security["enabled"]
@@ -127,9 +136,28 @@ def require_permissions(*codes: str):
         db: Annotated[Session, Depends(get_db)],
     ) -> User:
         if user.is_super_admin:
-            return user
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                detail="Start an audited support session before accessing a tenant workspace",
+            )
         if not user_has_permissions(db, user, list(codes)):
             raise HTTPException(status.HTTP_403_FORBIDDEN, detail=f"Missing permission: {', '.join(codes)}")
+        organization = db.get(Organization, user.organization_id)
+        if organization and getattr(organization.industry, "value", organization.industry) == "college":
+            from app.services.access_policy import (
+                COLLEGE_POLICY_RELEVANT_PERMISSIONS,
+                policy_v2_enabled,
+                resolve_policy_context,
+            )
+            if (
+                set(codes).intersection(COLLEGE_POLICY_RELEVANT_PERMISSIONS)
+                and policy_v2_enabled(db, organization.id)
+                and not resolve_policy_context(db, user).active
+            ):
+                raise HTTPException(
+                    status.HTTP_403_FORBIDDEN,
+                    detail="Your College data access is awaiting review",
+                )
         from app.services.entitlements import entitlement_value, module_enabled
         module_map = {
             "clients": "clients", "client_memory": "clients", "client_signals": "clients",
@@ -138,7 +166,6 @@ def require_permissions(*codes: str):
             "gym": "gym", "clinic": "clinic", "clinical": "clinic", "pharmacy": "clinic",
             "documents": "documents", "reports": "reports", "notifications": "notifications", "ai": "ai",
         }
-        organization = db.get(Organization, user.organization_id)
         disabled = {module_map.get(code.split(".", 1)[0]) for code in codes}
         disabled.discard(None)
         for module in disabled:
@@ -166,10 +193,30 @@ def require_any_permission(*codes: str):
         db: Annotated[Session, Depends(get_db)],
     ) -> User:
         if user.is_super_admin:
-            return user
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                detail="Start an audited support session before accessing a tenant workspace",
+            )
         granted = get_user_permissions(db, user)
-        if not granted.intersection(codes):
+        matched = granted.intersection(codes)
+        if not matched:
             raise HTTPException(status.HTTP_403_FORBIDDEN, detail="This settings area is not available for your role")
+        organization = db.get(Organization, user.organization_id)
+        if organization and getattr(organization.industry, "value", organization.industry) == "college":
+            from app.services.access_policy import (
+                COLLEGE_POLICY_RELEVANT_PERMISSIONS,
+                policy_v2_enabled,
+                resolve_policy_context,
+            )
+            if (
+                matched.intersection(COLLEGE_POLICY_RELEVANT_PERMISSIONS)
+                and policy_v2_enabled(db, organization.id)
+                and not resolve_policy_context(db, user).active
+            ):
+                raise HTTPException(
+                    status.HTTP_403_FORBIDDEN,
+                    detail="Your College data access is awaiting review",
+                )
         return user
 
     return _check
@@ -181,7 +228,10 @@ def require_entitlements(*codes: str):
 
     def _check(user: CurrentUser, db: Annotated[Session, Depends(get_db)]) -> User:
         if user.is_super_admin:
-            return user
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                detail="Start an audited support session before accessing a tenant workspace",
+            )
         organization = db.get(Organization, user.organization_id)
         if not organization:
             raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Organization is unavailable")

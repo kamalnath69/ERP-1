@@ -121,6 +121,7 @@ class UserOut(ORMBase):
     designation: str | None = None
     email_verified: bool = False
     action_preferences: dict = {}
+    access_version: int = 1
 
 
 class UserCreate(RequestModel):

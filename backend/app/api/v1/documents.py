@@ -9,7 +9,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import Field
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import and_, case, false, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.api.v1.business import serialize
@@ -17,8 +17,10 @@ from app.core.config import ROOT_DIR, settings
 from app.core.database import get_db
 from app.schemas.validation import RequestModel
 from app.core.deps import require_entitlements, require_permissions
-from app.models import Client, Document, DocumentChunk, Job, Organization, OutboundMessage
+from app.models import Client, CollegeStudentProfile, Document, DocumentChunk, Job, Organization, OutboundMessage
 from app.services.business_access import ensure_client_access, ensure_location, tenant_get
+from app.services.access_policy import policy_v2_enabled, resolve_policy_context
+from app.services.college_access import resolve_college_access
 from app.services.cursor_pagination import decode_cursor, encode_cursor, page_size
 from app.services.entitlements import entitlement_value
 from app.services.rbac import user_has_permissions
@@ -120,6 +122,8 @@ async def upload_document(
     entity_id: str | None = Form(None), visibility: str = Form("team"),
     user=Depends(require_permissions("documents.manage")), db: Session = Depends(get_db),
 ):
+    from app.ai.retrieval import ensure_college_document_entity_access
+    ensure_college_document_entity_access(db, user, entity_type, entity_id)
     content_type = (file.content_type or "").lower()
     if content_type not in ALLOWED_TYPES: raise HTTPException(415, "Only PDF, DOCX, TXT, JPG, and PNG files are accepted")
     safe_name = safe_upload_name(
@@ -220,7 +224,20 @@ def search_documents(q: str, user=Depends(require_permissions("documents.view"))
 
 @router.get("/messages")
 def list_messages(user=Depends(require_permissions("notifications.send")), db: Session = Depends(get_db)):
-    return [serialize(row) for row in db.execute(select(OutboundMessage).where(OutboundMessage.organization_id == user.organization_id).order_by(OutboundMessage.created_at.desc()).limit(200)).scalars()]
+    statement = select(OutboundMessage).where(OutboundMessage.organization_id == user.organization_id)
+    organization = db.get(Organization, user.organization_id)
+    if organization and organization.industry.value == "college" and policy_v2_enabled(db, user.organization_id):
+        access = resolve_college_access(db, user, "students")
+        context = resolve_policy_context(db, user)
+        if not context.has_sensitive("college.students.contact.view"):
+            raise HTTPException(403, "Student contact access is required")
+        if not access.unrestricted:
+            visible_clients = select(CollegeStudentProfile.client_id).where(
+                CollegeStudentProfile.organization_id == user.organization_id,
+                CollegeStudentProfile.id.in_(access.full_student_ids) if access.full_student_ids else false(),
+            )
+            statement = statement.where(OutboundMessage.client_id.in_(visible_clients))
+    return [serialize(row) for row in db.execute(statement.order_by(OutboundMessage.created_at.desc()).limit(200)).scalars()]
 
 
 @router.get("/communication/status")
@@ -249,10 +266,22 @@ def send_message(body: MessageBody, user=Depends(require_permissions("notificati
     existing = db.execute(select(OutboundMessage).where(OutboundMessage.organization_id == user.organization_id, OutboundMessage.idempotency_key == body.idempotency_key)).scalar_one_or_none()
     if existing: return serialize(existing)
     client = tenant_get(db, Client, body.client_id, user)
+    ensure_client_access(db, user, client)
+    organization = db.get(Organization, user.organization_id)
+    if organization and organization.industry.value == "college" and policy_v2_enabled(db, user.organization_id):
+        access = resolve_college_access(db, user, "students")
+        if not resolve_policy_context(db, user).has_sensitive("college.students.contact.view"):
+            raise HTTPException(403, "Student contact access is required")
+        profile = db.execute(select(CollegeStudentProfile).where(
+            CollegeStudentProfile.organization_id == user.organization_id,
+            CollegeStudentProfile.client_id == client.id,
+        )).scalar_one_or_none()
+        if not profile:
+            raise HTTPException(404, "Student not found")
+        access.require_student(profile.id)
     if body.location_id: ensure_location(db, user, body.location_id)
     if body.channel != "whatsapp": raise HTTPException(400, "Client updates are sent through WhatsApp")
     if not client.whatsapp_consent or not client.phone: raise HTTPException(409, "WhatsApp consent and phone are required")
-    organization = db.get(Organization, user.organization_id)
     template = body.template or settings.WHATSAPP_TEMPLATE_CLIENT_UPDATE
     variables = body.template_variables or [client.first_name, body.body, organization.name]
     row = OutboundMessage(

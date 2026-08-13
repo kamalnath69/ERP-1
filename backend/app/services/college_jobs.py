@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ipaddress
+import hashlib
 import json
 import re
 import socket
@@ -19,6 +20,7 @@ from app.models import (
     CollegeResumeDraft, CollegeStudentProfile, Document,
 )
 from app.services.college_imports import commit_run, dotted_get, stage_rows
+from app.services.data_exchange import ingest_assessment_metric_records, ingest_exchange_records
 from app.services.college_placement import recompute_readiness
 from app.services.platform_security import decrypt_secret
 
@@ -64,9 +66,11 @@ def run_erp_sync(db: Session, payload: dict) -> None:
         return
     if not connector.encrypted_api_key:
         raise RuntimeError("ERP connector has no API key")
-    resources = payload.get("resource_types") or ["students", "term_results", "attendance"]
     config = connector.mapping or {}
     resource_configs = config.get("resources", config)
+    resources = payload.get("resource_types") or sorted(resource_configs) or [
+        "departments", "programs", "cohorts", "students", "term_results", "attendance",
+    ]
     secret = decrypt_secret(connector.encrypted_api_key)
     headers = {"Accept": "application/json"}
     if connector.auth_mode == "header":
@@ -76,6 +80,17 @@ def run_erp_sync(db: Session, payload: dict) -> None:
     connector.status = "syncing"
     db.flush()
     total = 0
+    cursor_state: dict[str, str] = {}
+    if connector.cursor:
+        try:
+            parsed_cursor = json.loads(connector.cursor)
+            if isinstance(parsed_cursor, dict):
+                cursor_state = {str(key): str(value) for key, value in parsed_cursor.items() if value not in (None, "")}
+            elif len(resources) == 1:
+                cursor_state[str(resources[0])] = str(connector.cursor)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            if len(resources) == 1:
+                cursor_state[str(resources[0])] = str(connector.cursor)
     try:
         base_url = _public_host(connector.base_url)
         expected_origin = _url_origin(base_url)
@@ -86,12 +101,16 @@ def run_erp_sync(db: Session, payload: dict) -> None:
                 urljoin(f"{base_url.rstrip('/')}/", path.lstrip("/")),
                 expected_origin=expected_origin,
             )
+            resource_url = next_url
+            pagination = resource_config.get("pagination") or connector.pagination or {}
+            resource_cursor = cursor_state.get(resource)
             params = {}
-            if connector.cursor:
-                params[(connector.pagination or {}).get("cursor_param", "cursor")] = connector.cursor
-            elif connector.last_sync_at and (connector.pagination or {}).get("mode") == "updated_since":
-                params[(connector.pagination or {}).get("updated_since_param", "updated_since")] = connector.last_sync_at.isoformat()
+            if resource_cursor and pagination.get("mode") == "cursor":
+                params[pagination.get("cursor_param", "cursor")] = resource_cursor
+            elif connector.last_sync_at and pagination.get("mode") == "updated_since":
+                params[pagination.get("updated_since_param", "updated_since")] = connector.last_sync_at.isoformat()
             page_count = 0
+            seen_cursors = {resource_cursor} if resource_cursor else set()
             while next_url and page_count < 100:
                 response = requests.get(next_url, headers=headers, params=params, timeout=(5, 20), allow_redirects=False)
                 if response.is_redirect:
@@ -104,38 +123,72 @@ def run_erp_sync(db: Session, payload: dict) -> None:
                     rows = payload_json
                 if not isinstance(rows, list):
                     raise RuntimeError(f"ERP {resource} response did not contain a row list at {root_path}")
-                run = stage_rows(
-                    db,
-                    organization_id=connector.organization_id,
-                    user_id=payload.get("requested_by_user_id"),
-                    source_type="erp",
-                    resource_type=resource,
-                    rows=rows,
-                    mapping={"fields": resource_config.get("fields", {}), "value_maps": resource_config.get("value_maps", {})},
-                    connector_id=connector.id,
-                    idempotency_key=f"erp:{connector.id}:{resource}:{page_count}:{connector.cursor or connector.last_sync_at or 'initial'}"[:180],
-                )
-                commit_run(db, run)
+                run_key = f"erp:{connector.id}:{resource}:{page_count}:{resource_cursor or connector.last_sync_at or 'initial'}"[:180]
+                if resource == "assessment_marks":
+                    transformed = [_map_dynamic_assessment_row(row, resource_config) for row in rows]
+                    request_hash = hashlib.sha256(json.dumps(transformed, sort_keys=True, default=str).encode()).hexdigest()
+                    run = ingest_assessment_metric_records(
+                        db,
+                        organization_id=connector.organization_id,
+                        records=transformed,
+                        source_type="erp_pull",
+                        idempotency_key=run_key,
+                        request_hash=request_hash,
+                        initiated_by_user_id=payload.get("requested_by_user_id"),
+                        auto_commit=True,
+                    )
+                elif resource == "exam_cycles":
+                    transformed = [_map_exam_cycle_row(row, resource_config) for row in rows]
+                    request_hash = hashlib.sha256(json.dumps(transformed, sort_keys=True, default=str).encode()).hexdigest()
+                    run = ingest_exchange_records(
+                        db,
+                        organization_id=connector.organization_id,
+                        resource_key="exam_cycles",
+                        records=transformed,
+                        source_type="erp_pull",
+                        idempotency_key=run_key,
+                        request_hash=request_hash,
+                        initiated_by_user_id=payload.get("requested_by_user_id"),
+                        auto_commit=True,
+                    )
+                else:
+                    run = stage_rows(
+                        db,
+                        organization_id=connector.organization_id,
+                        user_id=payload.get("requested_by_user_id"),
+                        source_type="erp",
+                        resource_type=resource,
+                        rows=rows,
+                        mapping={"fields": resource_config.get("fields", {}), "value_maps": resource_config.get("value_maps", {})},
+                        connector_id=connector.id,
+                        idempotency_key=run_key,
+                    )
+                    commit_run(db, run)
                 total += run.committed_count
                 page_count += 1
-                pagination = connector.pagination or {}
                 next_path = pagination.get("next_url_path")
                 cursor_path = pagination.get("cursor_path")
                 next_value = dotted_get(payload_json, next_path) if next_path else None
                 cursor = dotted_get(payload_json, cursor_path) if cursor_path else None
                 if cursor:
-                    connector.cursor = str(cursor)
+                    cursor_state[resource] = str(cursor)
                 if next_value:
                     next_url = _public_host(
                         urljoin(next_url, str(next_value)),
                         expected_origin=expected_origin,
                     )
                     params = {}
+                elif cursor and str(cursor) not in seen_cursors and pagination.get("mode") == "cursor":
+                    resource_cursor = str(cursor)
+                    seen_cursors.add(resource_cursor)
+                    next_url = resource_url
+                    params = {pagination.get("cursor_param", "cursor"): resource_cursor}
                 else:
                     next_url = None
         now = datetime.now(timezone.utc)
         connector.status = "ready"
         connector.last_sync_at = now
+        connector.cursor = json.dumps(cursor_state, separators=(",", ":"), sort_keys=True) if cursor_state else None
         connector.next_sync_at = now + timedelta(hours=connector.sync_interval_hours)
         connector.last_error = None
     except Exception as exc:
@@ -145,6 +198,47 @@ def run_erp_sync(db: Session, payload: dict) -> None:
         raise
     finally:
         db.flush()
+
+
+def _mapped_value(raw: dict, mapping: dict, key: str, default: str | None = None):
+    path = mapping.get(key, default or key)
+    return dotted_get(raw, path) if "." in str(path) else raw.get(path)
+
+
+def _map_dynamic_assessment_row(raw: dict, resource_config: dict) -> dict:
+    """Map an ERP row without inventing institution-specific metric names."""
+    fields = resource_config.get("fields") or {}
+    metric_paths = resource_config.get("metrics") or {}
+    metrics_value = _mapped_value(raw, fields, "metrics")
+    metrics = dict(metrics_value) if isinstance(metrics_value, dict) else {}
+    for metric_code, source_path in metric_paths.items():
+        value = dotted_get(raw, source_path) if "." in str(source_path) else raw.get(source_path)
+        if value is not None:
+            metrics[str(metric_code)] = value
+    academic_scope = _mapped_value(raw, fields, "academic_scope")
+    if not isinstance(academic_scope, dict):
+        academic_scope = {}
+    for key in ("assessment_id", "offering_id"):
+        value = _mapped_value(raw, fields, key)
+        if value not in (None, ""):
+            academic_scope[key] = value
+    return {
+        "scheme_code": _mapped_value(raw, fields, "scheme_code"),
+        "scheme_version": _mapped_value(raw, fields, "scheme_version"),
+        "cycle_code": _mapped_value(raw, fields, "cycle_code"),
+        "student": _mapped_value(raw, fields, "student", "admission_number"),
+        "academic_scope": academic_scope,
+        "metrics": metrics,
+    }
+
+
+def _map_exam_cycle_row(raw: dict, resource_config: dict) -> dict:
+    fields = resource_config.get("fields") or {}
+    keys = (
+        "scheme_code", "scheme_version", "component_code", "cycle_code", "cycle_name",
+        "term_id", "held_on", "due_on", "offering_ids", "cohort_ids",
+    )
+    return {key: _mapped_value(raw, fields, key) for key in keys}
 
 
 def run_coding_sync(db: Session, payload: dict) -> None:

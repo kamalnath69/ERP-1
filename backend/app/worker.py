@@ -36,6 +36,8 @@ JOB_CHANGE_PATHS = {
     "college_coding_sync": "/college/coding",
     "college_resume_extract": "/college/students",
     "college_readiness_recompute": "/college/placement-dashboard",
+    "data_exchange_validate": "/data-exchange/runs",
+    "data_exchange_export": "/data-exchange/runs",
 }
 
 
@@ -67,6 +69,12 @@ def run_once() -> bool:
             elif job.kind == "college_readiness_recompute":
                 from app.services.college_jobs import run_readiness_recompute
                 run_readiness_recompute(db, job.payload)
+            elif job.kind == "data_exchange_validate":
+                from app.services.data_exchange import process_import_job
+                process_import_job(db, job.payload["run_id"])
+            elif job.kind == "data_exchange_export":
+                from app.services.data_exchange import process_export_job
+                process_export_job(db, job.payload["run_id"])
             else: raise ValueError(f"Unknown job kind {job.kind}")
             job.status = "completed"; job.last_error = None
         except Exception as exc:
@@ -155,9 +163,14 @@ def _schedule_college_jobs(db, now):
     )).scalars()
     for connector in due_connectors:
         bucket = now.strftime("%Y%m%d%H")
+        mapping = connector.mapping or {}
+        resource_configs = mapping.get("resources", mapping)
+        resource_types = sorted(resource_configs) if resource_configs else [
+            "students", "term_results", "attendance", "skills",
+        ]
         queue(
             "college_erp_sync", connector.organization_id,
-            {"connector_id": connector.id, "resource_types": ["students", "term_results", "attendance", "skills", "assessments"]},
+            {"connector_id": connector.id, "resource_types": resource_types},
             f"college-erp-scheduled:{connector.id}:{bucket}"[:120],
         )
         connector.status = "queued"
@@ -455,7 +468,12 @@ def _refresh_client_signals(db, organization_id):
         return
     owner = db.execute(
         select(User).join(UserRole, UserRole.user_id == User.id).join(Role, Role.id == UserRole.role_id)
-        .where(User.organization_id == organization_id, Role.slug == "owner", User.is_active.is_(True))
+        .where(
+            User.organization_id == organization_id,
+            Role.slug == "owner",
+            Role.is_system.is_(True),
+            User.is_active.is_(True),
+        )
         .limit(1)
     ).scalar_one_or_none()
     if not owner:

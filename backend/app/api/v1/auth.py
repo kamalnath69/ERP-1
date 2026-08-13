@@ -87,8 +87,14 @@ def _session_response(
 ) -> LoginResponse:
     csrf = new_csrf_token()
     security_claims = {"mfa_verified": mfa_verified, "mfa_pending": mfa_pending}
-    access = create_access_token(user.id, user.organization_id, {"is_super": user.is_super_admin, "sv": user.session_version, **security_claims})
-    refresh = create_refresh_token(user.id, user.organization_id, {"family": family_id or secrets.token_hex(16), "sv": user.session_version, **security_claims})
+    access = create_access_token(user.id, user.organization_id, {
+        "is_super": user.is_super_admin, "sv": user.session_version,
+        "av": user.access_version, **security_claims,
+    })
+    refresh = create_refresh_token(user.id, user.organization_id, {
+        "family": family_id or secrets.token_hex(16), "sv": user.session_version,
+        "av": user.access_version, **security_claims,
+    })
     family = family_id or decode_token(refresh)["family"]
     row = RefreshToken(
         user_id=user.id, token_hash=token_hash(refresh), family_id=family,
@@ -653,14 +659,30 @@ def revoke_all_sessions(response: Response, user: User = Depends(get_current_use
 @router.get("/me")
 def me(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     from app.services.rbac import get_user_permissions, get_user_roles
-    perms = list(get_user_permissions(db, user)); roles = [{"id": role.id, "name": role.name, "slug": role.slug} for role in get_user_roles(db, user)]
+    from app.services.access_policy import (
+        COLLEGE_POLICY_RELEVANT_PERMISSIONS,
+        policy_summary,
+        policy_v2_enabled,
+        resolve_policy_context,
+    )
+    perms = set(get_user_permissions(db, user)); roles = [{"id": role.id, "name": role.name, "slug": role.slug} for role in get_user_roles(db, user)]
     org = db.get(Organization, user.organization_id) if user.organization_id else None
+    access_context = resolve_policy_context(db, user) if user.organization_id else None
+    if (
+        org
+        and getattr(org.industry, "value", org.industry) == "college"
+        and policy_v2_enabled(db, org.id)
+        and access_context
+        and not access_context.active
+    ):
+        perms.difference_update(COLLEGE_POLICY_RELEVANT_PERMISSIONS)
     user_data = UserOut.model_validate(user).model_dump()
     if user.organization_id:
         from app.services.user_security import mfa_requirement
         state = mfa_requirement(db, user)
         user_data.update({"mfa_enabled": state["enabled"], "mfa_required": state["required"], "mfa_enrollment_required": state["required"] and not state["enabled"]})
     return {
-        "user": user_data, "permissions": perms, "roles": roles,
+        "user": user_data, "permissions": sorted(perms), "roles": roles,
+        "access_context": policy_summary(access_context) if access_context else None,
         "organization": {"id": org.id, "name": org.name, "slug": org.slug, "industry": org.industry.value, "plan": org.plan.value, "status": org.status.value, "ai_provider": org.ai_provider, "enabled_modules": org.enabled_modules, "timezone": org.timezone, "onboarding_complete": org.onboarding_complete} if org else None,
     }

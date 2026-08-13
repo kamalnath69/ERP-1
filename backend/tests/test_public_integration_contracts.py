@@ -9,7 +9,10 @@ from app.api.v1.college_integrations import (
 )
 from app.api.v1.public_site import LegalDraftBody, LegalDraftUpdateBody, PublishBody
 from app.services.college_imports import normalize_row, validate_row
-from app.services.public_site import LEGAL_PROFILE_DEFAULTS, content_hash, materialize_legal_content
+from app.services.public_site import (
+    LEGAL_PROFILE_DEFAULTS, VERSION_TWO_DOCUMENTS,
+    content_hash, materialize_legal_content,
+)
 
 
 def test_legal_defaults_do_not_invent_operator_identity_or_jurisdiction():
@@ -34,6 +37,28 @@ def test_legal_markdown_is_html_free_version_locked_and_hashable():
 
     with pytest.raises(ValidationError):
         LegalDraftBody(title="Terms", content_markdown="<script>alert(1)</script>" + "x" * 100)
+
+
+def test_version_two_legal_pack_is_detailed_reviewable_markdown():
+    assert set(VERSION_TWO_DOCUMENTS) == {"terms", "privacy", "refund"}
+
+    expected_topics = {
+        "terms": ("AI-assisted features", "Acceptable use", "Organization data"),
+        "privacy": ("Individual choices and rights", "AI-assisted processing", "Retention"),
+        "refund": ("Failed, pending, and reversed payments", "Duplicate payments", "Statutory and consumer rights"),
+    }
+    hashes = set()
+    for kind, document in VERSION_TWO_DOCUMENTS.items():
+        content = document["content"].strip()
+        assert content.startswith(f"# {document['title']}")
+        assert len(content) >= 8_000
+        assert content.count("\n## ") >= 15
+        assert "{{legal_name}}" in content
+        assert "{{support_email}}" in content
+        assert not any(marker in content.lower() for marker in ("<script", "<iframe", "javascript:"))
+        assert all(topic in content for topic in expected_topics[kind])
+        hashes.add(content_hash(content))
+    assert len(hashes) == 3
 
 
 def test_push_credentials_are_scoped_expiring_and_never_return_a_recoverable_hash():
@@ -82,3 +107,13 @@ def test_filtered_openapi_exposes_only_supported_integration_routes():
     assert "/api/integrations/v1/college/{resource}" in contract["paths"]
     assert "/api/integrations/v1/college/runs/{run_id}" in contract["paths"]
     assert all("super-admin" not in path and "/auth/" not in path for path in contract["paths"])
+    operation = contract["paths"]["/api/integrations/v1/college/{resource}"]["post"]
+    assert set(operation["x-edvatiq-resource-schemas"]) == {
+        "departments", "programs", "cohorts", "terms", "courses",
+        "exam_cycles", "assessment_marks",
+    }
+    cohort_schema = contract["components"]["schemas"]["CollegeCohortRecord"]
+    assert {"program_code", "graduation_year", "section"}.issubset(cohort_schema["properties"])
+    marks_schema = contract["components"]["schemas"]["CollegeAssessmentMarksRecord"]
+    assert marks_schema["properties"]["metrics"]["additionalProperties"] is True
+    assert "cycle_code" in marks_schema["required"]

@@ -38,6 +38,7 @@ class CollegeTermResult(TimestampMixin, Base):
     source_key: Mapped[str] = mapped_column(String(160), default="manual", nullable=False)
     external_id: Mapped[str | None] = mapped_column(String(180), index=True)
     source_payload: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
 
 class CollegeAttendanceSnapshot(TimestampMixin, Base):
@@ -62,6 +63,7 @@ class CollegeAttendanceSnapshot(TimestampMixin, Base):
     source_type: Mapped[str] = mapped_column(String(24), default="manual", nullable=False)
     source_key: Mapped[str] = mapped_column(String(160), default="manual", nullable=False)
     external_id: Mapped[str | None] = mapped_column(String(180), index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
 
 class CollegeCareerProfile(TimestampMixin, Base):
@@ -106,6 +108,7 @@ class CollegeCareerEvidence(TimestampMixin, Base):
     source_type: Mapped[str] = mapped_column(String(24), default="manual", nullable=False)
     external_id: Mapped[str | None] = mapped_column(String(180), index=True)
     details: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
 
 class CollegePlacementAssessment(TimestampMixin, Base):

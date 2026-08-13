@@ -50,6 +50,7 @@ const initialState = {
   organization: null,
   permissions: [],
   roles: [],
+  accessContext: null,
   loading: true,
   error: null,
 };
@@ -63,6 +64,7 @@ const authSlice = createSlice({
       state.organization = action.payload.organization ?? state.organization;
       state.permissions = action.payload.permissions ?? state.permissions;
       state.roles = action.payload.roles ?? state.roles;
+      state.accessContext = action.payload.access_context ?? state.accessContext;
     },
     patchUser: (state, action) => {
       if (state.user) state.user = { ...state.user, ...action.payload };
@@ -81,6 +83,7 @@ const authSlice = createSlice({
         s.organization = a.payload.organization;
         s.permissions = a.payload.permissions || [];
         s.roles = a.payload.roles || [];
+        s.accessContext = a.payload.access_context || null;
       })
       .addCase(fetchMe.rejected, (s, a) => {
         s.loading = false;
@@ -88,6 +91,7 @@ const authSlice = createSlice({
         s.organization = null;
         s.permissions = [];
         s.roles = [];
+        s.accessContext = null;
         s.error = a.payload?.detail || "Not authenticated";
       })
       .addCase(logoutThunk.fulfilled, () => ({ ...initialState, loading: false }));

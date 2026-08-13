@@ -12,11 +12,13 @@ from sqlalchemy.orm import Session
 from app.models import (
     CatalogItem,
     Client,
+    CollegeStudentProfile,
     Employee,
     EmployeeLocation,
     Location,
     Membership,
     Notification,
+    Organization,
     SaleInvoice,
     SaleLine,
     SalePayment,
@@ -33,6 +35,7 @@ from app.services.business_access import (
     organization_for,
 )
 from app.services.cursor_pagination import decode_cursor_or_legacy_id, encode_cursor
+from app.services.access_policy import policy_v2_enabled, require_policy_domain, resolve_policy_context
 from app.services.rbac import get_user_permissions
 
 
@@ -46,13 +49,52 @@ def _serialize(row) -> dict:
 
 def _scoped_statement(db: Session, user: User):
     statement = select(SaleInvoice).where(SaleInvoice.organization_id == user.organization_id)
-    statement = filter_locations(statement, SaleInvoice, db, user)
-    client_ids = allowed_client_ids(db, user)
+    organization = db.get(Organization, user.organization_id)
+    is_college_policy = bool(
+        organization
+        and organization.industry.value == "college"
+        and policy_v2_enabled(db, user.organization_id)
+    )
+    if is_college_policy:
+        context = require_policy_domain(db, user, "clearance", "view")
+        if not context.has_sensitive("college.fees.view"):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "College Finance access is required")
+        scope = context.scope("clearance")
+        client_ids = None if scope.unrestricted else set(db.execute(select(
+            CollegeStudentProfile.client_id,
+        ).where(
+            CollegeStudentProfile.organization_id == user.organization_id,
+            CollegeStudentProfile.id.in_(scope.student_ids) if scope.student_ids else False,
+        )).scalars())
+    else:
+        statement = filter_locations(statement, SaleInvoice, db, user)
+        client_ids = allowed_client_ids(db, user)
     if client_ids is not None:
         client_clause = SaleInvoice.client_id.in_(client_ids) if client_ids else False
-        # Walk-in invoices contain no Client identity and remain location-scoped.
-        statement = statement.where(or_(client_clause, SaleInvoice.client_id.is_(None)))
+        if is_college_policy:
+            statement = statement.where(client_clause)
+        else:
+            # Walk-in invoices contain no Client identity and remain location-scoped.
+            statement = statement.where(or_(client_clause, SaleInvoice.client_id.is_(None)))
     return statement
+
+
+def _ensure_sale_client_access(db: Session, user: User, client: Client) -> None:
+    organization = db.get(Organization, user.organization_id)
+    if (
+        organization
+        and organization.industry.value == "college"
+        and policy_v2_enabled(db, user.organization_id)
+    ):
+        context = require_policy_domain(db, user, "clearance", "view")
+        profile = db.execute(select(CollegeStudentProfile).where(
+            CollegeStudentProfile.organization_id == user.organization_id,
+            CollegeStudentProfile.client_id == client.id,
+        )).scalar_one_or_none()
+        if not profile or not context.scope("clearance").contains("student", profile.id):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Invoice not found")
+        return
+    ensure_client_access(db, user, client)
 
 
 def _filtered_statement(
@@ -80,7 +122,16 @@ def _filtered_statement(
     if query:
         normalized = " ".join(query.casefold().split())
         compact = "".join(character for character in normalized if character.isalnum())
-        client_name = func.lower(func.concat_ws(" ", Client.first_name, Client.last_name, Client.phone, Client.email))
+        organization = db.get(Organization, user.organization_id)
+        college_context = (
+            resolve_policy_context(db, user)
+            if organization and organization.industry.value == "college" and policy_v2_enabled(db, user.organization_id)
+            else None
+        )
+        client_fields = [Client.first_name, Client.last_name]
+        if not college_context or college_context.has_sensitive("college.students.contact.view"):
+            client_fields.extend([Client.phone, Client.email])
+        client_name = func.lower(func.concat_ws(" ", *client_fields))
         compact_client = func.regexp_replace(client_name, r"[^[:alnum:]]+", "", "g")
         line_match = exists(select(SaleLine.id).where(
             SaleLine.invoice_id == SaleInvoice.id,
@@ -108,7 +159,7 @@ def _invoice_access(db: Session, user: User, invoice_id: str, *, lock: bool = Fa
     if invoice.client_id:
         client = db.get(Client, invoice.client_id)
         if client:
-            ensure_client_access(db, user, client)
+            _ensure_sale_client_access(db, user, client)
     return invoice
 
 
@@ -482,7 +533,7 @@ def create_sale(db: Session, user: User, body) -> dict:
         client = db.get(Client, body.client_id)
         if not client:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Client not found")
-        ensure_client_access(db, user, client)
+        _ensure_sale_client_access(db, user, client)
     if body.employee_id:
         employee = db.execute(select(Employee).where(
             Employee.id == body.employee_id,

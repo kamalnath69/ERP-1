@@ -20,22 +20,30 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.deps import require_entitlements, require_permissions
 from app.models import (
-    CollegeDataConnector, CollegeImportRun, CollegeIntegrationCredential,
-    CollegeIntegrationRateBucket, Organization, User,
+    CollegeDataConnector, CollegeExamCycle, CollegeImportRun,
+    CollegeIntegrationCredential, CollegeIntegrationRateBucket,
+    DataExchangeRow, DataExchangeRun, Organization, User,
 )
 from app.schemas.validation import RequestModel
 from app.services.audit import log_action
+from app.services.access_policy import policy_v2_enabled, resolve_policy_context
 from app.services.college import require_college, tenant_row
+from app.services.college_access import resolve_college_access
 from app.services.college_imports import RESOURCE_FIELDS, commit_run, stage_rows
+from app.services.data_exchange import (
+    ingest_assessment_metric_records, ingest_exchange_records, resource_schema,
+)
 
 
 RESOURCE_TYPES = (
-    "students", "term_results", "attendance", "skills", "assessments",
-    "internship_clearance",
+    "departments", "programs", "terms", "cohorts", "courses", "students",
+    "term_results", "attendance", "skills", "assessments", "internship_clearance",
+    "assessment_marks", "exam_cycles",
 )
 ResourceType = Literal[
-    "students", "term_results", "attendance", "skills", "assessments",
-    "internship_clearance",
+    "departments", "programs", "terms", "cohorts", "courses", "students",
+    "term_results", "attendance", "skills", "assessments", "internship_clearance",
+    "assessment_marks", "exam_cycles",
 ]
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
 MAX_RECORDS = 500
@@ -50,6 +58,16 @@ credential_router = APIRouter(
     dependencies=[Depends(require_entitlements("module.college"))],
 )
 integration_router = APIRouter(prefix="/integrations/v1", tags=["college-erp-api"])
+
+
+def _require_credential_administration(db: Session, user: User) -> None:
+    """Require both the Data domain and the explicit credential safeguard."""
+    require_college(db, user)
+    resolve_college_access(db, user, "data")
+    if policy_v2_enabled(db, user.organization_id):
+        context = resolve_policy_context(db, user)
+        if not context.has_sensitive("college.integrations.manage"):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Integration credential access is required")
 
 
 class CredentialBody(RequestModel):
@@ -124,6 +142,33 @@ def _run_payload(run: CollegeImportRun, *, replayed: bool = False) -> dict:
             {"row": item.get("row"), "errors": list(item.get("errors") or [])[:10]}
             for item in (run.validation_errors or [])[:500]
         ],
+        "created_at": run.created_at,
+        "completed_at": run.completed_at,
+        "replayed": replayed,
+    }
+
+
+def _exchange_result_payload(db: Session, run: DataExchangeRun, *, replayed: bool = False) -> dict:
+    failed = int(run.invalid_count or 0) + int(run.conflict_count or 0)
+    if run.committed_count and failed:
+        public_status = "partial"
+    elif run.committed_count:
+        public_status = "committed"
+    else:
+        public_status = "invalid"
+    rows = list(db.scalars(select(DataExchangeRow).where(
+        DataExchangeRow.organization_id == run.organization_id,
+        DataExchangeRow.run_id == run.id,
+        DataExchangeRow.status.in_(("invalid", "conflict")),
+    ).order_by(DataExchangeRow.row_number).limit(500)))
+    return {
+        "run_id": run.id,
+        "resource": run.resource_key,
+        "status": public_status,
+        "received_count": int(run.row_count or 0),
+        "committed_count": int(run.committed_count or 0),
+        "failed_count": failed,
+        "errors": [{"row": row.row_number, "errors": list(row.errors or [])[:10]} for row in rows],
         "created_at": run.created_at,
         "completed_at": run.completed_at,
         "replayed": replayed,
@@ -208,12 +253,32 @@ def _consume_rate_limit(db: Session, credential: CollegeIntegrationCredential, r
     db.commit()
 
 
+def _stage_dynamic_assessment_push(
+    db: Session,
+    credential: CollegeIntegrationCredential,
+    records: list[dict],
+    *,
+    scoped_key: str,
+    request_hash: str,
+) -> DataExchangeRun:
+    return ingest_assessment_metric_records(
+        db,
+        organization_id=credential.organization_id,
+        records=records,
+        source_type="erp_push",
+        idempotency_key=scoped_key,
+        request_hash=request_hash,
+        access_mapping={},
+        auto_commit=True,
+    )
+
+
 @credential_router.get("")
 def list_credentials(
     db: Session = Depends(get_db),
     user: User = Depends(require_permissions("college.integrations.manage")),
 ):
-    require_college(db, user)
+    _require_credential_administration(db, user)
     rows = db.execute(select(CollegeIntegrationCredential).where(
         CollegeIntegrationCredential.organization_id == user.organization_id,
     ).order_by(CollegeIntegrationCredential.created_at.desc())).scalars()
@@ -227,7 +292,7 @@ def create_credential(
     db: Session = Depends(get_db),
     user: User = Depends(require_permissions("college.integrations.manage")),
 ):
-    require_college(db, user)
+    _require_credential_administration(db, user)
     token, prefix, token_hash = _issue_token()
     connector = CollegeDataConnector(
         organization_id=user.organization_id,
@@ -278,7 +343,7 @@ def rotate_credential(
     db: Session = Depends(get_db),
     user: User = Depends(require_permissions("college.integrations.manage")),
 ):
-    require_college(db, user)
+    _require_credential_administration(db, user)
     row = tenant_row(db, CollegeIntegrationCredential, credential_id, user, "Integration credential")
     if row.version != body.version:
         raise HTTPException(status.HTTP_409_CONFLICT, "The credential changed. Refresh and try again")
@@ -309,7 +374,7 @@ def revoke_credential(
     db: Session = Depends(get_db),
     user: User = Depends(require_permissions("college.integrations.manage")),
 ):
-    require_college(db, user)
+    _require_credential_administration(db, user)
     row = tenant_row(db, CollegeIntegrationCredential, credential_id, user, "Integration credential")
     if row.version != body.version:
         raise HTTPException(status.HTTP_409_CONFLICT, "The credential changed. Refresh and try again")
@@ -328,6 +393,40 @@ def revoke_credential(
         )
         db.commit()
     return _credential_payload(row)
+
+
+@integration_router.get("/college/schemas/{resource}")
+def integration_resource_schema(
+    resource: ResourceType,
+    cycle_id: str | None = None,
+    cycle_code: str | None = None,
+    credential: CollegeIntegrationCredential = Depends(_require_integration_credential),
+    db: Session = Depends(get_db),
+):
+    if resource not in credential.scopes:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, f"This credential cannot access {resource}")
+    _consume_rate_limit(db, credential, 0)
+    if resource == "assessment_marks" and not cycle_id and cycle_code:
+        cycle_id = db.scalar(select(CollegeExamCycle.id).where(
+            CollegeExamCycle.organization_id == credential.organization_id,
+            CollegeExamCycle.code == str(cycle_code).strip().upper().replace("-", "_"),
+        ))
+        if not cycle_id:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Exam cycle not found")
+    if resource == "assessments":
+        fields = RESOURCE_FIELDS["assessments"]
+        return {
+            "resource": {"key": resource, "label": "Placement assessments", "methods": ["api_push"]},
+            "schema_version": "legacy-placement-1",
+            "fields": [{"key": key, "label": key.replace("_", " ").title(), "type": "text"} for key in fields],
+            "deprecation": "Use assessment_marks for institution-configured academic, coding, and placement metrics.",
+        }
+    return resource_schema(
+        db,
+        credential.organization_id,
+        resource,
+        {"cycle_id": cycle_id} if cycle_id else {},
+    )
 
 
 @integration_router.post("/college/{resource}")
@@ -349,7 +448,10 @@ async def push_college_records(
         raise HTTPException(status.HTTP_403_FORBIDDEN, f"This credential cannot write {resource}")
     _consume_rate_limit(db, credential, len(body.records))
 
-    missing_external_ids = [index + 1 for index, row in enumerate(body.records) if not str(row.get("external_id") or "").strip()]
+    missing_external_ids = [
+        index + 1 for index, row in enumerate(body.records)
+        if resource not in {"assessment_marks", "exam_cycles"} and not str(row.get("external_id") or "").strip()
+    ]
     if missing_external_ids:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -357,6 +459,53 @@ async def push_college_records(
         )
     request_hash = hashlib.sha256(canonical).hexdigest()
     scoped_key = f"push:{credential.id}:{resource}:{idempotency_key}"
+    if resource in {"assessment_marks", "exam_cycles"}:
+        existing_exchange = db.scalar(select(DataExchangeRun).where(
+            DataExchangeRun.organization_id == credential.organization_id,
+            DataExchangeRun.idempotency_key == scoped_key,
+        ))
+        if existing_exchange:
+            if existing_exchange.request_hash != request_hash:
+                raise HTTPException(status.HTTP_409_CONFLICT, "Idempotency-Key was already used with different content")
+            return _exchange_result_payload(db, existing_exchange, replayed=True)
+        try:
+            if resource == "assessment_marks":
+                exchange_run = _stage_dynamic_assessment_push(
+                    db, credential, body.records,
+                    scoped_key=scoped_key, request_hash=request_hash,
+                )
+            else:
+                exchange_run = ingest_exchange_records(
+                    db,
+                    organization_id=credential.organization_id,
+                    resource_key=resource,
+                    records=body.records,
+                    source_type="erp_push",
+                    idempotency_key=scoped_key,
+                    request_hash=request_hash,
+                    auto_commit=True,
+                )
+            log_action(
+                db, organization_id=credential.organization_id, user_id=None,
+                action=f"college.integration.{resource}_received",
+                resource_type="data_exchange_run", resource_id=exchange_run.id,
+                rows_affected=exchange_run.committed_count,
+                meta={"received": exchange_run.row_count, "failed": exchange_run.invalid_count, "credential_id": credential.id},
+            )
+            db.commit()
+        except (ValueError, PermissionError) as exc:
+            db.rollback()
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+        except IntegrityError:
+            db.rollback()
+            existing_exchange = db.scalar(select(DataExchangeRun).where(
+                DataExchangeRun.organization_id == credential.organization_id,
+                DataExchangeRun.idempotency_key == scoped_key,
+            ))
+            if existing_exchange and existing_exchange.request_hash == request_hash:
+                return _exchange_result_payload(db, existing_exchange, replayed=True)
+            raise HTTPException(status.HTTP_409_CONFLICT, "Idempotency-Key was already used with different content")
+        return _exchange_result_payload(db, exchange_run)
     existing = db.execute(select(CollegeImportRun).where(
         CollegeImportRun.credential_id == credential.id,
         CollegeImportRun.idempotency_key == scoped_key,
@@ -424,14 +573,155 @@ def integration_run(
         CollegeImportRun.organization_id == credential.organization_id,
         CollegeImportRun.credential_id == credential.id,
     )).scalar_one_or_none()
-    if not run:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Integration run not found")
-    return _run_payload(run)
+    if run:
+        return _run_payload(run)
+    exchange_run = db.scalar(select(DataExchangeRun).where(
+        DataExchangeRun.id == run_id,
+        DataExchangeRun.organization_id == credential.organization_id,
+        DataExchangeRun.idempotency_key.like(f"push:{credential.id}:%"),
+    ))
+    if exchange_run:
+        return _exchange_result_payload(db, exchange_run)
+    raise HTTPException(status.HTTP_404_NOT_FOUND, "Integration run not found")
 
 
 @integration_router.get("/openapi.json", include_in_schema=False)
 def integration_openapi():
     resource_enum = list(RESOURCE_TYPES)
+    structure_schemas = {
+        "CollegeDepartmentRecord": {
+            "type": "object", "additionalProperties": False,
+            "required": ["external_id", "name", "code"],
+            "properties": {
+                "external_id": {"type": "string", "maxLength": 180},
+                "name": {"type": "string", "maxLength": 180},
+                "code": {"type": "string", "maxLength": 30},
+                "description": {"type": ["string", "null"], "maxLength": 1000},
+                "source_updated_at": {"type": ["string", "null"], "format": "date-time"},
+            },
+        },
+        "CollegeProgramRecord": {
+            "type": "object", "additionalProperties": False,
+            "required": ["external_id", "department_code", "name", "code"],
+            "properties": {
+                "external_id": {"type": "string", "maxLength": 180},
+                "department_code": {"type": "string", "maxLength": 30},
+                "name": {"type": "string", "maxLength": 200},
+                "code": {"type": "string", "maxLength": 40},
+                "degree_type": {"type": "string", "enum": ["undergraduate", "postgraduate", "diploma", "certificate"]},
+                "duration_semesters": {"type": "integer", "minimum": 1, "maximum": 16},
+                "source_updated_at": {"type": ["string", "null"], "format": "date-time"},
+            },
+        },
+        "CollegeCohortRecord": {
+            "type": "object", "additionalProperties": False,
+            "required": ["external_id", "program_code", "name", "code", "admission_year", "graduation_year"],
+            "properties": {
+                "external_id": {"type": "string", "maxLength": 180},
+                "program_code": {"type": "string", "maxLength": 40},
+                "name": {"type": "string", "maxLength": 120},
+                "code": {"type": "string", "maxLength": 50},
+                "admission_year": {"type": "integer", "minimum": 2000, "maximum": 2200},
+                "graduation_year": {"type": "integer", "minimum": 2000, "maximum": 2200},
+                "current_semester": {"type": "integer", "minimum": 1, "maximum": 16},
+                "section": {"type": ["string", "null"], "maxLength": 20},
+                "source_updated_at": {"type": ["string", "null"], "format": "date-time"},
+            },
+        },
+        "CollegeTermRecord": {
+            "type": "object", "additionalProperties": False,
+            "required": ["external_id", "name", "academic_year", "term_number", "starts_on", "ends_on"],
+            "properties": {
+                "external_id": {"type": "string", "maxLength": 180},
+                "name": {"type": "string", "maxLength": 80},
+                "academic_year": {"type": "string", "maxLength": 20},
+                "term_number": {"type": "integer", "minimum": 1, "maximum": 16},
+                "starts_on": {"type": "string", "format": "date"},
+                "ends_on": {"type": "string", "format": "date"},
+                "status": {"type": "string", "enum": ["planned", "active", "closed"]},
+                "is_current": {"type": "boolean"},
+                "source_updated_at": {"type": ["string", "null"], "format": "date-time"},
+            },
+        },
+        "CollegeCourseRecord": {
+            "type": "object", "additionalProperties": False,
+            "required": ["external_id", "department_code", "name", "code"],
+            "properties": {
+                "external_id": {"type": "string", "maxLength": 180},
+                "department_code": {"type": "string", "maxLength": 30},
+                "name": {"type": "string", "maxLength": 200},
+                "code": {"type": "string", "maxLength": 40},
+                "credits": {"type": "integer", "minimum": 0, "maximum": 30},
+                "course_type": {"type": "string", "enum": ["core", "elective", "lab", "project", "audit"]},
+                "source_updated_at": {"type": ["string", "null"], "format": "date-time"},
+            },
+        },
+        "CollegeAssessmentMarksRecord": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["scheme_code", "scheme_version", "cycle_code", "student", "metrics"],
+            "properties": {
+                "scheme_code": {"type": "string", "maxLength": 50},
+                "scheme_version": {"type": "integer", "minimum": 1},
+                "cycle_code": {"type": "string", "maxLength": 60},
+                "student": {
+                    "oneOf": [
+                        {"type": "string", "description": "Admission number"},
+                        {"type": "object", "required": ["admission_number"], "properties": {"admission_number": {"type": "string"}}, "additionalProperties": False},
+                    ],
+                },
+                "academic_scope": {
+                    "type": ["object", "null"],
+                    "properties": {
+                        "assessment_id": {"type": ["string", "null"], "format": "uuid"},
+                        "offering_id": {"type": ["string", "null"], "format": "uuid"},
+                    },
+                    "additionalProperties": False,
+                },
+                "metrics": {
+                    "type": "object",
+                    "description": "Keys and value types come from the selected cycle schema; unknown keys are quarantined.",
+                    "additionalProperties": True,
+                },
+            },
+        },
+        "CollegeExamCycleRecord": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["scheme_code", "scheme_version", "cycle_code", "cycle_name"],
+            "properties": {
+                "scheme_code": {"type": "string", "maxLength": 50},
+                "scheme_version": {"type": "integer", "minimum": 1},
+                "component_code": {"type": ["string", "null"], "maxLength": 50},
+                "cycle_code": {"type": "string", "maxLength": 60},
+                "cycle_name": {"type": "string", "maxLength": 180},
+                "term_id": {"type": ["string", "null"], "format": "uuid"},
+                "held_on": {"type": ["string", "null"], "format": "date"},
+                "due_on": {"type": ["string", "null"], "format": "date"},
+                "offering_ids": {
+                    "oneOf": [
+                        {"type": "array", "items": {"type": "string", "format": "uuid"}},
+                        {"type": "string", "description": "Comma-separated IDs"},
+                    ],
+                },
+                "cohort_ids": {
+                    "oneOf": [
+                        {"type": "array", "items": {"type": "string", "format": "uuid"}},
+                        {"type": "string", "description": "Comma-separated IDs"},
+                    ],
+                },
+            },
+        },
+    }
+    structure_schema_refs = {
+        "departments": "#/components/schemas/CollegeDepartmentRecord",
+        "programs": "#/components/schemas/CollegeProgramRecord",
+        "cohorts": "#/components/schemas/CollegeCohortRecord",
+        "terms": "#/components/schemas/CollegeTermRecord",
+        "courses": "#/components/schemas/CollegeCourseRecord",
+        "exam_cycles": "#/components/schemas/CollegeExamCycleRecord",
+        "assessment_marks": "#/components/schemas/CollegeAssessmentMarksRecord",
+    }
     error_schema = {
         "type": "object",
         "properties": {
@@ -458,12 +748,32 @@ def integration_openapi():
         "info": {
             "title": "Edvatiq College ERP Integration API",
             "version": "1.0.0",
-            "description": "Organization-scoped, idempotent push ingestion for supported College evidence resources.",
+            "description": (
+                "Organization-scoped, idempotent ingestion for College academic structure and evidence. "
+                "Import structure in dependency order: departments, programs, cohorts, terms, courses, "
+                "and offerings before exam cycles and dynamic assessment marks. Existing unlinked "
+                "codes are quarantined for reviewed linking and missing source rows never delete local data."
+            ),
         },
         "paths": {
+            "/api/integrations/v1/college/schemas/{resource}": {
+                "get": {
+                    "summary": "Read the effective schema for a College resource",
+                    "description": "For assessment_marks, supply cycle_id or cycle_code to receive the frozen institution-specific metric schema.",
+                    "security": [{"BearerAuth": []}],
+                    "parameters": [
+                        {"name": "resource", "in": "path", "required": True, "schema": {"type": "string", "enum": resource_enum}},
+                        {"name": "cycle_id", "in": "query", "required": False, "schema": {"type": "string", "format": "uuid"}},
+                        {"name": "cycle_code", "in": "query", "required": False, "schema": {"type": "string"}},
+                    ],
+                    "responses": {"200": {"description": "Effective resource schema"}, "404": {"description": "Resource or cycle not found"}},
+                },
+            },
             "/api/integrations/v1/college/{resource}": {
                 "post": {
                     "summary": "Push a validated College resource batch",
+                    "description": "For academic structure resources, use the matching schema in x-edvatiq-resource-schemas and send dependencies first.",
+                    "x-edvatiq-resource-schemas": structure_schema_refs,
                     "security": [{"BearerAuth": []}],
                     "parameters": [
                         {"name": "resource", "in": "path", "required": True, "schema": {"type": "string", "enum": resource_enum}},
@@ -474,7 +784,15 @@ def integration_openapi():
                         "content": {"application/json": {"schema": {
                             "type": "object", "required": ["records"],
                             "properties": {
-                                "records": {"type": "array", "minItems": 1, "maxItems": 500, "items": {"type": "object", "additionalProperties": True}},
+                                "records": {
+                                    "type": "array", "minItems": 1, "maxItems": 500,
+                                    "items": {
+                                        "type": "object",
+                                        "description": "Use the schema referenced for the selected resource. exam_cycles and assessment_marks do not use external_id.",
+                                        "properties": {"external_id": {"type": "string", "minLength": 1, "maxLength": 180}},
+                                        "additionalProperties": True,
+                                    },
+                                },
                                 "source_cursor": {"type": ["string", "null"]},
                                 "sent_at": {"type": ["string", "null"], "format": "date-time"},
                             },
@@ -503,5 +821,6 @@ def integration_openapi():
         },
         "components": {
             "securitySchemes": {"BearerAuth": {"type": "http", "scheme": "bearer"}},
+            "schemas": structure_schemas,
         },
     }

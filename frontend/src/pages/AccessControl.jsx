@@ -33,6 +33,7 @@ import {
 import { cn } from "@/lib/utils";
 import { accessConfigurationSchema, applyApiErrors, FORM_OPTIONS, roleSchema } from "@/lib/validation";
 import useCursorPagination from "@/hooks/useCursorPagination";
+import CollegeAccessConsole from "@/components/access/CollegeAccessConsole";
 
 const emptyConfig = { role_ids: [], permission_overrides: [], location_mode: "full", location_ids: [], client_mode: "all", client_ids: [], selected_clients: [], version: 1 };
 const permissionDependencies = {
@@ -44,6 +45,11 @@ const permissionDependencies = {
 };
 
 export default function AccessControl() {
+  const { organization } = useBusiness();
+  return organization?.industry === "college" ? <CollegeAccessConsole /> : <LegacyAccessControl />;
+}
+
+function LegacyAccessControl() {
   const { user: currentUser, can } = useAuth();
   const { organization } = useBusiness();
   const isCollege = organization?.industry === "college";

@@ -30,6 +30,10 @@ from app.models import (
     Client,
     ClientMedia,
     CollegeAssessment,
+    CollegeAssessmentComponent,
+    CollegeAssessmentReadinessMapping,
+    CollegeAssessmentScheme,
+    CollegeAssessmentSchemeAssignment,
     CollegeAssessmentScore,
     CollegeAttendanceRecord,
     CollegeAttendanceSession,
@@ -43,6 +47,7 @@ from app.models import (
     CollegeCourse,
     CollegeCourseOffering,
     CollegeDepartment,
+    CollegeExamCycle,
     CollegeFeePlan,
     CollegePipelineStage,
     CollegePlacementApplication,
@@ -106,7 +111,7 @@ from app.models import (
 
 
 DEMO_DATA_VERSION = 3
-COLLEGE_DEMO_DATA_VERSION = 5
+COLLEGE_DEMO_DATA_VERSION = 7
 DEMO_SLUGS = {"pulse-fitness", "malar-studio", "nalam-clinic", "crescent-college"}
 STORAGE_DIR = Path(__file__).resolve().parents[2] / "storage"
 
@@ -1048,14 +1053,16 @@ def _seed_college(
     academic_admin = staff["academic-admin"]
 
     departments: dict[str, CollegeDepartment] = {}
-    for code, name, hod in (
-        ("CS", "Computer Science", faculty),
-        ("COM", "Commerce", academic_admin),
+    for code, name, hod, aliases in (
+        ("CSE", "Computer Science and Engineering", faculty, ("CSE", "CS")),
+        ("ECE", "Electronics and Communication Engineering", faculty, ("ECE",)),
+        ("COM", "Commerce", academic_admin, ("COM",)),
     ):
-        row = db.execute(select(CollegeDepartment).where(
+        matches = list(db.execute(select(CollegeDepartment).where(
             CollegeDepartment.organization_id == org.id,
-            CollegeDepartment.code == code,
-        )).scalar_one_or_none()
+            CollegeDepartment.code.in_(aliases),
+        )).scalars())
+        row = next((item for item in matches if item.code == code), matches[0] if matches else None)
         if not row:
             row = CollegeDepartment(
                 organization_id=org.id,
@@ -1067,12 +1074,17 @@ def _seed_college(
             )
             db.add(row)
             db.flush()
+        else:
+            row.name = name
+            if not any(item.code == code for item in matches):
+                row.code = code
         departments[code] = row
 
     programs: dict[str, CollegeProgram] = {}
-    for code, name, department_code in (
-        ("BSC-CS", "B.Sc. Computer Science", "CS"),
-        ("BCOM", "Bachelor of Commerce", "COM"),
+    for code, name, department_code, duration_semesters in (
+        ("BSC-CS", "B.Sc. Computer Science", "CSE", 6),
+        ("BE-ECE", "B.E. Electronics and Communication", "ECE", 8),
+        ("BCOM", "Bachelor of Commerce", "COM", 6),
     ):
         row = db.execute(select(CollegeProgram).where(
             CollegeProgram.organization_id == org.id,
@@ -1085,11 +1097,15 @@ def _seed_college(
                 name=name,
                 code=code,
                 degree_type="undergraduate",
-                duration_semesters=6,
+                duration_semesters=duration_semesters,
                 is_active=True,
             )
             db.add(row)
             db.flush()
+        else:
+            row.department_id = departments[department_code].id
+            row.name = name
+            row.duration_semesters = duration_semesters
         programs[code] = row
 
     term = db.execute(select(CollegeTerm).where(
@@ -1111,34 +1127,83 @@ def _seed_college(
         db.add(term)
         db.flush()
 
-    cohorts: dict[str, CollegeCohort] = {}
-    for code, name, program_code in (
-        (f"BSC-CS-{today.year - 1}-A", f"B.Sc. CS {today.year - 1} / Section A", "BSC-CS"),
-        (f"BCOM-{today.year - 1}-A", f"B.Com {today.year - 1} / Section A", "BCOM"),
-    ):
-        row = db.execute(select(CollegeCohort).where(
-            CollegeCohort.organization_id == org.id,
-            CollegeCohort.code == code,
+    for years_ago in (1, 2):
+        start_year = today.year - years_ago
+        historical_year = f"{start_year}-{str(start_year + 1)[-2:]}"
+        historical_term = db.execute(select(CollegeTerm).where(
+            CollegeTerm.organization_id == org.id,
+            CollegeTerm.academic_year == historical_year,
+            CollegeTerm.term_number == 2,
         )).scalar_one_or_none()
-        if not row:
-            row = CollegeCohort(
+        if not historical_term:
+            db.add(CollegeTerm(
                 organization_id=org.id,
-                program_id=programs[program_code].id,
-                name=name,
-                code=code,
-                admission_year=today.year - 1,
-                current_semester=3,
-                section="A",
-                advisor_employee_id=faculty.id,
-                is_active=True,
+                name="Even semester",
+                academic_year=historical_year,
+                term_number=2,
+                starts_on=date(start_year + 1, 1, 3),
+                ends_on=date(start_year + 1, 5, 31),
+                status="closed",
+                is_current=False,
+            ))
+
+    cohort_layout = {
+        today.year: {"BSC-CS": ("A", "B"), "BCOM": ("A",)},
+        today.year + 1: {"BSC-CS": ("A", "B"), "BCOM": ("A", "B"), "BE-ECE": ("A",)},
+        today.year + 2: {"BSC-CS": ("A", "B"), "BCOM": ("A",), "BE-ECE": ("A", "B")},
+    }
+    cohort_rows: dict[tuple[str, int, str], CollegeCohort] = {}
+    for graduation_year, program_sections in cohort_layout.items():
+        for program_code, sections in program_sections.items():
+            program = programs[program_code]
+            admission_year = graduation_year - ((program.duration_semesters + 1) // 2)
+            current_semester = min(
+                program.duration_semesters,
+                max(1, (today.year - admission_year) * 2 + (1 if today.month >= 7 else 0)),
             )
-            db.add(row)
-            db.flush()
-        cohorts[program_code] = row
+            for section in sections:
+                code = f"{program_code}-{admission_year}-{section}"
+                name = f"{program.name} / Class of {graduation_year} / Section {section}"
+                row = db.execute(select(CollegeCohort).where(
+                    CollegeCohort.organization_id == org.id,
+                    CollegeCohort.code == code,
+                )).scalar_one_or_none()
+                if not row:
+                    row = CollegeCohort(
+                        organization_id=org.id,
+                        program_id=program.id,
+                        name=name,
+                        code=code,
+                        admission_year=admission_year,
+                        graduation_year=graduation_year,
+                        current_semester=current_semester,
+                        section=section,
+                        advisor_employee_id=faculty.id,
+                        is_active=True,
+                    )
+                    db.add(row)
+                    db.flush()
+                else:
+                    row.program_id = program.id
+                    row.name = name
+                    row.admission_year = admission_year
+                    row.graduation_year = graduation_year
+                    row.current_semester = current_semester
+                    row.section = section
+                    row.is_active = True
+                cohort_rows[(program_code, graduation_year, section)] = row
+
+    cohorts: dict[str, CollegeCohort] = {}
+    for program_code in programs:
+        preferred = cohort_rows.get((program_code, today.year + 2, "A"))
+        if preferred:
+            cohorts[program_code] = preferred
 
     course_specs = (
-        ("CS301", "Data Structures", "CS", "BSC-CS", 4, 0, "09:00:00", "10:00:00", "Lab 2"),
-        ("CS302", "Database Systems", "CS", "BSC-CS", 4, 2, "11:00:00", "12:00:00", "Room 204"),
+        ("CS301", "Data Structures", "CSE", "BSC-CS", 4, 0, "09:00:00", "10:00:00", "Lab 2"),
+        ("CS302", "Database Systems", "CSE", "BSC-CS", 4, 2, "11:00:00", "12:00:00", "Room 204"),
+        ("EC501", "Embedded Systems", "ECE", "BE-ECE", 4, 0, "10:00:00", "11:00:00", "Lab 4"),
+        ("EC502", "Digital Communication", "ECE", "BE-ECE", 4, 3, "12:00:00", "13:00:00", "Room 302"),
         ("COM301", "Corporate Accounting", "COM", "BCOM", 4, 1, "10:00:00", "11:00:00", "Room 108"),
         ("COM302", "Business Law", "COM", "BCOM", 3, 3, "13:30:00", "14:30:00", "Room 109"),
     )
@@ -1160,6 +1225,10 @@ def _seed_college(
             )
             db.add(course)
             db.flush()
+        else:
+            course.name = name
+            course.department_id = departments[department_code].id
+            course.credits = credits
         cohort = cohorts[program_code]
         offering = db.execute(select(CollegeCourseOffering).where(
             CollegeCourseOffering.term_id == term.id,
@@ -1213,7 +1282,7 @@ def _seed_college(
                 ),
                 gender=gender,
                 joined_on=date(today.year - 1, 7, 1) + timedelta(days=offset % 24),
-                notes="Showcase student record with connected academic and fee history.",
+                notes="Showcase student record with connected academic and placement evidence.",
                 tags=["college", "demo-student"],
                 whatsapp_consent=offset % 5 != 0,
                 whatsapp_consent_at=datetime.now(timezone.utc) - timedelta(days=90) if offset % 5 != 0 else None,
@@ -1229,9 +1298,12 @@ def _seed_college(
             clients.append(client)
         student_clients.append(client)
 
+    cohort_pool = [cohort_rows[key] for key in sorted(cohort_rows, key=lambda item: (item[1], item[0], item[2]))]
+    program_code_by_id = {row.id: code for code, row in programs.items()}
     profiles: list[CollegeStudentProfile] = []
     for index, client in enumerate(student_clients, start=1):
-        program_code = "BSC-CS" if index <= 6 or index > 10 and index % 2 else "BCOM"
+        cohort = cohort_pool[(index - 1) % len(cohort_pool)]
+        program_code = program_code_by_id[cohort.program_id]
         client.home_location_id = locations[0].id
         profile = db.execute(select(CollegeStudentProfile).where(
             CollegeStudentProfile.client_id == client.id,
@@ -1240,18 +1312,25 @@ def _seed_college(
             profile = CollegeStudentProfile(
                 organization_id=org.id,
                 client_id=client.id,
-                admission_number=f"COL-{today.year - 1}-{index:04d}",
-                roll_number=f"{program_code}-{index:03d}",
+                admission_number=f"COL-{cohort.admission_year}-{index:04d}",
+                roll_number=f"{program_code}-{cohort.graduation_year}-{cohort.section}-{index:03d}",
                 program_id=programs[program_code].id,
-                cohort_id=cohorts[program_code].id,
-                current_semester=3,
-                admitted_on=date(today.year - 1, 7, 1) + timedelta(days=(index - 1) % 24),
+                cohort_id=cohort.id,
+                current_semester=cohort.current_semester,
+                admitted_on=date(cohort.admission_year, 7, 1) + timedelta(days=(index - 1) % 24),
                 status="active",
                 guardian={"name": f"Guardian {index}", "phone": f"988403{index:04d}"},
                 category="general",
             )
             db.add(profile)
             db.flush()
+        else:
+            profile.program_id = cohort.program_id
+            profile.cohort_id = cohort.id
+            profile.current_semester = cohort.current_semester
+            profile.admission_number = f"COL-{cohort.admission_year}-{index:04d}"
+            profile.roll_number = f"{program_code}-{cohort.graduation_year}-{cohort.section}-{index:03d}"
+            profile.admitted_on = date(cohort.admission_year, 7, 1) + timedelta(days=(index - 1) % 24)
         profiles.append(profile)
 
     profiles_by_cohort: dict[str, list[CollegeStudentProfile]] = {}
@@ -1292,45 +1371,12 @@ def _seed_college(
                         status=status_value,
                     ))
 
-        course = db.get(CollegeCourse, offering.course_id)
-        assessment = db.execute(select(CollegeAssessment).where(
-            CollegeAssessment.organization_id == org.id,
-            CollegeAssessment.offering_id == offering.id,
-            CollegeAssessment.title == "Internal assessment 1",
-        )).scalar_one_or_none()
-        if not assessment:
-            assessment = CollegeAssessment(
-                organization_id=org.id,
-                offering_id=offering.id,
-                title="Internal assessment 1",
-                assessment_type="internal",
-                max_marks=50,
-                weightage_bps=2000,
-                due_on=today + timedelta(days=7 + offering_index),
-                status="published",
-                published_at=datetime.now(timezone.utc),
-            )
-            db.add(assessment)
-            db.flush()
-        for student_index, profile in enumerate(profiles_by_cohort.get(offering.cohort_id, [])):
-            score = db.execute(select(CollegeAssessmentScore).where(
-                CollegeAssessmentScore.assessment_id == assessment.id,
-                CollegeAssessmentScore.student_profile_id == profile.id,
-            )).scalar_one_or_none()
-            if not score:
-                marks = 31 + ((student_index * 3 + offering_index) % 17)
-                db.add(CollegeAssessmentScore(
-                    organization_id=org.id,
-                    assessment_id=assessment.id,
-                    student_profile_id=profile.id,
-                    marks_awarded=marks,
-                    grade="A" if marks >= 40 else "B",
-                    feedback=f"Good progress in {course.name}.",
-                    graded_by_user_id=faculty.user_id or owner.id,
-                ))
+    _seed_college_assessment_patterns(
+        db, org, owner, faculty, term, programs, offerings, profiles_by_cohort,
+    )
 
     fee_plans: dict[str, CollegeFeePlan] = {}
-    for program_code, amount in (("BSC-CS", 4500000), ("BCOM", 3800000)):
+    for program_code, amount in (("BSC-CS", 4500000), ("BE-ECE", 4800000), ("BCOM", 3800000)):
         name = f"Semester 3 tuition / {program_code}"
         plan = db.execute(select(CollegeFeePlan).where(
             CollegeFeePlan.organization_id == org.id,
@@ -1357,76 +1403,389 @@ def _seed_college(
 
     client_by_id = {row.id: row for row in student_clients}
     for index, profile in enumerate(profiles, start=1):
-        program_code = "BSC-CS" if profile.program_id == programs["BSC-CS"].id else "BCOM"
+        program_code = program_code_by_id[profile.program_id]
         plan = fee_plans[program_code]
         client = client_by_id[profile.client_id]
-        existing_fee = db.execute(select(CollegeStudentFee).where(
-            CollegeStudentFee.student_profile_id == profile.id,
-            CollegeStudentFee.fee_plan_id == plan.id,
-        )).scalar_one_or_none()
-        if existing_fee:
-            existing_invoice = db.get(SaleInvoice, existing_fee.invoice_id) if existing_fee.invoice_id else None
-            if existing_invoice:
-                existing_invoice.location_id = client.home_location_id or locations[0].id
-            continue
         payment_bucket = ((index - 1) % 10) + 1
         concession = 200000 if payment_bucket == 3 else 0
         total = int(plan.amount_paise) - concession
         paid = total if payment_bucket in {1, 2, 7} else total // 2 if payment_bucket in {3, 8} else 0
         invoice_status = "paid" if paid == total else "partially_paid" if paid else "issued"
-        invoice = SaleInvoice(
-            organization_id=org.id,
-            location_id=client.home_location_id or locations[0].id,
-            client_id=client.id,
-            employee_id=academic_admin.id,
-            invoice_number=f"COL-DEMO-{index:04d}",
-            status=invoice_status,
-            subtotal_paise=plan.amount_paise,
-            discount_paise=concession,
-            total_paise=total,
-            paid_paise=paid,
-            tax_snapshot={"source": "college_fee", "tax_exempt": True, "fee_plan_id": plan.id},
-            notes=plan.name,
-            idempotency_key=f"demo-college-fee-{org.slug}-{index}",
-            issued_at=datetime.now(timezone.utc) - timedelta(days=((index - 1) % 28) + 1),
-        )
-        db.add(invoice)
-        db.flush()
-        db.add(SaleLine(
-            organization_id=org.id,
-            invoice_id=invoice.id,
-            display_order=0,
-            item_name=plan.name,
-            sku=f"COL-FEE-{program_code}",
-            quantity_milli=1000,
-            unit_price_paise=plan.amount_paise,
-            discount_paise=concession,
-            tax_rate_bps=0,
-            tax_paise=0,
-            total_paise=total,
-        ))
-        if paid:
-            db.add(SalePayment(
+        invoice_number = f"COL-DEMO-{index:04d}"
+        invoice_key = f"demo-college-fee-{org.slug}-{index}"
+        payment_key = f"demo-college-payment-{org.slug}-{index}"
+        payment_reference = f"COLLEGE-DEMO-{index:04d}"
+
+        existing_fee = db.execute(select(CollegeStudentFee).where(
+            CollegeStudentFee.student_profile_id == profile.id,
+            CollegeStudentFee.fee_plan_id == plan.id,
+        )).scalar_one_or_none()
+        invoice = db.get(SaleInvoice, existing_fee.invoice_id) if existing_fee and existing_fee.invoice_id else None
+        if invoice and invoice.organization_id != org.id:
+            invoice = None
+        if not invoice:
+            invoice = db.execute(select(SaleInvoice).where(
+                SaleInvoice.organization_id == org.id,
+                SaleInvoice.idempotency_key == invoice_key,
+            )).scalar_one_or_none()
+        if not invoice:
+            invoice = db.execute(select(SaleInvoice).where(
+                SaleInvoice.organization_id == org.id,
+                SaleInvoice.invoice_number == invoice_number,
+            )).scalar_one_or_none()
+        if not invoice:
+            invoice = SaleInvoice(
+                organization_id=org.id,
+                location_id=client.home_location_id or locations[0].id,
+                client_id=client.id,
+                employee_id=academic_admin.id,
+                invoice_number=invoice_number,
+                status=invoice_status,
+                subtotal_paise=plan.amount_paise,
+                discount_paise=concession,
+                total_paise=total,
+                paid_paise=paid,
+                tax_snapshot={"source": "college_fee", "tax_exempt": True, "fee_plan_id": plan.id},
+                notes=plan.name,
+                idempotency_key=invoice_key,
+                issued_at=datetime.now(timezone.utc) - timedelta(days=((index - 1) % 28) + 1),
+            )
+            db.add(invoice)
+            db.flush()
+        else:
+            invoice.location_id = client.home_location_id or locations[0].id
+
+        existing_line = db.execute(select(SaleLine).where(
+            SaleLine.organization_id == org.id,
+            SaleLine.invoice_id == invoice.id,
+        ).order_by(SaleLine.display_order, SaleLine.id)).scalars().first()
+        if not existing_line:
+            db.add(SaleLine(
                 organization_id=org.id,
                 invoice_id=invoice.id,
-                amount_paise=paid,
-                method="upi",
-                reference=f"COLLEGE-DEMO-{index:04d}",
-                status="captured",
-                idempotency_key=f"demo-college-payment-{org.slug}-{index}",
-                received_by_user_id=owner.id,
+                display_order=0,
+                item_name=plan.name,
+                sku=f"COL-FEE-{program_code}",
+                quantity_milli=1000,
+                unit_price_paise=plan.amount_paise,
+                discount_paise=concession,
+                tax_rate_bps=0,
+                tax_paise=0,
+                total_paise=total,
             ))
-        db.add(CollegeStudentFee(
-            organization_id=org.id,
-            student_profile_id=profile.id,
-            fee_plan_id=plan.id,
-            invoice_id=invoice.id,
-            amount_paise=plan.amount_paise,
-            concession_paise=concession,
-            status=invoice_status,
-        ))
+        if paid:
+            existing_payment = db.execute(select(SalePayment).where(
+                SalePayment.organization_id == org.id,
+                SalePayment.idempotency_key == payment_key,
+            )).scalar_one_or_none()
+            if not existing_payment:
+                existing_payment = db.execute(select(SalePayment).where(
+                    SalePayment.organization_id == org.id,
+                    SalePayment.invoice_id == invoice.id,
+                    SalePayment.reference == payment_reference,
+                )).scalars().first()
+            if not existing_payment:
+                db.add(SalePayment(
+                    organization_id=org.id,
+                    invoice_id=invoice.id,
+                    amount_paise=paid,
+                    method="upi",
+                    reference=payment_reference,
+                    status="captured",
+                    idempotency_key=payment_key,
+                    received_by_user_id=owner.id,
+                ))
+        if existing_fee:
+            existing_fee.invoice_id = invoice.id
+        else:
+            db.add(CollegeStudentFee(
+                organization_id=org.id,
+                student_profile_id=profile.id,
+                fee_plan_id=plan.id,
+                invoice_id=invoice.id,
+                amount_paise=plan.amount_paise,
+                concession_paise=concession,
+                status=invoice_status,
+            ))
 
     _seed_college_placement(db, org, owner, profiles, programs, cohorts, term)
+
+
+def _seed_college_assessment_patterns(
+    db: Session,
+    org: Organization,
+    owner: User,
+    faculty: Employee,
+    term: CollegeTerm,
+    programs: dict[str, CollegeProgram],
+    offerings: list[CollegeCourseOffering],
+    profiles_by_cohort: dict[str, list[CollegeStudentProfile]],
+) -> None:
+    """Showcase institution-defined patterns without creating runtime assumptions."""
+    from app.services.college_assessments import (
+        assignment_scope_key, build_scheme_snapshot, component_payload,
+        freeze_scheme, recalculate_assessment_score,
+    )
+
+    def pattern(code: str, name: str, domain: str, method: str, config: dict, definitions: list[dict]):
+        scheme = db.scalar(select(CollegeAssessmentScheme).where(
+            CollegeAssessmentScheme.organization_id == org.id,
+            CollegeAssessmentScheme.code == code,
+            CollegeAssessmentScheme.version_number == 1,
+        ))
+        if not scheme:
+            scheme = CollegeAssessmentScheme(
+                organization_id=org.id,
+                code=code,
+                name=name,
+                domain=domain,
+                status="active",
+                final_score_max=100,
+                calculation_method=method,
+                calculation_config=config,
+                description="Demo configuration authored by the institution, not an Edvatiq product default.",
+            )
+            db.add(scheme)
+            db.flush()
+            db.add_all([
+                CollegeAssessmentComponent(
+                    organization_id=org.id,
+                    scheme_id=scheme.id,
+                    display_order=index,
+                    **definition,
+                )
+                for index, definition in enumerate(definitions, start=1)
+            ])
+            db.flush()
+        components = list(db.scalars(select(CollegeAssessmentComponent).where(
+            CollegeAssessmentComponent.organization_id == org.id,
+            CollegeAssessmentComponent.scheme_id == scheme.id,
+        ).order_by(CollegeAssessmentComponent.display_order)))
+        return scheme, components
+
+    def assign(scheme: CollegeAssessmentScheme, *, program_id: str | None = None):
+        scope_key = assignment_scope_key(scheme.domain, program_id=program_id)
+        row = db.scalar(select(CollegeAssessmentSchemeAssignment).where(
+            CollegeAssessmentSchemeAssignment.organization_id == org.id,
+            CollegeAssessmentSchemeAssignment.scope_key == scope_key,
+        ))
+        if not row:
+            db.add(CollegeAssessmentSchemeAssignment(
+                organization_id=org.id,
+                scheme_id=scheme.id,
+                program_id=program_id,
+                scope_key=scope_key,
+            ))
+        elif row.scheme_id != scheme.id:
+            row.scheme_id = scheme.id
+            row.version += 1
+
+    academic, academic_components = pattern(
+        "DEMO_ACADEMIC_PATTERN",
+        "Continuous assessment pattern",
+        "academic",
+        "best_n",
+        {"best_n": 2, "minimum_components": 2},
+        [
+            {"name": "Continuous assessment 1", "code": "CA_1", "component_type": "internal", "metric_type": "number", "max_marks": 50, "weightage_bps": 3334, "pass_marks": 20, "is_required": True, "aggregation_group": None, "settings": {}},
+            {"name": "Continuous assessment 2", "code": "CA_2", "component_type": "internal", "metric_type": "number", "max_marks": 50, "weightage_bps": 3333, "pass_marks": 20, "is_required": True, "aggregation_group": None, "settings": {}},
+            {"name": "Continuous assessment 3", "code": "CA_3", "component_type": "internal", "metric_type": "number", "max_marks": 50, "weightage_bps": 3333, "pass_marks": 20, "is_required": False, "aggregation_group": None, "settings": {}},
+        ],
+    )
+    commerce, commerce_components = pattern(
+        "DEMO_COMMERCE_PATTERN",
+        "Commerce internal pattern",
+        "academic",
+        "average",
+        {"minimum_components": 2},
+        [
+            {"name": "Internal test 1", "code": "IT_1", "component_type": "internal", "metric_type": "number", "max_marks": 40, "weightage_bps": 5000, "pass_marks": 16, "is_required": True, "aggregation_group": None, "settings": {}},
+            {"name": "Internal test 2", "code": "IT_2", "component_type": "internal", "metric_type": "number", "max_marks": 40, "weightage_bps": 5000, "pass_marks": 16, "is_required": True, "aggregation_group": None, "settings": {}},
+        ],
+    )
+    coding, coding_components = pattern(
+        "DEMO_CODING_PATTERN",
+        "Placement coding diagnostic",
+        "coding",
+        "weighted_sum",
+        {"minimum_components": 3},
+        [
+            {"name": "Coding score", "code": "CODING_SCORE", "component_type": "coding", "metric_type": "number", "max_marks": 100, "weightage_bps": 5000, "pass_marks": 45, "is_required": True, "aggregation_group": None, "settings": {}},
+            {"name": "SQL", "code": "SQL", "component_type": "coding", "metric_type": "number", "max_marks": 50, "weightage_bps": 2500, "pass_marks": 20, "is_required": True, "aggregation_group": None, "settings": {}},
+            {"name": "Test cases passed", "code": "TEST_CASES", "component_type": "coding", "metric_type": "count", "max_marks": 20, "weightage_bps": 2500, "pass_marks": 8, "is_required": True, "aggregation_group": None, "settings": {}},
+        ],
+    )
+    assign(academic)
+    assign(commerce, program_id=programs["BCOM"].id)
+    assign(coding)
+    db.flush()
+
+    cohort_by_id = {
+        row.id: row for row in db.scalars(select(CollegeCohort).where(
+            CollegeCohort.organization_id == org.id,
+            CollegeCohort.id.in_({item.cohort_id for item in offerings}),
+        ))
+    }
+    academic_targets = [item for item in offerings if cohort_by_id[item.cohort_id].program_id != programs["BCOM"].id]
+    commerce_targets = [item for item in offerings if cohort_by_id[item.cohort_id].program_id == programs["BCOM"].id]
+    scored_pairs: list[tuple[CollegeAssessment, str]] = []
+
+    def academic_cycles(scheme, components, targets, code_prefix):
+        snapshot = build_scheme_snapshot(scheme, components)
+        for component_index, component in enumerate(components):
+            cycle_code = f"{code_prefix}_{term.academic_year}_{component.code}".replace("-", "_")
+            cycle = db.scalar(select(CollegeExamCycle).where(
+                CollegeExamCycle.organization_id == org.id,
+                CollegeExamCycle.code == cycle_code,
+            ))
+            if not cycle:
+                cycle = CollegeExamCycle(
+                    organization_id=org.id,
+                    scheme_id=scheme.id,
+                    scheme_component_id=component.id,
+                    term_id=term.id,
+                    name=component.name,
+                    code=cycle_code,
+                    domain="academic",
+                    held_on=date.today() - timedelta(days=max(1, 24 - component_index * 8)),
+                    due_on=date.today() - timedelta(days=max(0, 23 - component_index * 8)),
+                    status="published",
+                    target_offering_ids=[item.id for item in targets],
+                    scheme_snapshot=snapshot,
+                )
+                db.add(cycle)
+                db.flush()
+            for offering_index, offering in enumerate(targets):
+                assessment = db.scalar(select(CollegeAssessment).where(
+                    CollegeAssessment.organization_id == org.id,
+                    CollegeAssessment.exam_cycle_id == cycle.id,
+                    CollegeAssessment.offering_id == offering.id,
+                ))
+                if not assessment:
+                    assessment = CollegeAssessment(
+                        organization_id=org.id,
+                        offering_id=offering.id,
+                        cohort_id=offering.cohort_id,
+                        exam_cycle_id=cycle.id,
+                        scheme_id=scheme.id,
+                        scheme_component_id=component.id,
+                        title=component.name,
+                        assessment_type=component.component_type,
+                        max_marks=component.max_marks,
+                        weightage_bps=component.weightage_bps,
+                        due_on=cycle.due_on,
+                        status="published",
+                        published_at=datetime.now(timezone.utc),
+                        metric_schema=[component_payload(component)],
+                    )
+                    db.add(assessment)
+                    db.flush()
+                for student_index, profile in enumerate(profiles_by_cohort.get(offering.cohort_id, [])):
+                    score = db.scalar(select(CollegeAssessmentScore).where(
+                        CollegeAssessmentScore.assessment_id == assessment.id,
+                        CollegeAssessmentScore.student_profile_id == profile.id,
+                    ))
+                    if not score:
+                        maximum = int(component.max_marks or 100)
+                        marks = max(0, min(maximum, int(maximum * 0.55) + ((student_index * 3 + offering_index + component_index * 5) % max(1, int(maximum * 0.4)))))
+                        score = CollegeAssessmentScore(
+                            organization_id=org.id,
+                            assessment_id=assessment.id,
+                            student_profile_id=profile.id,
+                            marks_awarded=marks,
+                            metrics={component.code: marks},
+                            grade="A" if marks >= maximum * 0.8 else "B",
+                            graded_by_user_id=faculty.user_id or owner.id,
+                        )
+                        db.add(score)
+                    scored_pairs.append((assessment, profile.id))
+        freeze_scheme(scheme)
+
+    academic_cycles(academic, academic_components, academic_targets, "DEMO_CA")
+    academic_cycles(commerce, commerce_components, commerce_targets, "DEMO_COM")
+
+    coding_snapshot = build_scheme_snapshot(coding, coding_components)
+    coding_cycle_code = f"DEMO_CODING_{term.academic_year}".replace("-", "_")
+    coding_cycle = db.scalar(select(CollegeExamCycle).where(
+        CollegeExamCycle.organization_id == org.id,
+        CollegeExamCycle.code == coding_cycle_code,
+    ))
+    if not coding_cycle:
+        coding_cycle = CollegeExamCycle(
+            organization_id=org.id,
+            scheme_id=coding.id,
+            term_id=term.id,
+            name="Placement coding diagnostic",
+            code=coding_cycle_code,
+            domain="coding",
+            held_on=date.today() - timedelta(days=10),
+            status="published",
+            target_cohort_ids=list(profiles_by_cohort),
+            scheme_snapshot=coding_snapshot,
+        )
+        db.add(coding_cycle)
+        db.flush()
+    for cohort_index, (cohort_id, profiles) in enumerate(profiles_by_cohort.items()):
+        assessment = db.scalar(select(CollegeAssessment).where(
+            CollegeAssessment.organization_id == org.id,
+            CollegeAssessment.exam_cycle_id == coding_cycle.id,
+            CollegeAssessment.cohort_id == cohort_id,
+        ))
+        if not assessment:
+            assessment = CollegeAssessment(
+                organization_id=org.id,
+                cohort_id=cohort_id,
+                exam_cycle_id=coding_cycle.id,
+                scheme_id=coding.id,
+                title=coding_cycle.name,
+                assessment_type="coding",
+                max_marks=100,
+                weightage_bps=10000,
+                status="published",
+                published_at=datetime.now(timezone.utc),
+                metric_schema=[component_payload(item) for item in coding_components],
+            )
+            db.add(assessment)
+            db.flush()
+        for student_index, profile in enumerate(profiles):
+            score = db.scalar(select(CollegeAssessmentScore).where(
+                CollegeAssessmentScore.assessment_id == assessment.id,
+                CollegeAssessmentScore.student_profile_id == profile.id,
+            ))
+            if not score:
+                metrics = {
+                    "CODING_SCORE": 42 + ((student_index * 7 + cohort_index) % 55),
+                    "SQL": 18 + ((student_index * 5 + cohort_index) % 31),
+                    "TEST_CASES": 6 + ((student_index * 2 + cohort_index) % 15),
+                }
+                score = CollegeAssessmentScore(
+                    organization_id=org.id,
+                    assessment_id=assessment.id,
+                    student_profile_id=profile.id,
+                    metrics=metrics,
+                    graded_by_user_id=faculty.user_id or owner.id,
+                )
+                db.add(score)
+            scored_pairs.append((assessment, profile.id))
+    freeze_scheme(coding)
+    db.flush()
+    for assessment, student_id in scored_pairs:
+        recalculate_assessment_score(db, assessment, student_id)
+
+    mapping = db.scalar(select(CollegeAssessmentReadinessMapping).where(
+        CollegeAssessmentReadinessMapping.organization_id == org.id,
+        CollegeAssessmentReadinessMapping.scheme_id == coding.id,
+        CollegeAssessmentReadinessMapping.metric_code == "__CALCULATED__",
+    ))
+    if not mapping:
+        db.add(CollegeAssessmentReadinessMapping(
+            organization_id=org.id,
+            scheme_id=coding.id,
+            metric_code="__CALCULATED__",
+            factor_key="coding",
+            is_active=True,
+            mapped_by_user_id=owner.id,
+        ))
 
 
 def _seed_college_placement(
@@ -1456,11 +1815,30 @@ def _seed_college_placement(
             enabled=True,
             meta={"mode": "enabled", "version": 1},
         ))
+    data_exchange_flag = db.execute(select(FeatureFlag).where(
+        FeatureFlag.organization_id == org.id,
+        FeatureFlag.flag == "college.data_exchange_v1",
+    )).scalar_one_or_none()
+    if not data_exchange_flag:
+        db.add(FeatureFlag(
+            organization_id=org.id,
+            flag="college.data_exchange_v1",
+            enabled=True,
+            meta={"mode": "enabled", "version": 1},
+        ))
 
     stages = ensure_default_pipeline(db, org.id)
     stage_by_slug = {row.slug: row for row in stages}
     profiles_by_id = {row.id: row for row in profiles}
     profile_ids = list(profiles_by_id)
+    cohort_by_id = {
+        row.id: row for row in db.execute(select(CollegeCohort).where(
+            CollegeCohort.organization_id == org.id,
+            CollegeCohort.id.in_({profile.cohort_id for profile in profiles}),
+        )).scalars()
+    }
+    graduation_years = sorted({row.graduation_year for row in cohort_by_id.values()})
+    technical_program_ids = {programs[code].id for code in ("BSC-CS", "BE-ECE") if code in programs}
     existing_results = {
         (row.student_profile_id, row.semester, row.source_key)
         for row in db.execute(select(CollegeTermResult).where(
@@ -1506,7 +1884,8 @@ def _seed_college_placement(
     ).distinct()).scalars())
 
     for index, profile in enumerate(profiles, start=1):
-        for semester in (1, 2, 3):
+        cohort = cohort_by_id[profile.cohort_id]
+        for semester in range(1, profile.current_semester + 1):
             if (profile.id, semester, "demo") not in existing_results:
                 base_cgpa = 6.35 + ((index * 17) % 330) / 100
                 sgpa = min(9.95, max(5.2, base_cgpa - 0.28 + semester * 0.14))
@@ -1514,7 +1893,7 @@ def _seed_college_placement(
                 db.add(CollegeTermResult(
                     organization_id=org.id,
                     student_profile_id=profile.id,
-                    term_id=term.id if semester == 3 else None,
+                    term_id=term.id if semester == profile.current_semester else None,
                     semester=semester,
                     sgpa=round(sgpa, 2),
                     cgpa=round((base_cgpa + sgpa) / 2, 2),
@@ -1522,7 +1901,7 @@ def _seed_college_placement(
                     total_backlogs=active_backlogs + (1 if semester < 3 and index % 13 == 0 else 0),
                     active_backlogs=active_backlogs,
                     result_status="published",
-                    published_on=today - timedelta(days=(3 - semester) * 155 + 24),
+                    published_on=today - timedelta(days=(profile.current_semester - semester) * 155 + 24),
                     source_type="demo",
                     source_key="demo",
                 ))
@@ -1552,8 +1931,8 @@ def _seed_college_placement(
                 organization_id=org.id,
                 student_profile_id=profile.id,
                 participation_status="not_participating" if index % 23 == 0 else "participating",
-                graduation_year=today.year + 2,
-                preferred_roles=["Software Engineer", "Data Analyst"] if profile.program_id == programs["BSC-CS"].id else ["Financial Analyst", "Operations Associate"],
+                graduation_year=cohort.graduation_year,
+                preferred_roles=["Software Engineer", "Data Analyst"] if profile.program_id == programs["BSC-CS"].id else ["Embedded Engineer", "Systems Engineer"] if profile.program_id == programs["BE-ECE"].id else ["Financial Analyst", "Operations Associate"],
                 preferred_locations=["Chennai", "Bengaluru", "Coimbatore"],
                 linkedin_url=f"https://www.linkedin.com/in/crescent-student-{index:03d}" if index % 5 else None,
                 github_url=f"https://github.com/crescent-student-{index:03d}" if profile.program_id == programs["BSC-CS"].id and index % 6 else None,
@@ -1562,10 +1941,12 @@ def _seed_college_placement(
                 placement_status="seeking",
             )
             db.add(career)
+        else:
+            career.graduation_year = cohort.graduation_year
         career_by_student[profile.id] = career
 
         if profile.id not in evidence_students:
-            skill_pool = ["Python", "SQL", "Data Structures", "Communication"] if profile.program_id == programs["BSC-CS"].id else ["Financial Accounting", "Excel", "Business Analysis", "Communication"]
+            skill_pool = ["Python", "SQL", "Data Structures", "Communication"] if profile.program_id == programs["BSC-CS"].id else ["Embedded C", "Digital Systems", "Python", "Communication"] if profile.program_id == programs["BE-ECE"].id else ["Financial Accounting", "Excel", "Business Analysis", "Communication"]
             for skill_index, title in enumerate(skill_pool[:2 + index % 3]):
                 db.add(CollegeCareerEvidence(
                     organization_id=org.id,
@@ -1632,7 +2013,7 @@ def _seed_college_placement(
                     outcome_score=55 + (index * 9 + activity_index * 7) % 40,
                 ))
 
-        if profile.program_id == programs["BSC-CS"].id and index % 6 != 0:
+        if profile.program_id in technical_program_ids and index % 6 != 0:
             account = coding_accounts.get(profile.id)
             if not account:
                 account = CollegeCodingAccount(
@@ -1710,12 +2091,12 @@ def _seed_college_placement(
         companies.append(company)
 
     opportunity_specs = (
-        ("Graduate Software Engineer", 0, "active", [programs["BSC-CS"].id], 7.0, 0, 75, 100),
-        ("Data Analyst Trainee", 1, "active", [programs["BSC-CS"].id, programs["BCOM"].id], 6.5, 1, 70, None),
-        ("Technology Associate", 2, "published", [programs["BSC-CS"].id], 6.0, 1, 70, 75),
+        ("Graduate Software Engineer", 0, "active", [programs["BSC-CS"].id, programs["BE-ECE"].id], 7.0, 0, 75, 100),
+        ("Data Analyst Trainee", 1, "active", [programs["BSC-CS"].id, programs["BE-ECE"].id, programs["BCOM"].id], 6.5, 1, 70, None),
+        ("Technology Associate", 2, "published", [programs["BSC-CS"].id, programs["BE-ECE"].id], 6.0, 1, 70, 75),
         ("Business Operations Analyst", 4, "active", [programs["BCOM"].id], 7.0, 0, 75, None),
         ("Banking Operations Trainee", 5, "published", [programs["BCOM"].id], 6.0, 1, 70, None),
-        ("Product Support Intern", 6, "closed", [programs["BSC-CS"].id, programs["BCOM"].id], 6.0, 2, 65, None),
+        ("Product Support Intern", 6, "closed", [programs["BSC-CS"].id, programs["BE-ECE"].id, programs["BCOM"].id], 6.0, 2, 65, None),
     )
     existing_opportunities = {
         (row.company_id, row.title): row
@@ -1730,7 +2111,7 @@ def _seed_college_placement(
         if not opportunity:
             rules = {
                 "program_ids": program_ids,
-                "graduation_years": [today.year + 2],
+                "graduation_years": graduation_years,
                 "minimum_cgpa": min_cgpa,
                 "maximum_active_backlogs": max_backlogs,
                 "minimum_attendance": min_attendance,
@@ -1759,10 +2140,12 @@ def _seed_college_placement(
                 owner_user_id=owner.id,
             )
             db.add(opportunity)
-        elif is_internship and not (opportunity.eligibility_rules or {}).get("require_fee_clearance"):
+        else:
             opportunity.eligibility_rules = {
                 **(opportunity.eligibility_rules or {}),
-                "require_fee_clearance": True,
+                "program_ids": program_ids,
+                "graduation_years": graduation_years,
+                **({"require_fee_clearance": True} if is_internship else {}),
             }
         opportunities.append(opportunity)
 
@@ -1951,36 +2334,6 @@ def seed_demo_businesses(db: Session) -> int:
         if marker and int(marker.value.get("version", 0)) >= required_version:
             _refresh_demo_activity(db, org)
             continue
-        if org.industry.value == "college" and marker and int(marker.value.get("version", 0)) == 4:
-            owner = db.execute(select(User).where(
-                User.organization_id == org.id,
-            ).order_by(User.created_at)).scalars().first()
-            term = db.execute(select(CollegeTerm).where(
-                CollegeTerm.organization_id == org.id,
-                CollegeTerm.is_current.is_(True),
-            ).order_by(CollegeTerm.starts_on.desc())).scalars().first()
-            programs = {
-                row.code: row for row in db.execute(select(CollegeProgram).where(
-                    CollegeProgram.organization_id == org.id,
-                )).scalars()
-            }
-            cohort_rows = list(db.execute(select(CollegeCohort).where(
-                CollegeCohort.organization_id == org.id,
-            )).scalars())
-            cohorts = {
-                "BSC-CS" if row.program_id == programs.get("BSC-CS", object()).id else "BCOM": row
-                for row in cohort_rows
-            } if "BSC-CS" in programs and "BCOM" in programs else {}
-            profiles = list(db.execute(select(CollegeStudentProfile).where(
-                CollegeStudentProfile.organization_id == org.id,
-                CollegeStudentProfile.status == "active",
-            ).order_by(CollegeStudentProfile.admission_number)).scalars())
-            if owner and term and {"BSC-CS", "BCOM"}.issubset(programs):
-                _seed_college_placement(db, org, owner, profiles, programs, cohorts, term)
-                marker.value = {"version": required_version, "seeded_at": datetime.now(timezone.utc).isoformat()}
-                _refresh_demo_activity(db, org)
-                seeded += 1
-                continue
         if org.industry.value == "college":
             org.enabled_modules = sorted(set(org.enabled_modules or []) | {
                 "clients", "employees", "sales", "college", "documents",

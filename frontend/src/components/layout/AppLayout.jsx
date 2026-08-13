@@ -23,6 +23,7 @@ import {
 import DataHealthBanner from "@/components/DataHealthBanner";
 import RealtimeSync from "@/components/RealtimeSync";
 import AIQuickLauncher from "@/components/ai/AIQuickLauncher";
+import BrandLogo from "@/components/brand/BrandLogo";
 import { EntityAvatar, EntityProfileLink } from "@/components/entities/EntityProfile";
 import { profileRef } from "@/lib/profileNavigation";
 import { useGetQuery } from "@/store/api/baseApi";
@@ -199,10 +200,11 @@ function useWideLayout() {
 
 function Brand({ compact = false, mobile = false, industry }) {
   return <Link to="/app" aria-label="Edvatiq home" className={cn("flex items-center overflow-hidden", mobile ? "w-10" : "h-16 border-b px-4", compact && !mobile && "justify-center px-0")}>
-    <span className="relative grid h-9 w-9 shrink-0 place-items-center overflow-hidden rounded-xl bg-primary text-sm font-bold text-primary-foreground shadow-sm">
-      E<span className="absolute -bottom-2 -right-2 h-5 w-5 rounded-full bg-accent" />
-    </span>
-    {!compact && !mobile && <span className="ml-3 min-w-0"><span className="block truncate text-lg font-bold tracking-[-0.04em]">Edvatiq</span><span className="block text-[9px] font-semibold uppercase tracking-[0.16em] text-sidebar-muted">{industry === "college" ? "Placement OS" : "Business OS"}</span></span>}
+    <BrandLogo
+      showName={!compact && !mobile}
+      subtitle={industry === "college" ? "Placement OS" : "Business OS"}
+      subtitleClassName="text-sidebar-muted"
+    />
   </Link>;
 }
 

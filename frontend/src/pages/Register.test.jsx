@@ -82,6 +82,7 @@ test("uses payment-first signup and never calls free registration when Trial is 
   });
 
   await act(async () => { buttonWith(container, "Continue").click(); });
+  expect(buttonWith(container, "Continue").disabled).toBe(true);
   let inputs = container.querySelectorAll("input");
   await act(async () => {
     inputValue(inputs[0], "Northstar Gym");
@@ -89,7 +90,9 @@ test("uses payment-first signup and never calls free registration when Trial is 
     inputValue(inputs[3], "Chennai");
   });
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 420)); });
+  expect(buttonWith(container, "Continue").disabled).toBe(false);
   await act(async () => { buttonWith(container, "Continue").click(); });
+  expect(buttonWith(container, "Continue").disabled).toBe(true);
 
   await act(async () => {
     inputValue(container.querySelector("#admin-first-name"), "Kavya");
@@ -98,12 +101,16 @@ test("uses payment-first signup and never calls free registration when Trial is 
     inputValue(container.querySelector("#admin-password"), "StrongPass123");
     inputValue(container.querySelector("#admin-password-confirm"), "StrongPass123");
   });
+  expect(buttonWith(container, "Continue").disabled).toBe(false);
   await act(async () => { buttonWith(container, "Continue").click(); await Promise.resolve(); });
 
   expect(container.textContent).toContain("Trial is currently unavailable");
+  expect(buttonWith(container, "Pay").disabled).toBe(true);
   const state = container.querySelector('input[placeholder="Tamil Nadu"]');
   await act(async () => { inputValue(state, "Tamil Nadu"); });
+  expect(buttonWith(container, "Pay").disabled).toBe(true);
   await act(async () => { container.querySelector("#legal-accepted").click(); });
+  expect(buttonWith(container, "Pay").disabled).toBe(false);
   await act(async () => { buttonWith(container, "Pay").click(); await Promise.resolve(); await Promise.resolve(); });
 
   expect(mocks.registerOrg).not.toHaveBeenCalled();

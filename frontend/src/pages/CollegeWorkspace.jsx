@@ -2,6 +2,7 @@ import React, { useDeferredValue, useEffect, useMemo, useRef, useState } from "r
 import { Link, Navigate, useNavigate, useSearchParams } from "react-router-dom";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
+import { z } from "zod";
 import {
   Archive, ArrowClockwise, ArrowRight, Books, Briefcase, Buildings, CalendarCheck,
   ChartBar, CheckCircle, Code, Copy, Database, FileArrowUp, Funnel, GraduationCap,
@@ -14,6 +15,9 @@ import SecondarySidebarLayout, {
   SecondarySidebarGroup, SecondarySidebarHeader, SecondarySidebarItem,
   SecondarySidebarNav, SecondarySidebarTrigger,
 } from "@/components/layout/SecondarySidebarLayout";
+import AcademicStructurePanel from "@/components/college/AcademicStructurePanel";
+import AcademicResourceCombobox from "@/components/college/AcademicResourceCombobox";
+import DataExchangePanel from "@/components/college/DataExchangePanel";
 import { ValidatedActionDialog } from "@/components/forms/ValidatedActionDialog";
 import {
   CursorListFooter, DataTable, DrawerForm, EmptyState, ErrorState, FilterBar,
@@ -30,28 +34,33 @@ import { Textarea } from "@/components/ui/textarea";
 import { useAuth } from "@/contexts/AuthContext";
 import {
   useCommitCollegeImportMutation, useCreateCollegeApplicationMutation,
-  useCreateCollegeAssessmentMutation, useCreateCollegeAttendanceMutation,
+  useCreateCollegeAttendanceMutation,
   useCreateCollegeCompanyMutation, useCreateCollegeIntegrationCredentialMutation,
   useCreateCollegeIntegrationMutation,
   useCreateCollegeOpportunityMutation, useGetCollegeAcademicEvidencePageQuery,
+  useGetCollegeAcademicHierarchyQuery,
   useGetCollegeApplicationsQuery, useGetCollegeAssessmentRegisterQuery,
+  useGetCollegeAssessmentSchemesPageQuery,
   useGetCollegeAssessmentsPageQuery, useGetCollegeAttendanceRegisterQuery,
-  useGetCollegeAttendanceSessionsPageQuery, useGetCollegeCohortsPageQuery,
+  useGetCollegeAttendanceSessionsPageQuery,
+  useGetCollegeCohortsPageQuery, useGetCollegeOfferingsPageQuery,
   useGetCollegeCompaniesQuery, useGetCollegeImportsQuery,
   useGetCollegeIntegrationCredentialsQuery, useGetCollegeIntegrationsQuery,
   useGetCollegeInternshipClearancePageQuery,
   useGetCollegeLeaderboardsQuery, useGetCollegeOpportunitiesQuery,
   useGetCollegePipelineStagesQuery, useGetCollegeReadinessPolicyQuery,
-  useGetCollegeReferencesQuery, useGetCollegeStudentIntelligenceQuery,
+  useGetCollegeStudentIntelligenceQuery,
   useMoveCollegeApplicationStageMutation, usePreviewCollegeCsvImportMutation,
   useQueueCollegeIntegrationSyncMutation, useRevokeCollegeIntegrationCredentialMutation,
   useRotateCollegeIntegrationCredentialMutation, useSaveCollegeAttendanceMutation,
+  useCreateCollegeExamCycleMutation,
   useSaveCollegeScoresMutation,
+  useUpdateCollegeIntegrationMutation,
 } from "@/features/college/collegeApi";
 import useCursorPagination from "@/hooks/useCursorPagination";
 import {
-  applyApiErrors, assessmentScoreSchema, attendanceRecordSchema, attendanceSessionSchema,
-  collegeApplicationSchema, collegeAssessmentSchema, collegeConnectorSchema,
+  applyApiErrors, attendanceRecordSchema, attendanceSessionSchema,
+  collegeApplicationSchema, collegeConnectorSchema,
   collegeDriveSchema, collegePushCredentialSchema,
   companySchema, FORM_OPTIONS, normalizeApiError,
 } from "@/lib/validation";
@@ -70,18 +79,18 @@ const NAVIGATION = [
     { id: "leaderboards", label: "Leaderboards", icon: Medal, permission: "college.readiness.view" },
   ] },
   { label: "Academic evidence", items: [
-    { id: "batches", label: "Batches", icon: UsersThree, permission: "college.students.view" },
+    { id: "structure", label: "Academic structure", icon: Buildings, permission: "college.academics.view" },
     { id: "attendance", label: "Attendance", icon: CalendarCheck, permission: "college.attendance.view" },
     { id: "evidence", label: "Results & evidence", icon: Books, permission: "college.academics.view" },
     { id: "assessments", label: "Assessments", icon: GraduationCap, permission: "college.assessments.view" },
   ] },
   { label: "Data", items: [
     { id: "integrations", label: "ERP synchronization", icon: Database, permission: "college.integrations.manage" },
-    { id: "imports", label: "Imports", icon: FileArrowUp, permission: "college.imports.manage" },
+    { id: "imports", label: "Data exchange", icon: FileArrowUp, permission: "college.data.view" },
   ] },
   { label: "Administration", items: [
     { id: "policy", label: "Readiness policy", icon: ShieldCheck, permission: "college.readiness.view" },
-    { id: "clearance", label: "Internship clearance", icon: CheckCircle, permission: "college.placements.view" },
+    { id: "clearance", label: "Internship clearance", icon: CheckCircle, permission: "college.clearance.view" },
   ] },
 ];
 
@@ -93,19 +102,19 @@ const SECTION_COPY = {
   readiness: ["Readiness & support", "Find students who are ready, developing, or missing critical evidence."],
   coding: ["Coding intelligence", "Track verified problem-solving progress without making it the only success signal."],
   leaderboards: ["Evidence leaderboards", "Compare achievement and improvement with transparent evidence coverage."],
-  batches: ["Graduation batches", "Review cohort size and academic placement scope without loading every student."],
+  structure: ["Academic structure", "Manage the live departments, programs, graduation batches, terms, courses, and offerings used across College."],
   attendance: ["Attendance evidence", "Review imported history or record a local session when the ERP is unavailable."],
   evidence: ["Academic evidence", "Use verified results and attendance as placement evidence, not a second student ERP."],
-  assessments: ["Placement assessments", "Record aptitude, technical, and placement-specific evaluation evidence."],
+  assessments: ["Assessment cycles", "Run academic, coding, aptitude, and placement evaluations from your College's configured patterns."],
   integrations: ["ERP synchronization", "Keep authoritative student and academic records connected through audited read-only pulls."],
-  imports: ["Data imports", "Validate and review academic evidence before it enters placement intelligence."],
+  imports: ["Data exchange", "Use college-aware manual, Excel, CSV, ERP pull, and API push schemas with review before commit."],
   policy: ["Readiness policy", "Understand how evidence is weighted and when a student becomes rankable."],
   clearance: ["Internship clearance", "Review only the clearance signal required for internship eligibility."],
 };
 
 const LEGACY_SECTIONS = {
   placements: "pipeline", academics: "evidence", coding: "coding",
-  leaderboards: "leaderboards", batches: "batches", imports: "imports", fees: "clearance",
+  leaderboards: "leaderboards", batches: "structure", academics_structure: "structure", imports: "imports", fees: "clearance",
 };
 
 export default function CollegeWorkspace() {
@@ -194,12 +203,12 @@ function CollegeSection({ section }) {
   if (section === "readiness") return <ReadinessPanel />;
   if (section === "coding") return <LeaderboardPanel initialBoard="coding" />;
   if (section === "leaderboards") return <LeaderboardPanel />;
-  if (section === "batches") return <BatchesPanel />;
+  if (section === "structure") return <AcademicStructurePanel />;
   if (section === "attendance") return <AttendancePanel />;
   if (section === "evidence") return <AcademicEvidencePanel />;
   if (section === "assessments") return <AssessmentsPanel />;
   if (section === "integrations") return <IntegrationsPanel />;
-  if (section === "imports") return <ImportsPanel />;
+  if (section === "imports") return <DataExchangePanel />;
   if (section === "policy") return <ReadinessPolicyPanel />;
   if (section === "clearance") return <ClearancePanel />;
   return null;
@@ -327,23 +336,6 @@ function LeaderboardPanel({ initialBoard = "readiness" }) {
   return <Surface className="overflow-hidden"><PanelToolbar title={initialBoard === "coding" ? "Coding progress" : "Evidence leaderboards"} /><div className="flex flex-col gap-3 border-t p-3 sm:flex-row sm:items-center sm:justify-between">{initialBoard !== "coding" && <SegmentControl value={board} onChange={setBoard} items={["readiness", "coding", "academics", "improvement"].map((value) => ({ value, label: sentence(value) }))} />}{board === "improvement" && <SegmentControl value={windowDays} onChange={setWindowDays} items={[30, 90].map((value) => ({ value, label: `${value} days` }))} />}</div><DataTable className="rounded-none border-0 shadow-none" rows={rows} columns={columns} loading={query.isLoading} onRowClick={(row) => navigate(`/app/clients/${row.client_id}`)} empty={<EmptyState variant="section" alignment="left" icon={Medal} title="No rankable evidence yet" description="Students remain visible after they meet the configured evidence threshold." />} /></Surface>;
 }
 
-function BatchesPanel() {
-  const [search, setSearch] = useState("");
-  const q = useDeferredValue(search.trim());
-  const paging = useCursorPagination(q);
-  const query = useGetCollegeCohortsPageQuery({ q, cursor: paging.cursor, limit: 25 });
-  const rows = usePagedData(query, paging);
-  const columns = [
-    { key: "name", label: "Batch", render: (row) => <div><div className="font-semibold">{row.name}</div><div className="mt-1 text-xs text-muted-foreground">{row.code}</div></div> },
-    { key: "program", label: "Program", render: (row) => row.program_name },
-    { key: "year", label: "Admission year", render: (row) => row.admission_year },
-    { key: "semester", label: "Semester", render: (row) => row.current_semester },
-    { key: "students", label: "Students", render: (row) => row.student_count },
-    { key: "status", label: "Status", render: (row) => <StatusBadge status={row.is_active ? "active" : "inactive"} /> },
-  ];
-  return <Surface className="overflow-hidden"><PanelToolbar title="Batch directory" /><FilterBar className="rounded-none border-x-0 border-t"><SearchField value={search} onChange={setSearch} placeholder="Search batch or code" /></FilterBar><DataTable className="rounded-none border-0 shadow-none" rows={rows} columns={columns} loading={query.isLoading && !rows.length} empty={<EmptyState variant="section" alignment="left" icon={UsersThree} title="No batches available" description="Synchronize batches from the College ERP or use an approved import." />} /><ListFooter query={query} paging={paging} noun="batches" /></Surface>;
-}
-
 function AttendancePanel() {
   const { can } = useAuth();
   const [drawer, setDrawer] = useState(false);
@@ -388,31 +380,38 @@ function AcademicEvidencePanel() {
 
 function AssessmentsPanel() {
   const { can } = useAuth();
-  const [drawer, setDrawer] = useState(false);
+  const [cycleDrawer, setCycleDrawer] = useState(false);
   const [register, setRegister] = useState(null);
   const paging = useCursorPagination("assessments");
   const query = useGetCollegeAssessmentsPageQuery({ cursor: paging.cursor, limit: 25 });
   const rows = usePagedData(query, paging);
   const columns = [
-    { key: "title", label: "Assessment", render: (row) => <div><div className="font-semibold">{row.title}</div><div className="mt-1 text-xs text-muted-foreground">{sentence(row.assessment_type)} / {row.course_name}</div></div> },
-    { key: "cohort", label: "Batch", render: (row) => row.cohort_name },
+    { key: "title", label: "Assessment", render: (row) => <div><div className="font-semibold">{row.title}</div><div className="mt-1 text-xs text-muted-foreground">{row.cycle_code || sentence(row.assessment_type)} / {row.course_name || sentence(row.scheme_snapshot?.domain || "cohort assessment")}</div></div> },
+    { key: "cohort", label: "Batch", render: (row) => row.cohort_name || "Not available" },
     { key: "due", label: "Due", render: (row) => shortDate(row.due_on) },
     { key: "scores", label: "Scores", render: (row) => row.score_count },
     { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> },
     { key: "open", label: "", render: () => <ArrowRight /> },
   ];
-  return <Surface className="overflow-hidden"><PanelToolbar title="Placement and academic assessments" action={can("college.assessments.manage") && <Button size="sm" onClick={() => setDrawer(true)}><Plus className="mr-2" />New assessment</Button>} /><DataTable className="rounded-none border-0 shadow-none" rows={rows} columns={columns} loading={query.isLoading && !rows.length} onRowClick={setRegister} empty={<EmptyState variant="section" alignment="left" icon={GraduationCap} title="No assessments yet" description="Create a placement-specific assessment or synchronize academic results." />} /><ListFooter query={query} paging={paging} noun="assessments" /><AssessmentDrawer open={drawer} onClose={() => setDrawer(false)} /><AssessmentRegisterDrawer assessment={register} onClose={() => setRegister(null)} /></Surface>;
+  return <Surface className="overflow-hidden"><PanelToolbar title="Institution-configured assessments" action={can("college.assessments.manage") && <Button size="sm" onClick={() => setCycleDrawer(true)}><Plus className="mr-2" />New exam cycle</Button>} /><DataTable className="rounded-none border-0 shadow-none" rows={rows} columns={columns} loading={query.isLoading && !rows.length} onRowClick={setRegister} empty={<EmptyState variant="section" alignment="left" icon={GraduationCap} title="No assessment cycles yet" description="Configure an assessment pattern, then create a cycle for the required courses or cohorts." primaryAction={can("college.academics.manage") ? <Button asChild variant="outline"><Link to="/app/college?section=structure&tab=assessment-patterns">Configure patterns</Link></Button> : undefined} />} /><ListFooter query={query} paging={paging} noun="assessments" /><ExamCycleDrawer open={cycleDrawer} onClose={() => setCycleDrawer(false)} /><DynamicAssessmentRegisterDrawer assessment={register} onClose={() => setRegister(null)} /></Surface>;
 }
 
 function ImportsPanel() {
+  const navigate = useNavigate();
   const [resource, setResource] = useState("students");
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState(null);
+  const hierarchy = useGetCollegeAcademicHierarchyQuery();
   const paging = useCursorPagination("imports");
   const query = useGetCollegeImportsQuery({ cursor: paging.cursor, limit: 25 });
   const rows = usePagedData(query, paging);
   const [previewCsv, previewState] = usePreviewCollegeCsvImportMutation();
   const [commit, commitState] = useCommitCollegeImportMutation();
+  const studentStructureReady = Number(hierarchy.data?.summary?.section_count || 0) > 0;
+  const structureUnavailable = resource === "students" && hierarchy.isError && !hierarchy.data;
+  const structureChecking = resource === "students" && hierarchy.isLoading && !hierarchy.data;
+  const structureRequired = resource === "students" && Boolean(hierarchy.data) && !studentStructureReady;
+  const studentImportBlocked = structureChecking || structureUnavailable || structureRequired;
   const validate = async () => {
     if (!file) return;
     try { setPreview(await previewCsv({ file, resourceType: resource }).unwrap()); }
@@ -429,12 +428,17 @@ function ImportsPanel() {
     { key: "rows", label: "Committed", render: (row) => `${row.committed_count}/${row.row_count}` },
     { key: "started", label: "Started", render: (row) => dateTime(row.created_at) },
   ];
-  return <div className="space-y-5"><OwnershipNotice /><Surface className="p-4 sm:p-5"><h2 className="font-semibold">Validate an academic evidence file</h2><p className="mt-1 text-xs text-muted-foreground">Nothing is committed until validation has completed and a staff member confirms the preview.</p><div className="mt-4 grid gap-3 sm:grid-cols-[190px_minmax(0,1fr)_auto]"><Select value={resource} onValueChange={setResource}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["students", "term_results", "attendance", "skills", "assessments", "internship_clearance"].map((value) => <SelectItem key={value} value={value}>{sentence(value)}</SelectItem>)}</SelectContent></Select><Input type="file" accept=".csv,text/csv" onChange={(event) => setFile(event.target.files?.[0] || null)} /><Button onClick={validate} disabled={!file || previewState.isLoading}>{previewState.isLoading ? "Validating..." : "Preview"}</Button></div>{preview && <div className="mt-4 flex flex-col gap-3 rounded-xl border bg-secondary/30 p-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="font-semibold">{preview.valid_count} of {preview.row_count} rows are ready</div><div className="mt-1 text-xs text-muted-foreground">{preview.failed_count ? `${preview.failed_count} rows need correction.` : "No validation errors found."}</div></div><Button onClick={commitRun} disabled={!preview.valid_count || commitState.isLoading}>{commitState.isLoading ? "Importing..." : "Commit valid rows"}</Button></div>}</Surface><Surface className="overflow-hidden"><PanelToolbar title="Import history" /><DataTable className="rounded-none border-0 shadow-none" rows={rows} columns={columns} loading={query.isLoading && !rows.length} empty={<EmptyState variant="inline" alignment="left" icon={Archive} title="No import runs yet" description="Validated CSV and ERP runs will appear here." />} /><ListFooter query={query} paging={paging} noun="import runs" /></Surface></div>;
+  const changeResource = (value) => {
+    setResource(value);
+    setFile(null);
+    setPreview(null);
+  };
+  return <div className="space-y-5"><OwnershipNotice /><Surface className="p-4 sm:p-5"><h2 className="font-semibold">Validate academic structure or evidence</h2><p className="mt-1 text-xs text-muted-foreground">Import structure in dependency order: departments, programs, then cohorts. Nothing is committed until validation completes and a staff member confirms the preview.</p>{structureUnavailable && <div className="mt-4 flex flex-col gap-3 rounded-xl border bg-secondary/30 p-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="font-semibold">Academic structure could not be verified</div><p className="mt-1 text-xs text-muted-foreground">Retry the structure check before importing student records.</p></div><Button variant="outline" onClick={hierarchy.refetch}>Retry</Button></div>}{structureRequired && <div className="mt-4 flex flex-col gap-3 rounded-xl border border-warning/30 bg-warning-soft p-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="font-semibold">Academic structure is required for student imports</div><p className="mt-1 text-xs text-muted-foreground">Create at least one department, program, and graduation batch before mapping students.</p></div><Button variant="outline" onClick={() => navigate("/app/college?section=structure")}>Open Academic structure</Button></div>}<div className="mt-4 grid gap-3 sm:grid-cols-[190px_minmax(0,1fr)_auto]"><Select value={resource} onValueChange={changeResource}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{PUSH_RESOURCES.map((value) => <SelectItem key={value} value={value}>{sentence(value)}</SelectItem>)}</SelectContent></Select><Input key={resource} type="file" accept=".csv,text/csv" disabled={studentImportBlocked} onChange={(event) => setFile(event.target.files?.[0] || null)} /><Button onClick={validate} disabled={!file || studentImportBlocked || previewState.isLoading}>{previewState.isLoading ? "Validating..." : "Preview"}</Button></div>{preview && <div className="mt-4 flex flex-col gap-3 rounded-xl border bg-secondary/30 p-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="font-semibold">{preview.valid_count} of {preview.row_count} rows are ready</div><div className="mt-1 text-xs text-muted-foreground">{preview.failed_count ? `${preview.failed_count} rows need correction or reviewed linking.` : "No validation errors found."}</div></div><Button onClick={commitRun} disabled={!preview.valid_count || commitState.isLoading}>{commitState.isLoading ? "Importing..." : "Commit valid rows"}</Button></div>}</Surface><Surface className="overflow-hidden"><PanelToolbar title="Import history" /><DataTable className="rounded-none border-0 shadow-none" rows={rows} columns={columns} loading={query.isLoading && !rows.length} empty={<EmptyState variant="inline" alignment="left" icon={Archive} title="No import runs yet" description="Validated CSV and ERP runs will appear here." />} /><ListFooter query={query} paging={paging} noun="import runs" /></Surface></div>;
 }
 
 function IntegrationsPanel() {
   const [mode, setMode] = useState("pull");
-  const [pullDrawer, setPullDrawer] = useState(false);
+  const [pullDrawer, setPullDrawer] = useState(null);
   const [credentialDrawer, setCredentialDrawer] = useState(false);
   const [secret, setSecret] = useState(null);
   const [rotateTarget, setRotateTarget] = useState(null);
@@ -447,7 +451,8 @@ function IntegrationsPanel() {
   const [revoke] = useRevokeCollegeIntegrationCredentialMutation();
   const run = async (id) => {
     setSyncing(id);
-    try { await sync({ connectorId: id, resourceTypes: ["students", "term_results", "attendance", "skills", "assessments", "internship_clearance"], idempotencyKey: crypto.randomUUID() }).unwrap(); toast.success("ERP synchronization queued"); }
+    const connector = (pullQuery.data?.items || []).find((item) => item.id === id);
+    try { await sync({ connectorId: id, resourceTypes: connector?.resource_types || [], idempotencyKey: crypto.randomUUID() }).unwrap(); toast.success("ERP synchronization queued"); }
     catch (error) { toast.error(error?.data?.detail || "Synchronization could not be queued"); }
     finally { setSyncing(null); }
   };
@@ -464,11 +469,11 @@ function IntegrationsPanel() {
     <OwnershipNotice />
     <div className="flex items-center justify-between gap-3"><SegmentControl value={mode} onChange={setMode} items={[{ value: "pull", label: "ERP pulls" }, { value: "push", label: "ERP push API" }]} /><Button asChild variant="ghost" size="sm"><Link target="_blank" to={mode === "pull" ? "/docs/erp-pull" : "/docs/erp-push"}>Integration guide <ArrowRight className="ml-1.5" /></Link></Button></div>
     {mode === "pull" ? <Surface className="overflow-hidden">
-      <PanelToolbar title="Connected College ERP" action={<Button size="sm" onClick={() => setPullDrawer(true)}><Plus className="mr-2" />Connect ERP</Button>} />
-      <div className="divide-y border-t">{(pullQuery.data?.items || []).map((row) => <div key={row.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center"><span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-secondary"><Database /></span><span className="min-w-0 flex-1"><span className="block font-semibold">{row.name}</span><span className="mt-1 block text-xs text-muted-foreground">{row.last_success_at ? `Last successful sync ${dateTime(row.last_success_at)}` : "No successful sync yet"}</span></span><StatusBadge status={row.status} /><Button variant="outline" size="sm" onClick={() => run(row.id)} loading={syncing === row.id && syncState.isLoading} loadingText="Queuing..." disabled={!row.api_key_configured}>Sync now</Button></div>)}
-        {!pullQuery.isLoading && !pullQuery.data?.items?.length && <EmptyState variant="section" alignment="left" icon={Database} title="No ERP pull connected" description="Connect a credential-protected read-only HTTPS source, or continue with reviewed CSV imports." primaryAction={<Button variant="outline" onClick={() => setPullDrawer(true)}>Connect ERP</Button>} className="m-4" />}
+      <PanelToolbar title="Connected College ERP" action={<Button size="sm" onClick={() => setPullDrawer({})}><Plus className="mr-2" />Connect ERP</Button>} />
+      <div className="divide-y border-t">{(pullQuery.data?.items || []).map((row) => <div key={row.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center"><span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-secondary"><Database /></span><span className="min-w-0 flex-1"><span className="block font-semibold">{row.name}</span><span className="mt-1 block text-xs text-muted-foreground">{row.last_sync_at ? `Last sync ${dateTime(row.last_sync_at)}` : "No successful sync yet"} / {row.resource_types?.length || 0} configured resources</span></span><StatusBadge status={row.status} /><div className="flex gap-2"><Button variant="ghost" size="sm" onClick={() => setPullDrawer(row)}>Edit</Button><Button variant="outline" size="sm" onClick={() => run(row.id)} loading={syncing === row.id && syncState.isLoading} loadingText="Queuing..." disabled={!row.api_key_configured || !row.resource_types?.length}>Sync now</Button></div></div>)}
+        {!pullQuery.isLoading && !pullQuery.data?.items?.length && <EmptyState variant="section" alignment="left" icon={Database} title="No ERP pull connected" description="Connect a credential-protected read-only HTTPS source, or continue with reviewed CSV imports." primaryAction={<Button variant="outline" onClick={() => setPullDrawer({})}>Connect ERP</Button>} className="m-4" />}
       </div>
-      <ConnectorDrawer open={pullDrawer} onClose={() => setPullDrawer(false)} />
+      <ConnectorDrawer open={Boolean(pullDrawer)} connector={pullDrawer?.id ? pullDrawer : null} onClose={() => setPullDrawer(null)} />
     </Surface> : <Surface className="overflow-hidden">
       <PanelToolbar title="Organization-scoped push credentials" action={<Button size="sm" onClick={() => setCredentialDrawer(true)}><Key className="mr-2" />Create credential</Button>} />
       <div className="border-t bg-secondary/20 px-4 py-3 text-xs leading-5 text-muted-foreground sm:px-5">Secrets are shown once, stored only as hashes, limited to selected resources, and subject to expiry, revocation, idempotency, and audited rate limits.</div>
@@ -542,11 +547,118 @@ function AttendanceRegisterDrawer({ session, onClose }) {
   return <DrawerForm open={Boolean(session)} onOpenChange={(open) => { if (!open && !saveState.isLoading) onClose(); }} title={session ? `Attendance / ${session.course_name}` : "Attendance register"} description={query.data?.summary ? `${query.data.summary.recorded} recorded / ${query.data.summary.unrecorded} remaining` : "Paged student register"}><div className="space-y-4"><SearchField value={search} onChange={setSearch} placeholder="Search student" /><div className="divide-y rounded-xl border">{rows.map((row) => { const value = changes[row.student_profile_id] || row; const error = rowErrors[row.student_profile_id]; return <div key={row.student_profile_id} className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center"><div className="min-w-0 flex-1"><div className="font-semibold">{row.student_name}</div><div className="mt-1 text-xs text-muted-foreground">{row.admission_number} / {row.roll_number || "No roll number"}</div>{error && <p role="alert" className="mt-1 text-xs font-medium text-destructive">{error}</p>}</div><Select value={value.status} onValueChange={(status) => { setChanges((current) => ({ ...current, [row.student_profile_id]: { ...value, status } })); setRowErrors((current) => ({ ...current, [row.student_profile_id]: undefined })); }}><SelectTrigger className="sm:w-40" aria-invalid={Boolean(error)}><SelectValue /></SelectTrigger><SelectContent>{["unrecorded", "present", "absent", "late", "excused"].map((status) => <SelectItem key={status} value={status} disabled={status === "unrecorded"}>{sentence(status)}</SelectItem>)}</SelectContent></Select></div>; })}</div><ListFooter query={query} paging={paging} noun="students" />{formError && <div role="alert" className="rounded-xl border border-destructive/25 bg-destructive/5 p-3 text-sm text-destructive">{formError}</div>}<div className="sticky bottom-0 flex flex-col gap-2 border-t bg-card/95 pt-4 backdrop-blur sm:flex-row sm:items-center sm:justify-between"><span className="text-xs text-muted-foreground">{Object.keys(changes).length} unsaved change(s)</span><Button onClick={submit} disabled={!Object.keys(changes).length} loading={saveState.isLoading} loadingText="Saving...">Save attendance</Button></div></div></DrawerForm>;
 }
 
-function AssessmentRegisterDrawer({ assessment, onClose }) {
+const examCycleSchema = z.object({
+  scheme_id: z.string().min(1, "Select an assessment pattern"),
+  scheme_component_id: z.string().optional(),
+  term_id: z.string().optional(),
+  name: z.string().trim().min(2, "Enter a cycle name").max(180),
+  code: z.string().trim().min(2, "Enter a cycle code").max(60),
+  held_on: z.string().optional(),
+  due_on: z.string().optional(),
+}).superRefine((value, context) => {
+  if (value.held_on && value.due_on && value.due_on < value.held_on) {
+    context.addIssue({ code: "custom", path: ["due_on"], message: "Due date cannot be before the assessment date" });
+  }
+});
+
+function ExamCycleDrawer({ open, onClose }) {
+  const schemes = useGetCollegeAssessmentSchemesPageQuery({ limit: 100 }, { skip: !open });
+  const activeSchemes = (schemes.data?.items || []).filter((item) => ["active", "frozen"].includes(item.status));
+  const [create, mutation] = useCreateCollegeExamCycleMutation();
+  const [targets, setTargets] = useState([]);
+  const form = useForm({ resolver: zodResolver(examCycleSchema), defaultValues: examCycleDefaults, ...FORM_OPTIONS });
+  const { clearErrors, control, formState, handleSubmit, reset, setError, setValue, watch } = form;
+  const schemeId = watch("scheme_id");
+  const componentId = watch("scheme_component_id");
+  const selectedScheme = activeSchemes.find((item) => item.id === schemeId);
+  const academic = selectedScheme?.domain === "academic";
+  useEffect(() => {
+    if (open) { reset(examCycleDefaults); setTargets([]); }
+  }, [open, reset]);
+  useEffect(() => {
+    setValue("scheme_component_id", "", { shouldValidate: true });
+    setValue("term_id", "", { shouldValidate: true });
+    setTargets([]);
+  }, [schemeId, setValue]);
+  const submit = handleSubmit(async (values) => {
+    clearErrors("root.server");
+    if (academic && !values.scheme_component_id) {
+      setError("scheme_component_id", { type: "manual", message: "Select the configured academic component" });
+      return;
+    }
+    if (!targets.length) {
+      setError("root.server", { type: "manual", message: `Select at least one ${academic ? "course offering" : "batch or section"}` });
+      return;
+    }
+    try {
+      await create({
+        scheme_id: values.scheme_id,
+        scheme_component_id: values.scheme_component_id || null,
+        term_id: values.term_id || null,
+        name: values.name,
+        code: values.code,
+        held_on: values.held_on || null,
+        due_on: values.due_on || null,
+        offering_ids: academic ? targets.map((item) => item.id) : [],
+        cohort_ids: academic ? [] : targets.map((item) => item.id),
+      }).unwrap();
+      toast.success(`${targets.length} assessment register${targets.length === 1 ? "" : "s"} created from the selected pattern`);
+      reset(examCycleDefaults);
+      setTargets([]);
+      onClose();
+    } catch (error) {
+      const normalized = applyApiErrors(error, setError, { fallback: "Exam cycle could not be created" });
+      if (!Object.keys(normalized.fieldErrors).length) setError("root.server", { type: "server", message: normalized.message });
+    }
+  });
+  const pending = formState.isSubmitting || mutation.isLoading;
+  return <DrawerForm open={open} onOpenChange={(value) => { if (!value && !pending) onClose(); }} title="Create exam or assessment cycle" description="The selected pattern revision defines every register field, template column, validation rule, and calculation.">
+    <Form {...form}><form noValidate className="space-y-5" onSubmit={submit}>
+      <FormField control={control} name="scheme_id" render={({ field }) => <FormItem><FormLabel>Assessment pattern</FormLabel><Select value={field.value || ""} onValueChange={field.onChange}><FormControl><SelectTrigger><SelectValue placeholder="Choose an active pattern" /></SelectTrigger></FormControl><SelectContent>{activeSchemes.map((row) => <SelectItem key={row.id} value={row.id}>{row.name} / revision {row.version_number} / {sentence(row.domain)}</SelectItem>)}</SelectContent></Select><FormDescription>Used versions become immutable so historical marks never change calculation rules.</FormDescription><FormMessage /></FormItem>} />
+      {!schemes.isLoading && !activeSchemes.length && <div className="rounded-xl border border-warning/30 bg-warning-soft p-4"><div className="font-semibold">No active assessment pattern</div><p className="mt-1 text-xs leading-5 text-muted-foreground">Create and activate a pattern in Academic Structure before opening a cycle.</p><Button asChild className="mt-3" size="sm" variant="outline"><Link to="/app/college?section=structure&tab=assessment-patterns">Open assessment patterns</Link></Button></div>}
+      {selectedScheme && <Surface className="border bg-surface-subtle/30 p-4 shadow-none"><div className="flex flex-wrap items-center gap-2"><StatusBadge status={selectedScheme.status} /><span className="text-sm font-medium">{selectedScheme.code}</span><span className="text-xs text-muted-foreground">revision {selectedScheme.version_number} / {sentence(selectedScheme.calculation_method)}</span></div><p className="mt-2 text-xs leading-5 text-muted-foreground">{selectedScheme.components.map((item) => item.name).join(", ")}</p></Surface>}
+      {academic && <FormField control={control} name="scheme_component_id" render={({ field }) => <FormItem><FormLabel>Configured component</FormLabel><Select value={field.value || ""} onValueChange={field.onChange}><FormControl><SelectTrigger><SelectValue placeholder="Choose the exam component" /></SelectTrigger></FormControl><SelectContent>{(selectedScheme?.components || []).map((row) => <SelectItem key={row.id} value={row.id}>{row.name}{row.max_marks != null ? ` / ${row.max_marks} max` : ""}</SelectItem>)}</SelectContent></Select><FormMessage /></FormItem>} />}
+      {academic && <CollegeAcademicReferenceField control={control} name="term_id" label="Academic term (optional)" resource="terms" enabled={open && Boolean(selectedScheme)} filters={{ active: true }} />}
+      <div className="grid gap-4 sm:grid-cols-2"><CollegeFormField control={control} name="name" label="Cycle name"><Input /></CollegeFormField><CollegeFormField control={control} name="code" label="Cycle code"><Input /></CollegeFormField><CollegeFormField control={control} name="held_on" label="Held on"><Input type="date" /></CollegeFormField><CollegeFormField control={control} name="due_on" label="Due on"><Input type="date" /></CollegeFormField></div>
+      {selectedScheme && <MultiAcademicTargetPicker resource={academic ? "offerings" : "cohorts"} selected={targets} onChange={setTargets} />}
+      <FormRootError error={formState.errors.root?.server} />
+      <Button type="submit" className="w-full" disabled={!formState.isValid || !selectedScheme || !targets.length || (academic && !componentId)} loading={pending} loadingText="Creating registers...">Create cycle and {targets.length || 0} register{targets.length === 1 ? "" : "s"}</Button>
+    </form></Form>
+  </DrawerForm>;
+}
+
+function MultiAcademicTargetPicker({ resource, selected, onChange }) {
+  const [search, setSearch] = useState("");
+  const q = useDeferredValue(search.trim());
+  const paging = useCursorPagination(`cycle-targets:${resource}:${q}`);
+  const args = { q: q || undefined, cursor: paging.cursor || undefined, limit: 25, active: true };
+  const offerings = useGetCollegeOfferingsPageQuery(args, { skip: resource !== "offerings" });
+  const cohorts = useGetCollegeCohortsPageQuery(args, { skip: resource !== "cohorts" });
+  const query = resource === "offerings" ? offerings : cohorts;
+  const { accept } = paging;
+  useEffect(() => { accept(query.data); }, [accept, query.data]);
+  const selectedIds = new Set(selected.map((item) => item.id));
+  const toggle = (item, checked) => onChange(checked ? [...selected, item] : selected.filter((current) => current.id !== item.id));
+  return <div className="rounded-2xl border">
+    <div className="border-b p-4"><FormLabel>{resource === "offerings" ? "Course offerings" : "Batches and sections"}</FormLabel><p className="mt-1 text-xs text-muted-foreground">Select one or more targets. Each target receives its own paged register.</p><Input className="mt-3" value={search} onChange={(event) => setSearch(event.target.value)} placeholder={`Search ${resource}`} /></div>
+    <div className="max-h-72 divide-y overflow-y-auto">{paging.items.map((item) => {
+      const label = resource === "offerings" ? (item.display_name || item.course_name || item.course_code) : (item.display_name || item.name);
+      const detail = resource === "offerings" ? (item.display_meta || `${item.course_code || "Course"} / ${item.cohort_name || "Batch"}`) : (item.display_meta || `${item.code} / Class of ${item.graduation_year}`);
+      return <label key={item.id} className="flex cursor-pointer items-start gap-3 p-3 transition-colors hover:bg-surface-hover"><Checkbox checked={selectedIds.has(item.id)} onCheckedChange={(checked) => toggle(item, checked === true)} /><span className="min-w-0"><span className="block text-sm font-medium">{label}</span><span className="mt-0.5 block text-xs text-muted-foreground">{detail}</span></span></label>;
+    })}
+      {!query.isLoading && !paging.items.length && <div className="p-4 text-sm text-muted-foreground">No matching {resource}.</div>}
+    </div>
+    <CursorListFooter count={paging.items.length} noun={resource} hasMore={Boolean(query.data?.next_cursor)} loading={query.isFetching} error={query.isError && paging.items.length > 0} onLoadMore={() => paging.loadMore(query.data?.next_cursor)} onRetry={query.refetch} />
+    {selected.length > 0 && <div className="border-t bg-surface-subtle/35 px-4 py-3 text-xs font-medium">{selected.length} selected</div>}
+  </div>;
+}
+
+function DynamicAssessmentRegisterDrawer({ assessment, onClose }) {
   const [search, setSearch] = useState("");
   const [changes, setChanges] = useState({});
   const [rowErrors, setRowErrors] = useState({});
   const [formError, setFormError] = useState("");
+  const [correctionReason, setCorrectionReason] = useState("");
   const [pendingMode, setPendingMode] = useState(null);
   const submitLock = useRef(false);
   const q = useDeferredValue(search.trim());
@@ -554,28 +666,109 @@ function AssessmentRegisterDrawer({ assessment, onClose }) {
   const query = useGetCollegeAssessmentRegisterQuery({ assessmentId: assessment?.id, q, cursor: paging.cursor, limit: 50 }, { skip: !assessment?.id });
   const rows = usePagedData(query, paging);
   const [save, saveState] = useSaveCollegeScoresMutation();
-  useEffect(() => { if (!assessment) { setSearch(""); setChanges({}); setRowErrors({}); setFormError(""); } }, [assessment]);
-  const submit = async (publish = false) => {
-    const rawScores = Object.entries(changes).map(([student_profile_id, value]) => ({ student_profile_id, marks_awarded: value.marks_awarded, grade: value.grade || null, feedback: value.feedback || null }));
+  const loadedAssessment = query.data?.assessment || assessment;
+  const configuredDefinitions = loadedAssessment?.metric_schema || [];
+  const definitions = configuredDefinitions.length ? configuredDefinitions : [{
+    code: "marks_awarded", name: "Score", metric_type: "number", max_marks: loadedAssessment?.max_marks,
+    is_required: false,
+  }];
+  const isConfigured = configuredDefinitions.length > 0;
+  const published = loadedAssessment?.status === "published";
+  useEffect(() => {
+    if (!assessment) {
+      setSearch(""); setChanges({}); setRowErrors({}); setFormError(""); setCorrectionReason("");
+    }
+  }, [assessment]);
+
+  const valueFor = (row) => {
+    if (changes[row.student_profile_id]) return changes[row.student_profile_id];
+    const metrics = { ...(row.metrics || {}) };
+    if (!isConfigured && row.marks_awarded != null) metrics.marks_awarded = row.marks_awarded;
+    if (isConfigured && definitions.length === 1 && row.marks_awarded != null && metrics[definitions[0].code] == null) metrics[definitions[0].code] = row.marks_awarded;
+    return { ...row, metrics };
+  };
+  const changeMetric = (row, definition, raw) => {
+    const current = valueFor(row);
+    const nextMetrics = { ...(current.metrics || {}), [definition.code]: raw };
+    setChanges((values) => ({ ...values, [row.student_profile_id]: { ...current, metrics: nextMetrics } }));
+    setRowErrors((values) => ({ ...values, [row.student_profile_id]: undefined }));
+  };
+  const submit = async (publishScores = false) => {
     const errors = {};
-    const scores = [];
-    rawScores.forEach((score) => {
-      const parsed = assessmentScoreSchema.safeParse(score);
-      if (!parsed.success) { errors[score.student_profile_id] = parsed.error.issues[0]?.message || "Invalid score"; return; }
-      if (parsed.data.marks_awarded != null && Number(parsed.data.marks_awarded) > Number(assessment?.max_marks || 0)) { errors[score.student_profile_id] = `Marks cannot exceed ${assessment.max_marks}`; return; }
-      scores.push(parsed.data);
+    const scores = Object.values(changes).map((value) => {
+      const metrics = {};
+      for (const definition of definitions) {
+        const raw = value.metrics?.[definition.code];
+        const validation = validateDynamicMetric(definition, raw);
+        if (validation) errors[value.student_profile_id] = validation;
+        else if (raw !== "" && raw != null) metrics[definition.code] = normalizeDynamicMetric(definition, raw);
+      }
+      return {
+        student_profile_id: value.student_profile_id,
+        version: value.version || null,
+        marks_awarded: isConfigured ? null : (metrics.marks_awarded ?? null),
+        grade: value.grade || null,
+        feedback: value.feedback || null,
+        metrics: isConfigured ? metrics : {},
+      };
     });
+    if (published && correctionReason.trim().length < 3) setFormError("Explain why these published marks are being corrected.");
+    else setFormError("");
     setRowErrors(errors);
-    if (Object.keys(errors).length || submitLock.current) return;
-    if (!scores.length) return;
+    if (Object.keys(errors).length || !scores.length || submitLock.current || (published && correctionReason.trim().length < 3)) return;
     submitLock.current = true;
-    setPendingMode(publish ? "publish" : "draft");
-    setFormError("");
-    try { await save({ assessmentId: assessment.id, scores, publish }).unwrap(); toast.success(publish ? "Scores published" : "Scores saved"); setChanges({}); setRowErrors({}); paging.reset(); query.refetch(); }
-    catch (error) { setFormError(normalizeApiError(error, "Scores could not be saved").message); }
+    setPendingMode(publishScores ? "publish" : "draft");
+    try {
+      await save({ assessmentId: assessment.id, scores, publish: publishScores, correctionReason: correctionReason.trim() || null }).unwrap();
+      toast.success(published ? "Published results corrected with an audit entry" : publishScores ? "Results published" : "Results saved");
+      setChanges({}); setRowErrors({}); setCorrectionReason(""); paging.reset(); query.refetch();
+    } catch (error) { setFormError(normalizeApiError(error, "Results could not be saved").message); }
     finally { submitLock.current = false; setPendingMode(null); }
   };
-  return <DrawerForm open={Boolean(assessment)} onOpenChange={(open) => { if (!open && !saveState.isLoading) onClose(); }} title={assessment?.title || "Assessment register"} description={query.data?.summary ? `${query.data.summary.scored} scored / ${query.data.summary.unscored} remaining` : "Paged score register"}><div className="space-y-4"><SearchField value={search} onChange={setSearch} placeholder="Search student" /><div className="divide-y rounded-xl border">{rows.map((row) => { const value = changes[row.student_profile_id] || row; const error = rowErrors[row.student_profile_id]; return <div key={row.student_profile_id} className="grid gap-3 p-3 sm:grid-cols-[minmax(0,1fr)_110px_90px] sm:items-center"><div><div className="font-semibold">{row.student_name}</div><div className="mt-1 text-xs text-muted-foreground">{row.admission_number}</div>{error && <p role="alert" className="mt-1 text-xs font-medium text-destructive">{error}</p>}</div><Input inputMode="decimal" aria-label={`Marks for ${row.student_name}`} aria-invalid={Boolean(error)} value={value.marks_awarded ?? ""} placeholder={`/${assessment?.max_marks}`} onChange={(event) => { setChanges((current) => ({ ...current, [row.student_profile_id]: { ...value, marks_awarded: event.target.value } })); setRowErrors((current) => ({ ...current, [row.student_profile_id]: undefined })); }} /><Input value={value.grade || ""} maxLength={12} aria-label={`Grade for ${row.student_name}`} placeholder="Grade" onChange={(event) => { setChanges((current) => ({ ...current, [row.student_profile_id]: { ...value, grade: event.target.value } })); setRowErrors((current) => ({ ...current, [row.student_profile_id]: undefined })); }} /></div>; })}</div><ListFooter query={query} paging={paging} noun="students" />{formError && <div role="alert" className="rounded-xl border border-destructive/25 bg-destructive/5 p-3 text-sm text-destructive">{formError}</div>}<div className="sticky bottom-0 flex flex-col gap-2 border-t bg-card/95 pt-4 backdrop-blur sm:flex-row sm:items-center sm:justify-between"><span className="text-xs text-muted-foreground">{Object.keys(changes).length} unsaved change(s)</span><div className="flex gap-2"><Button variant="outline" onClick={() => submit(false)} disabled={!Object.keys(changes).length || Boolean(pendingMode)} loading={pendingMode === "draft"} loadingText="Saving...">Save draft</Button><Button onClick={() => submit(true)} disabled={!Object.keys(changes).length || Boolean(pendingMode)} loading={pendingMode === "publish"} loadingText="Publishing...">Publish</Button></div></div></div></DrawerForm>;
+  const dirtyCount = Object.keys(changes).length;
+  return <DrawerForm open={Boolean(assessment)} onOpenChange={(open) => { if (!open && !saveState.isLoading) onClose(); }} title={assessment?.title || "Assessment register"} description={query.data?.summary ? `${query.data.summary.scored} scored / ${query.data.summary.unscored} remaining` : "Paged student register generated from the configured pattern"}>
+    <div className="space-y-4">
+      {isConfigured && <Surface className="border bg-surface-subtle/30 p-4 shadow-none"><div className="flex flex-wrap items-center gap-2"><StatusBadge status="active" label={`${definitions.length} configured field${definitions.length === 1 ? "" : "s"}`} />{assessment?.scheme_snapshot?.scheme_code && <span className="text-xs text-muted-foreground">{assessment.scheme_snapshot.scheme_code} / revision {assessment.scheme_snapshot.scheme_version}</span>}</div><p className="mt-2 text-xs leading-5 text-muted-foreground">{definitions.map((item) => `${item.name}${item.max_marks != null ? ` / ${item.max_marks}` : ""}`).join("; ")}</p></Surface>}
+      <SearchField value={search} onChange={setSearch} placeholder="Search student" />
+      {query.isError && !rows.length ? <ErrorState title="Assessment register could not be loaded" retry={query.refetch} /> : <div className="divide-y rounded-xl border">{rows.map((row) => {
+        const value = valueFor(row);
+        const error = rowErrors[row.student_profile_id];
+        return <div key={row.student_profile_id} className="space-y-3 p-3">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between"><div><div className="font-semibold">{row.student_name}</div><div className="mt-1 text-xs text-muted-foreground">{row.admission_number}{row.roll_number ? ` / ${row.roll_number}` : ""}</div></div>{row.calculated_score != null && <span className="rounded-full bg-secondary px-2.5 py-1 text-xs font-medium">Calculated {row.calculated_score}</span>}</div>
+          <div className="grid gap-3 sm:grid-cols-2">{definitions.map((definition) => <DynamicMetricInput key={definition.code} definition={definition} studentName={row.student_name} value={value.metrics?.[definition.code] ?? ""} onChange={(next) => changeMetric(row, definition, next)} invalid={Boolean(error)} />)}</div>
+          {error && <p role="alert" className="text-xs font-medium text-destructive">{error}</p>}
+        </div>;
+      })}</div>}
+      <ListFooter query={query} paging={paging} noun="students" />
+      {published && <div className="rounded-xl border border-warning/30 bg-warning-soft p-4"><Label htmlFor="published-correction-reason">Correction reason</Label><Textarea id="published-correction-reason" className="mt-2 bg-card" value={correctionReason} onChange={(event) => setCorrectionReason(event.target.value)} rows={3} placeholder="Required because these results are already published" /><p className="mt-2 text-xs leading-5 text-muted-foreground">The before and after values, reason, and responsible staff member are retained in the audit log.</p></div>}
+      {formError && <div role="alert" className="rounded-xl border border-destructive/25 bg-destructive/5 p-3 text-sm text-destructive">{formError}</div>}
+      <div className="sticky bottom-0 flex flex-col gap-2 border-t bg-card/95 pt-4 backdrop-blur sm:flex-row sm:items-center sm:justify-between"><span className="text-xs text-muted-foreground">{dirtyCount} unsaved change(s)</span><div className="flex gap-2"><Button variant="outline" onClick={() => submit(false)} disabled={!dirtyCount || Boolean(pendingMode) || (published && correctionReason.trim().length < 3)} loading={pendingMode === "draft"} loadingText="Saving...">{published ? "Save corrections" : "Save draft"}</Button>{!published && <Button onClick={() => submit(true)} disabled={!dirtyCount || Boolean(pendingMode)} loading={pendingMode === "publish"} loadingText="Publishing...">Publish</Button>}</div></div>
+    </div>
+  </DrawerForm>;
+}
+
+function DynamicMetricInput({ definition, studentName, value, onChange, invalid }) {
+  const label = `${definition.name}${definition.max_marks != null ? ` / ${definition.max_marks}` : ""}${definition.is_required ? " *" : ""}`;
+  if (definition.metric_type === "boolean") return <div className="space-y-1.5"><Label>{label}</Label><Select value={value === "" || value == null ? "unset" : String(value)} onValueChange={(next) => onChange(next === "unset" ? "" : next === "true")}><SelectTrigger aria-invalid={invalid}><SelectValue /></SelectTrigger><SelectContent><SelectItem value="unset">Not recorded</SelectItem><SelectItem value="true">Yes</SelectItem><SelectItem value="false">No</SelectItem></SelectContent></Select></div>;
+  const numeric = ["number", "percentage", "integer", "rank", "count"].includes(definition.metric_type);
+  return <div className="space-y-1.5"><Label htmlFor={`${definition.code}-${studentName}`}>{label}</Label><Input id={`${definition.code}-${studentName}`} type={numeric ? "number" : "text"} inputMode={numeric ? "decimal" : undefined} min={numeric ? 0 : undefined} max={definition.max_marks ?? undefined} step={["integer", "rank", "count"].includes(definition.metric_type) ? 1 : "any"} maxLength={numeric ? undefined : 140} aria-invalid={invalid} value={value} onChange={(event) => onChange(event.target.value)} placeholder={sentence(definition.metric_type)} /></div>;
+}
+
+function validateDynamicMetric(definition, raw) {
+  if (raw === "" || raw == null) return definition.is_required ? `${definition.name} is required` : null;
+  if (["number", "percentage", "integer", "rank", "count"].includes(definition.metric_type)) {
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value < 0) return `${definition.name} must be a valid non-negative number`;
+    if (["integer", "rank", "count"].includes(definition.metric_type) && !Number.isInteger(value)) return `${definition.name} must be a whole number`;
+    if (definition.max_marks != null && value > Number(definition.max_marks)) return `${definition.name} cannot exceed ${definition.max_marks}`;
+  }
+  return null;
+}
+
+function normalizeDynamicMetric(definition, raw) {
+  if (definition.metric_type === "boolean") return Boolean(raw);
+  if (["number", "percentage", "integer", "rank", "count"].includes(definition.metric_type)) return Number(raw);
+  return String(raw).trim();
 }
 
 function CompanyDrawer({ open, onClose }) {
@@ -656,7 +849,6 @@ function ApplicationDrawer({ open, onClose }) {
 }
 
 function AttendanceSessionDrawer({ open, onClose }) {
-  const refs = useGetCollegeReferencesQuery(undefined, { skip: !open });
   const [create, state] = useCreateCollegeAttendanceMutation();
   const form = useForm({ resolver: zodResolver(attendanceSessionSchema), defaultValues: attendanceSessionDefaults(), ...FORM_OPTIONS });
   const { control, formState, handleSubmit, reset, setError } = form;
@@ -666,38 +858,61 @@ function AttendanceSessionDrawer({ open, onClose }) {
     try { await create({ ...values, starts_at: values.starts_at || null, ends_at: values.ends_at || null, records: [] }).unwrap(); toast.success("Attendance session created"); reset(attendanceSessionDefaults()); onClose(); }
     catch (error) { const normalized = applyApiErrors(error, setError, { fallback: "Session could not be created" }); if (!Object.keys(normalized.fieldErrors).length) setError("root.server", { type: "server", message: normalized.message }); }
   });
-  return <DrawerForm open={open} onOpenChange={(value) => { if (!value && !pending) onClose(); }} title="Create local attendance session" description="Use only when authoritative ERP attendance is unavailable."><Form {...form}><form noValidate onSubmit={submit} className="space-y-4"><CollegeReferenceField control={control} name="offering_id" label="Course offering" rows={refs.data?.offerings || []} getLabel={(row) => row.id} placeholder="Choose offering" /><div className="grid gap-4 sm:grid-cols-2"><CollegeFormField control={control} name="held_on" label="Held on"><Input type="date" /></CollegeFormField><CollegeFormField control={control} name="topic" label="Topic"><Input /></CollegeFormField><CollegeFormField control={control} name="starts_at" label="Starts"><Input type="time" /></CollegeFormField><CollegeFormField control={control} name="ends_at" label="Ends"><Input type="time" /></CollegeFormField></div><FormRootError error={formState.errors.root?.server} /><Button type="submit" className="w-full" loading={pending} loadingText="Creating...">Create session</Button></form></Form></DrawerForm>;
+  return <DrawerForm open={open} onOpenChange={(value) => { if (!value && !pending) onClose(); }} title="Create local attendance session" description="Use only when authoritative ERP attendance is unavailable."><Form {...form}><form noValidate onSubmit={submit} className="space-y-4"><CollegeAcademicReferenceField control={control} name="offering_id" label="Course offering" resource="offerings" enabled={open} filters={{ status: "active" }} /><div className="grid gap-4 sm:grid-cols-2"><CollegeFormField control={control} name="held_on" label="Held on"><Input type="date" /></CollegeFormField><CollegeFormField control={control} name="topic" label="Topic"><Input /></CollegeFormField><CollegeFormField control={control} name="starts_at" label="Starts"><Input type="time" /></CollegeFormField><CollegeFormField control={control} name="ends_at" label="Ends"><Input type="time" /></CollegeFormField></div><FormRootError error={formState.errors.root?.server} /><Button type="submit" className="w-full" loading={pending} loadingText="Creating..." disabled={!formState.isValid}>Create session</Button></form></Form></DrawerForm>;
 }
 
-function AssessmentDrawer({ open, onClose }) {
-  const refs = useGetCollegeReferencesQuery(undefined, { skip: !open });
-  const [create, state] = useCreateCollegeAssessmentMutation();
-  const form = useForm({ resolver: zodResolver(collegeAssessmentSchema), defaultValues: assessmentDefaults, ...FORM_OPTIONS });
-  const { control, formState, handleSubmit, reset, setError } = form;
-  useEffect(() => { if (open) reset(assessmentDefaults); }, [open, reset]);
-  const pending = formState.isSubmitting || state.isLoading;
-  const submit = handleSubmit(async (values) => {
-    try { await create(values).unwrap(); toast.success("Assessment created"); reset(assessmentDefaults); onClose(); }
-    catch (error) { const normalized = applyApiErrors(error, setError, { fallback: "Assessment could not be created" }); if (!Object.keys(normalized.fieldErrors).length) setError("root.server", { type: "server", message: normalized.message }); }
-  });
-  return <DrawerForm open={open} onOpenChange={(value) => { if (!value && !pending) onClose(); }} title="Create assessment" description="Use for placement-specific evaluation or approved local academic evidence."><Form {...form}><form noValidate onSubmit={submit} className="space-y-4"><CollegeReferenceField control={control} name="offering_id" label="Course offering" rows={refs.data?.offerings || []} getLabel={(row) => row.id} placeholder="Choose offering" /><CollegeFormField control={control} name="title" label="Assessment title"><Input /></CollegeFormField><div className="grid gap-4 sm:grid-cols-2"><CollegeSelectField control={control} name="assessment_type" label="Type" values={["internal", "assignment", "quiz", "practical", "project", "semester"]} /><CollegeFormField control={control} name="max_marks" label="Maximum marks"><Input inputMode="decimal" /></CollegeFormField><CollegeFormField control={control} name="due_on" label="Due on"><Input type="date" /></CollegeFormField><CollegeFormField control={control} name="weightage_bps" label="Weightage (basis points)"><Input inputMode="numeric" /></CollegeFormField></div><FormRootError error={formState.errors.root?.server} /><Button type="submit" className="w-full" loading={pending} loadingText="Creating...">Create assessment</Button></form></Form></DrawerForm>;
-}
-
-function ConnectorDrawer({ open, onClose }) {
+function ConnectorDrawer({ open, connector, onClose }) {
   const [create, state] = useCreateCollegeIntegrationMutation();
-  const form = useForm({ resolver: zodResolver(collegeConnectorSchema), defaultValues: connectorDefaults, ...FORM_OPTIONS });
+  const [update, updateState] = useUpdateCollegeIntegrationMutation();
+  const form = useForm({ resolver: zodResolver(collegeConnectorSchema), defaultValues: connectorDefaults(), ...FORM_OPTIONS });
   const { control, formState, handleSubmit, reset, setError, watch } = form;
   const authMode = watch("auth_mode");
-  useEffect(() => { if (open) reset(connectorDefaults); }, [open, reset]);
-  const pending = formState.isSubmitting || state.isLoading;
+  const paginationMode = watch("pagination_mode");
+  useEffect(() => { if (open) reset(connectorDefaults(connector)); }, [connector, open, reset]);
+  const pending = formState.isSubmitting || state.isLoading || updateState.isLoading;
   const submit = handleSubmit(async (values) => {
-    try { await create({ ...values, auth_header: values.auth_header || null, mapping: {}, pagination: {} }).unwrap(); toast.success("ERP connector saved"); reset(connectorDefaults); onClose(); }
+    const overrides = values.mapping_json ? JSON.parse(values.mapping_json) : {};
+    const sourceMappings = overrides.resources || overrides;
+    const resources = Object.fromEntries(values.resources.map((resource) => [resource, {
+      path: `/${resource.replaceAll("_", "-")}`,
+      root_path: "data",
+      ...(sourceMappings[resource] || {}),
+    }]));
+    const pagination = values.pagination_mode === "none" ? {} : {
+      mode: values.pagination_mode,
+      cursor_param: values.cursor_param || "cursor",
+      updated_since_param: values.updated_since_param || "updated_since",
+      next_url_path: values.next_url_path || undefined,
+      cursor_path: values.cursor_path || undefined,
+    };
+    const payload = {
+      name: values.name,
+      base_url: values.base_url,
+      auth_mode: values.auth_mode,
+      auth_header: values.auth_header || null,
+      api_key: values.api_key,
+      sync_interval_hours: values.sync_interval_hours,
+      mapping: { resources },
+      pagination,
+    };
+    try { await (connector ? update({ connectorId: connector.id, ...payload }) : create(payload)).unwrap(); toast.success(`ERP connector ${connector ? "updated" : "saved"}`); reset(connectorDefaults()); onClose(); }
     catch (error) { const normalized = applyApiErrors(error, setError, { fallback: "ERP connector could not be saved" }); if (!Object.keys(normalized.fieldErrors).length) setError("root.server", { type: "server", message: normalized.message }); }
   });
-  return <DrawerForm open={open} onOpenChange={(value) => { if (!value && !pending) onClose(); }} title="Connect College ERP" description="Configure a credential-protected read-only HTTPS source."><Form {...form}><form noValidate onSubmit={submit} className="space-y-4"><CollegeFormField control={control} name="name" label="Connection name"><Input /></CollegeFormField><CollegeFormField control={control} name="base_url" label="HTTPS base URL"><Input type="url" /></CollegeFormField><div className="grid gap-4 sm:grid-cols-2"><CollegeSelectField control={control} name="auth_mode" label="Authentication" values={["bearer", "header"]} />{authMode === "header" && <CollegeFormField control={control} name="auth_header" label="Header name"><Input /></CollegeFormField>}<CollegeFormField control={control} name="sync_interval_hours" label="Sync interval (hours)"><Input inputMode="numeric" /></CollegeFormField></div><CollegeFormField control={control} name="api_key" label="API key" description="Stored securely and never returned to the browser."><Input type="password" autoComplete="off" /></CollegeFormField><FormRootError error={formState.errors.root?.server} /><Button type="submit" className="w-full" loading={pending} loadingText="Saving...">Save connector</Button></form></Form></DrawerForm>;
+  return <DrawerForm open={open} onOpenChange={(value) => { if (!value && !pending) onClose(); }} title={connector ? "Edit College ERP" : "Connect College ERP"} description="Configure a scoped, credential-protected read-only HTTPS source."><Form {...form}><form noValidate onSubmit={submit} className="space-y-5">
+    <div className="grid gap-4 sm:grid-cols-2"><CollegeFormField control={control} name="name" label="Connection name"><Input /></CollegeFormField><CollegeFormField control={control} name="base_url" label="HTTPS base URL"><Input type="url" /></CollegeFormField></div>
+    <div className="grid gap-4 sm:grid-cols-2"><CollegeSelectField control={control} name="auth_mode" label="Authentication" values={["bearer", "header"]} />{authMode === "header" && <CollegeFormField control={control} name="auth_header" label="Header name"><Input /></CollegeFormField>}<CollegeFormField control={control} name="sync_interval_hours" label="Sync interval (hours)"><Input inputMode="numeric" /></CollegeFormField></div>
+    <CollegeFormField control={control} name="api_key" label={connector ? "Replace API key (optional)" : "API key"} description={connector ? "Leave blank to keep the existing encrypted key." : "Stored securely and never returned to the browser."}><Input type="password" autoComplete="off" /></CollegeFormField>
+    <FormField control={control} name="resources" render={({ field }) => <FormItem><FormLabel>Authoritative resources</FormLabel><FormDescription>Choose only data this ERP actually provides. Unselected endpoints are never called.</FormDescription><div className="grid gap-2 sm:grid-cols-2">{PUSH_RESOURCES.map((resource) => {
+      const checked = field.value?.includes(resource);
+      return <label key={resource} className="flex cursor-pointer items-start gap-3 rounded-xl border p-3 transition-colors hover:bg-secondary/40"><Checkbox checked={checked} onCheckedChange={(next) => field.onChange(next ? [...(field.value || []), resource] : (field.value || []).filter((item) => item !== resource))} /><span><span className="block text-sm font-medium">{sentence(resource)}</span><span className="mt-0.5 block text-xs leading-5 text-muted-foreground">{pushScopeDescription(resource)}</span></span></label>;
+    })}</div><FormMessage /></FormItem>} />
+    <Surface className="space-y-4 bg-secondary/20 p-4 shadow-none"><div><div className="text-sm font-semibold">Pagination</div><p className="mt-1 text-xs leading-5 text-muted-foreground">Match the ERP’s real paging contract. Leave disabled for bounded endpoints.</p></div><CollegeSelectField control={control} name="pagination_mode" label="Paging method" values={["none", "cursor", "updated_since"]} />{paginationMode !== "none" && <div className="grid gap-4 sm:grid-cols-2"><CollegeFormField control={control} name="cursor_param" label="Cursor parameter"><Input placeholder="cursor" /></CollegeFormField><CollegeFormField control={control} name="updated_since_param" label="Updated-since parameter"><Input placeholder="updated_since" /></CollegeFormField><CollegeFormField control={control} name="next_url_path" label="Next URL response path"><Input placeholder="meta.next" /></CollegeFormField><CollegeFormField control={control} name="cursor_path" label="Next cursor response path"><Input placeholder="meta.next_cursor" /></CollegeFormField></div>}</Surface>
+    <FormField control={control} name="mapping_json" render={({ field }) => <FormItem><FormLabel>Advanced resource mapping (optional)</FormLabel><FormDescription>JSON keys are selected resource names. Map source paths to canonical fields; assessment marks may send a dynamic metrics object or map institution metric codes under <code>metrics</code>.</FormDescription><FormControl><Textarea {...field} className="min-h-40 font-mono text-xs" spellCheck={false} placeholder={'{\n  "assessment_marks": {\n    "path": "/assessment-results",\n    "root_path": "data",\n    "fields": { "metrics": "scores" },\n    "metrics": { "YOUR_METRIC_CODE": "scores.custom_field" }\n  }\n}'} /></FormControl><FormMessage /></FormItem>} />
+    <FormRootError error={formState.errors.root?.server} /><Button type="submit" className="w-full" disabled={!formState.isValid} loading={pending} loadingText="Saving...">{connector ? "Save connector changes" : "Save connector"}</Button>
+  </form></Form></DrawerForm>;
 }
 
-const PUSH_RESOURCES = ["students", "term_results", "attendance", "skills", "assessments", "internship_clearance"];
+const PUSH_RESOURCES = ["departments", "programs", "terms", "cohorts", "courses", "students", "term_results", "attendance", "skills", "exam_cycles", "assessment_marks", "internship_clearance"];
 
 function CredentialDrawer({ open, onClose, onCreated }) {
   const [create, state] = useCreateCollegeIntegrationCredentialMutation();
@@ -751,11 +966,29 @@ function CollegeReferenceField({ control, name, label, rows, getLabel = (row) =>
   return <FormField control={control} name={name} render={({ field }) => <FormItem><FormLabel>{label}</FormLabel><Select value={field.value} onValueChange={field.onChange}><FormControl><SelectTrigger><SelectValue placeholder={placeholder} /></SelectTrigger></FormControl><SelectContent>{rows.map((row) => <SelectItem key={row.id} value={row.id}>{getLabel(row)}</SelectItem>)}</SelectContent></Select><FormMessage /></FormItem>} />;
 }
 
+function CollegeAcademicReferenceField({ control, name, label, resource, enabled, filters }) {
+  return <FormField control={control} name={name} render={({ field }) => <FormItem><FormLabel>{label}</FormLabel><FormControl><AcademicResourceCombobox resource={resource} value={field.value || ""} onValueChange={field.onChange} enabled={enabled} filters={filters} placeholder={`Choose ${label.toLowerCase()}`} /></FormControl><FormMessage /></FormItem>} />;
+}
+
 const companyDefaults = { name: "", industry: "", website: "", contact_name: "", contact_email: "", contact_phone: "", notes: "" };
 const driveDefaults = { company_id: "", title: "", opportunity_type: "campus_drive", status: "active", deadline_at: "", drive_at: "", work_location: "", employment_type: "", package_min: "", package_max: "", minimum_cgpa: "", maximum_active_backlogs: "", minimum_attendance: "", minimum_solved: "" };
 const applicationDefaults = { opportunity_id: "", student_profile_id: "", notes: "" };
-const assessmentDefaults = { offering_id: "", title: "", assessment_type: "internal", max_marks: "100", weightage_bps: "0", due_on: "", status: "draft" };
-const connectorDefaults = { name: "", base_url: "", auth_mode: "bearer", auth_header: "", api_key: "", sync_interval_hours: "6" };
+const examCycleDefaults = { scheme_id: "", scheme_component_id: "", term_id: "", name: "", code: "", held_on: "", due_on: "" };
+function connectorDefaults(connector) {
+  const mapping = connector?.mapping?.resources || connector?.mapping || {};
+  const pagination = connector?.pagination || {};
+  return {
+    name: connector?.name || "", base_url: connector?.base_url || "",
+    auth_mode: connector?.auth_mode || "bearer", auth_header: connector?.auth_header || "",
+    api_key: "", has_existing_key: Boolean(connector?.api_key_configured),
+    sync_interval_hours: String(connector?.sync_interval_hours || 6),
+    resources: connector?.resource_types?.length ? connector.resource_types : ["students", "term_results", "attendance"],
+    mapping_json: connector ? JSON.stringify(mapping, null, 2) : "",
+    pagination_mode: pagination.mode || "none", cursor_param: pagination.cursor_param || "cursor",
+    updated_since_param: pagination.updated_since_param || "updated_since",
+    next_url_path: pagination.next_url_path || "", cursor_path: pagination.cursor_path || "",
+  };
+}
 function attendanceSessionDefaults() { return { offering_id: "", held_on: isoToday(), starts_at: "", ends_at: "", topic: "" }; }
 
 function OwnershipNotice() { return <Surface className="flex items-start gap-3 p-4"><span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary"><Database /></span><div><div className="text-sm font-semibold">Your College ERP remains authoritative</div><p className="mt-1 text-xs leading-5 text-muted-foreground">Edvatiq validates academic evidence, adds placement intelligence, and never deletes local records because they disappear from a source response.</p></div></Surface>; }
@@ -778,11 +1011,17 @@ function credentialExpiryValue(value) {
 }
 function pushScopeDescription(resource) {
   const descriptions = {
+    departments: "Department names and institution-defined codes",
+    programs: "Programs linked by department code",
+    terms: "Academic years and teaching periods",
+    cohorts: "Graduation batches and normalized sections",
+    courses: "Courses linked by department code",
     students: "Identity and cohort records",
     term_results: "Academic term outcomes",
     attendance: "Course or term attendance evidence",
     skills: "Verified student skills",
-    assessments: "Placement and academic assessments",
+    exam_cycles: "Configured exam cycles linked to an immutable pattern version",
+    assessment_marks: "Cycle-bound metrics using the College's frozen assessment pattern",
     internship_clearance: "Cleared, pending, or needs review only",
   };
   return descriptions[resource];
@@ -809,7 +1048,7 @@ function aiPrompt(section) {
     readiness: "Which students need placement support, based on current evidence?",
     coding: "Compare recent coding improvement without ignoring academic and profile evidence.",
     leaderboards: "Explain the current evidence leaderboards and any coverage limitations.",
-    batches: "Compare graduation batches by readiness, attendance, and placement outcomes.",
+    structure: "Explain our academic structure and identify any missing setup needed for student and placement workflows.",
     attendance: "Show students whose attendance may affect placement eligibility.",
     evidence: "Find missing or stale academic evidence that affects placement readiness.",
     assessments: "Summarize assessment performance and students who need intervention.",

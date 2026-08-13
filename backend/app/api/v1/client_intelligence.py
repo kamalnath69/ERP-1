@@ -15,7 +15,7 @@ from app.api.v1.business import serialize
 from app.core.config import ROOT_DIR, settings
 from app.core.database import get_db
 from app.schemas.validation import RequestModel
-from app.core.deps import require_permissions
+from app.core.deps import require_any_permission, require_permissions
 from app.models import (
     Allergy, Appointment, AuditLog, CatalogItem, ClientCommitment, ClientMemory, ClientSignal,
     CoachingNote, Client, ClientMedia, CollegeAssessment, CollegeAssessmentScore,
@@ -28,8 +28,10 @@ from app.models import (
     WorkoutPlan, WorkoutSession,
 )
 from app.services.audit import log_action
+from app.services.access_policy import ACCESS_LEVELS, policy_v2_enabled, require_policy_domain, resolve_policy_context
 from app.services.business_access import ensure_client_access, ensure_location, filter_clients, filter_locations, tenant_get
 from app.services.rbac import get_user_permissions, get_user_roles
+from app.services.college_access import resolve_college_access
 from app.services.gym import local_today, reconcile_memberships
 from app.services.cursor_pagination import decode_cursor, encode_cursor, page_size
 from app.services.upload_validation import safe_upload_name, validate_upload_signature
@@ -152,6 +154,91 @@ class ClientQuestion(RequestModel):
 def _client(db: Session, user: User, client_id: str) -> Client:
     row = tenant_get(db, Client, client_id, user)
     return ensure_client_access(db, user, row)
+
+
+def _is_college(db: Session, user: User) -> bool:
+    organization = db.get(Organization, user.organization_id) if user.organization_id else None
+    return bool(
+        organization
+        and getattr(organization.industry, "value", organization.industry) == "college"
+    )
+
+
+def _require_college_capability(
+    db: Session,
+    user: User,
+    permission: str,
+    message: str,
+    *,
+    permissions: set[str] | None = None,
+) -> None:
+    if _is_college(db, user) and permission not in (permissions or get_user_permissions(db, user)):
+        raise HTTPException(403, message)
+
+
+def _college_student_profile(db: Session, user: User, client_id: str) -> CollegeStudentProfile:
+    profile = db.execute(select(CollegeStudentProfile).where(
+        CollegeStudentProfile.organization_id == user.organization_id,
+        CollegeStudentProfile.client_id == client_id,
+    )).scalar_one_or_none()
+    if not profile:
+        raise HTTPException(404, "Student not found")
+    return profile
+
+
+def _college_domain_allows_profile(
+    db: Session,
+    user: User,
+    profile: CollegeStudentProfile,
+    domain: str,
+    minimum: str = "view",
+) -> bool:
+    if not _is_college(db, user):
+        return True
+    if policy_v2_enabled(db, user.organization_id):
+        context = resolve_policy_context(db, user)
+        if not context.active or ACCESS_LEVELS.index(context.level(domain)) < ACCESS_LEVELS.index(minimum):
+            return False
+    try:
+        return resolve_college_access(db, user, domain).allows_student(profile.id)
+    except HTTPException as exc:
+        if exc.status_code == 403:
+            return False
+        raise
+
+
+def _require_college_client_domain(
+    db: Session,
+    user: User,
+    client: Client,
+    domain: str,
+    minimum: str = "view",
+) -> None:
+    if not _is_college(db, user):
+        return
+    if policy_v2_enabled(db, user.organization_id):
+        require_policy_domain(db, user, domain, minimum)
+    profile = _college_student_profile(db, user, client.id)
+    resolve_college_access(db, user, domain).require_student(profile.id)
+
+
+def _serialize_workspace_client(db: Session, user: User, client: Client, permissions: set[str]) -> dict:
+    payload = serialize(client)
+    if not _is_college(db, user):
+        return payload
+    if "college.students.contact.view" not in permissions:
+        for key in (
+            "phone", "email", "address", "whatsapp_consent", "whatsapp_consent_at",
+            "whatsapp_consent_source", "email_consent",
+        ):
+            payload[key] = None
+    if "college.protected_fields.view" not in permissions:
+        payload["date_of_birth"] = None
+        payload["gender"] = None
+        payload["tags"] = []
+    if "college.notes.private.view" not in permissions:
+        payload["notes"] = None
+    return payload
 
 
 def _role_slugs(db: Session, user: User) -> set[str]:
@@ -290,10 +377,12 @@ def _photo_media(db: Session, client_id: str):
 
 def _common_data(db: Session, user: User, client: Client, start: datetime, *, include_sales: bool):
     appointments = db.execute(select(Appointment).where(Appointment.organization_id == user.organization_id, Appointment.client_id == client.id).order_by(Appointment.starts_at.desc()).limit(100)).scalars().all()
-    sales_statement = filter_locations(select(SaleInvoice).where(
+    sales_statement = select(SaleInvoice).where(
         SaleInvoice.organization_id == user.organization_id,
         SaleInvoice.client_id == client.id,
-    ), SaleInvoice, db, user)
+    )
+    if not _is_college(db, user):
+        sales_statement = filter_locations(sales_statement, SaleInvoice, db, user)
     sales = db.execute(sales_statement.order_by(SaleInvoice.created_at.desc()).limit(100)).scalars().all() if include_sales else []
     commitments = db.execute(select(ClientCommitment).where(ClientCommitment.organization_id == user.organization_id, ClientCommitment.client_id == client.id).order_by(ClientCommitment.created_at.desc()).limit(100)).scalars().all()
     return appointments, sales, commitments
@@ -326,17 +415,20 @@ def _sales_with_items(db: Session, organization_id: str, sales: list[SaleInvoice
 
 
 def _billing_workspace(db: Session, user: User, client: Client, permissions: set[str]) -> dict:
+    is_college = _is_college(db, user)
     capabilities = {
-        "view": "sales.view" in permissions,
-        "record_payment": "payments.record" in permissions,
-        "void_invoice": "sales.manage" in permissions,
+        "view": "sales.view" in permissions and (not is_college or "college.fees.view" in permissions),
+        "record_payment": "payments.record" in permissions and (not is_college or "college.fees.manage" in permissions),
+        "void_invoice": "sales.manage" in permissions and (not is_college or "college.fees.manage" in permissions),
     }
     if not capabilities["view"]:
         return {"summary": None, "open_invoices": [], "recent_invoices": [], "capabilities": capabilities}
-    scoped_statement = filter_locations(select(SaleInvoice).where(
+    scoped_statement = select(SaleInvoice).where(
         SaleInvoice.organization_id == user.organization_id,
         SaleInvoice.client_id == client.id,
-    ), SaleInvoice, db, user)
+    )
+    if not is_college:
+        scoped_statement = filter_locations(scoped_statement, SaleInvoice, db, user)
     scoped = scoped_statement.subquery()
     eligible = scoped.c.status.notin_(["void", "refunded"])
     invoice_count, invoiced, paid, outstanding = db.execute(select(
@@ -345,17 +437,21 @@ def _billing_workspace(db: Session, user: User, client: Client, permissions: set
         func.coalesce(func.sum(case((eligible, scoped.c.paid_paise), else_=0)), 0),
         func.coalesce(func.sum(case((eligible, func.greatest(scoped.c.total_paise - scoped.c.paid_paise, 0)), else_=0)), 0),
     ).select_from(scoped)).one()
-    open_statement = filter_locations(select(SaleInvoice).where(
+    open_statement = select(SaleInvoice).where(
         SaleInvoice.organization_id == user.organization_id,
         SaleInvoice.client_id == client.id,
         SaleInvoice.status.in_(["draft", "issued", "partially_paid"]),
         SaleInvoice.total_paise > SaleInvoice.paid_paise,
-    ), SaleInvoice, db, user)
+    )
+    if not is_college:
+        open_statement = filter_locations(open_statement, SaleInvoice, db, user)
     open_rows = db.execute(open_statement.order_by(SaleInvoice.created_at.desc()).limit(100)).scalars().all()
-    recent_statement = filter_locations(select(SaleInvoice).where(
+    recent_statement = select(SaleInvoice).where(
         SaleInvoice.organization_id == user.organization_id,
         SaleInvoice.client_id == client.id,
-    ), SaleInvoice, db, user)
+    )
+    if not is_college:
+        recent_statement = filter_locations(recent_statement, SaleInvoice, db, user)
     recent_rows = db.execute(recent_statement.order_by(SaleInvoice.created_at.desc()).limit(20)).scalars().all()
     return {
         "summary": {
@@ -501,13 +597,26 @@ def _college_workspace(db: Session, user: User, client: Client, start: datetime,
     if not profile:
         return {"academic_access": True, "profile": None, "attendance": [], "assessments": []}
 
+    student_access = resolve_college_access(db, user, "students")
+    student_access.require_student(profile.id)
+
+    def domain_allows(domain: str, permission: str) -> bool:
+        if permission not in permissions:
+            return False
+        try:
+            return resolve_college_access(db, user, domain).allows_student(profile.id)
+        except HTTPException as exc:
+            if exc.status_code == 403:
+                return False
+            raise
+
     program = db.get(CollegeProgram, profile.program_id)
     cohort = db.get(CollegeCohort, profile.cohort_id)
     department = db.get(CollegeDepartment, program.department_id) if program else None
     attendance = []
     attendance_total = 0
     attendance_present = 0
-    if {"college.attendance.view", "college.attendance.mark"} & permissions:
+    if domain_allows("attendance", "college.attendance.view"):
         attendance_rows = db.execute(select(
             CollegeAttendanceRecord,
             CollegeAttendanceSession,
@@ -540,7 +649,7 @@ def _college_workspace(db: Session, user: User, client: Client, start: datetime,
         } for record, session, _offering, course in attendance_rows]
 
     assessments = []
-    if {"college.assessments.view", "college.assessments.manage"} & permissions:
+    if domain_allows("assessments", "college.assessments.view"):
         score_rows = db.execute(select(
             CollegeAssessmentScore,
             CollegeAssessment,
@@ -568,6 +677,7 @@ def _college_workspace(db: Session, user: User, client: Client, start: datetime,
             "course_name": course.name,
         } for score, assessment, _offering, course in score_rows]
 
+    academic_access = resolve_college_access(db, user, "academics") if "college.academics.view" in permissions else None
     offerings = db.execute(select(
         CollegeCourseOffering,
         CollegeCourse,
@@ -580,10 +690,18 @@ def _college_workspace(db: Session, user: User, client: Client, start: datetime,
         CollegeCourseOffering.organization_id == user.organization_id,
         CollegeCourseOffering.cohort_id == profile.cohort_id,
         CollegeCourseOffering.status == "active",
+        CollegeCourseOffering.id.in_(academic_access.course_offering_ids)
+        if academic_access and not academic_access.unrestricted
+        else CollegeCourseOffering.id.is_not(None),
     ).order_by(CollegeCourse.code).limit(50)).all()
+    profile_payload = serialize(profile)
+    if "college.students.guardian.view" not in permissions:
+        profile_payload.pop("guardian", None)
+    if "college.protected_fields.view" not in permissions:
+        profile_payload.pop("category", None)
     return {
         "academic_access": True,
-        "profile": serialize(profile),
+        "profile": profile_payload,
         "program": serialize(program) if program else None,
         "cohort": serialize(cohort) if cohort else None,
         "department": serialize(department) if department else None,
@@ -605,24 +723,51 @@ def _college_workspace(db: Session, user: User, client: Client, start: datetime,
 
 
 @router.get("/clients/{client_id}/workspace")
-def client_workspace(client_id: str, range: str = "30d", user: User = Depends(require_permissions("clients.view")), db: Session = Depends(get_db)):
+def client_workspace(client_id: str, range: str = "30d", user: User = Depends(require_any_permission("clients.view", "college.students.view")), db: Session = Depends(get_db)):
     client = _client(db, user, client_id)
     org = db.get(Organization, user.organization_id); industry = org.industry.value
     days = {"7d": 7, "30d": 30, "90d": 90, "365d": 365}.get(range, 30)
     start = datetime.now(timezone.utc) - timedelta(days=days)
     permissions = get_user_permissions(db, user); roles = _role_slugs(db, user)
+    if industry == "college":
+        profile = db.execute(select(CollegeStudentProfile).where(
+            CollegeStudentProfile.organization_id == user.organization_id,
+            CollegeStudentProfile.client_id == client.id,
+        )).scalar_one_or_none()
+        if not profile:
+            raise HTTPException(404, "Student not found")
+        resolve_college_access(db, user, "students").require_student(profile.id)
+        permissions = set(permissions)
+        if not _college_domain_allows_profile(db, user, profile, "readiness"):
+            permissions.discard("college.notes.private.view")
+        if not _college_domain_allows_profile(db, user, profile, "documents"):
+            permissions.discard("college.documents.sensitive.view")
+        if not _college_domain_allows_profile(db, user, profile, "clearance"):
+            permissions.discard("college.fees.view")
+            permissions.discard("college.fees.manage")
     if industry == "gym":
         reconcile_memberships(db, user, client_id=client.id, lock=True)
     appointments, sales, commitments = _common_data(
-        db, user, client, start, include_sales="sales.view" in permissions,
+        db, user, client, start,
+        include_sales="sales.view" in permissions and (industry != "college" or "college.fees.view" in permissions),
     )
-    memories = _visible_memories(db, user, client.id, permissions, roles)
-    _refresh_signals(db, user, client, industry)
-    signals = db.execute(select(ClientSignal).where(ClientSignal.client_id == client.id, ClientSignal.status.in_(["open", "snoozed"])).order_by(ClientSignal.pulse_state, ClientSignal.generated_at.desc())).scalars().all() if "client_signals.view" in permissions else []
+    if industry == "college":
+        appointments = []
+        if "college.notes.private.view" not in permissions:
+            commitments = []
+    memories = _visible_memories(db, user, client.id, permissions, roles) if industry != "college" or "college.notes.private.view" in permissions else []
+    if industry != "college":
+        _refresh_signals(db, user, client, industry)
+        signals = db.execute(select(ClientSignal).where(ClientSignal.client_id == client.id, ClientSignal.status.in_(["open", "snoozed"])).order_by(ClientSignal.pulse_state, ClientSignal.generated_at.desc())).scalars().all() if "client_signals.view" in permissions else []
+    else:
+        signals = []
     state = "action_needed" if any(row.pulse_state == "action_needed" for row in signals) else "watch" if any(row.pulse_state == "watch" for row in signals) else "healthy"
-    photo = _photo_media(db, client.id) if "clients.media.view" in permissions else None
+    photo = _photo_media(db, client.id) if (
+        "clients.media.view" in permissions
+        and (industry != "college" or "college.protected_fields.view" in permissions)
+    ) else None
     location = db.get(Location, client.home_location_id) if client.home_location_id else None
-    billing = _billing_workspace(db, user, client, permissions)
+    billing = _billing_workspace(db, user, client, permissions) if industry != "college" or "college.fees.view" in permissions else {"summary": {}, "open_invoices": [], "recent_invoices": []}
     billing_summary = billing.get("summary") or {}
     lifetime = int(billing_summary.get("paid_paise") or 0)
     outstanding = int(billing_summary.get("outstanding_paise") or 0)
@@ -653,15 +798,22 @@ def client_workspace(client_id: str, range: str = "30d", user: User = Depends(re
         "manage_workouts": "gym.workouts.manage" in permissions, "manage_diets": "gym.diets.manage" in permissions,
         "manage_salon_notes": "salon.notes.manage" in permissions, "clinical_write": "clinical.write" in permissions,
         "view_academics": "college.students.view" in permissions or "college.students.manage" in permissions,
-        "view_billing": "sales.view" in permissions, "record_payment": "payments.record" in permissions,
-        "void_invoice": "sales.manage" in permissions,
+        "view_billing": "sales.view" in permissions and (industry != "college" or "college.fees.view" in permissions),
+        "record_payment": "payments.record" in permissions and (industry != "college" or "college.fees.manage" in permissions),
+        "void_invoice": "sales.manage" in permissions and (industry != "college" or "college.fees.manage" in permissions),
     }
+    if industry == "college":
+        actions["manage_memory"] = actions["manage_memory"] and "college.notes.private.view" in permissions
+        actions["manage_signals"] = False
+        actions["view_media"] = actions["view_media"] and "college.documents.sensitive.view" in permissions
+        actions["manage_media"] = actions["manage_media"] and "college.documents.sensitive.view" in permissions
     # API requests persist immediately; AI tools run this workspace inside a
     # savepoint and commit it atomically with the completed AI response.
     if db.in_nested_transaction(): db.flush()
     else: db.commit()
     return {
-        "client": serialize(client), "industry": industry, "location": serialize(location) if location else None,
+        "client": _serialize_workspace_client(db, user, client, permissions),
+        "industry": industry, "location": serialize(location) if location else None,
         "profile_photo_url": f"/clients/{client.id}/photo?v={int(photo.updated_at.timestamp())}" if photo else None,
         "pulse": {"state": state, "open_signals": len(signals)}, "brief": brief, "signals": [serialize(row) for row in signals],
         "metrics": metrics, "briefing_role": briefing_role,
@@ -676,6 +828,8 @@ def client_workspace(client_id: str, range: str = "30d", user: User = Depends(re
 @router.get("/clients/attention")
 def attention_queue(user: User = Depends(require_permissions("client_signals.view")), db: Session = Depends(get_db)):
     org = db.get(Organization, user.organization_id)
+    if org and getattr(org.industry, "value", org.industry) == "college":
+        raise HTTPException(403, "Use College readiness and support for student attention queues")
     clients = db.execute(filter_clients(select(Client).where(Client.organization_id == user.organization_id, Client.status == "active"), db, user).limit(250)).scalars().all()
     for client in clients:
         _refresh_signals(db, user, client, org.industry.value)
@@ -692,11 +846,13 @@ def client_timeline(
     limit: int = Query(default=50, ge=1, le=100),
     cursor: str | None = None,
     event_type: str | None = Query(default=None, max_length=40),
-    user: User = Depends(require_permissions("clients.view")),
+    user: User = Depends(require_any_permission("clients.view", "college.students.view")),
     db: Session = Depends(get_db),
 ):
     client = _client(db, user, client_id)
     permissions = get_user_permissions(db, user)
+    organization = db.get(Organization, user.organization_id)
+    is_college = bool(organization and organization.industry.value == "college")
     query_limit = page_size(limit, default=50)
     cursor_filters = {"client_id": client.id, "event_type": event_type}
     cursor_values = decode_cursor(
@@ -715,7 +871,7 @@ def client_timeline(
     )
     if cursor_at:
         appointment_statement = appointment_statement.where(Appointment.starts_at <= cursor_at)
-    appointments = db.execute(appointment_statement.order_by(
+    appointments = [] if is_college else db.execute(appointment_statement.order_by(
         Appointment.starts_at.desc(), Appointment.id.desc(),
     ).limit(source_limit)).scalars().all()
     service_ids = {row.service_id for row in appointments if row.service_id}
@@ -736,11 +892,21 @@ def client_timeline(
 
     invoices = []
     payments = []
-    if "sales.view" in permissions:
-        invoice_statement = filter_locations(select(SaleInvoice).where(
+    if is_college:
+        profile = _college_student_profile(db, user, client.id)
+        can_view_clearance = _college_domain_allows_profile(db, user, profile, "clearance")
+    else:
+        can_view_clearance = True
+    can_view_sales = "sales.view" in permissions and (
+        not is_college or ("college.fees.view" in permissions and can_view_clearance)
+    )
+    if can_view_sales:
+        invoice_statement = select(SaleInvoice).where(
             SaleInvoice.organization_id == user.organization_id,
             SaleInvoice.client_id == client.id,
-        ), SaleInvoice, db, user)
+        )
+        if not is_college:
+            invoice_statement = filter_locations(invoice_statement, SaleInvoice, db, user)
         if cursor_at:
             invoice_statement = invoice_statement.where(SaleInvoice.created_at <= cursor_at)
         invoices = db.execute(invoice_statement.order_by(
@@ -754,7 +920,8 @@ def client_timeline(
             SaleInvoice.organization_id == user.organization_id,
             SaleInvoice.client_id == client.id,
         )
-        payment_statement = filter_locations(payment_statement, SaleInvoice, db, user)
+        if not is_college:
+            payment_statement = filter_locations(payment_statement, SaleInvoice, db, user)
         if cursor_at:
             payment_statement = payment_statement.where(SalePayment.created_at <= cursor_at)
         payment_rows = db.execute(payment_statement.order_by(
@@ -817,7 +984,7 @@ def client_timeline(
     )
     if cursor_at:
         audit_statement = audit_statement.where(AuditLog.created_at <= cursor_at)
-    audits = db.execute(audit_statement.order_by(
+    audits = [] if is_college and not can_view_sales else db.execute(audit_statement.order_by(
         AuditLog.created_at.desc(), AuditLog.id.desc(),
     ).limit(source_limit * 2)).scalars().all()
     actor_ids = {row.received_by_user_id for row in payments} | {row.recorded_by_user_id for row in checkins if row.recorded_by_user_id} | {row.user_id for row in audits if row.user_id}
@@ -900,7 +1067,9 @@ def client_timeline(
 
 @router.post("/clients/{client_id}/memory", status_code=201)
 def add_memory(client_id: str, body: MemoryBody, user: User = Depends(require_permissions("client_memory.manage")), db: Session = Depends(get_db)):
+    _require_college_capability(db, user, "college.notes.private.view", "Private student note access is required")
     client = _client(db, user, client_id)
+    _require_college_client_domain(db, user, client, "readiness", "work")
     if body.visibility not in MEMORY_VISIBILITY: raise HTTPException(422, "Invalid memory visibility")
     if body.visibility == "clinical" and "clinical.write" not in get_user_permissions(db, user): raise HTTPException(403, "Clinical permission is required")
     row = ClientMemory(organization_id=user.organization_id, client_id=client.id, created_by_user_id=user.id, **body.model_dump())
@@ -909,7 +1078,10 @@ def add_memory(client_id: str, body: MemoryBody, user: User = Depends(require_pe
 
 @router.patch("/clients/{client_id}/memory/{memory_id}")
 def update_memory(client_id: str, memory_id: str, body: MemoryUpdate, user: User = Depends(require_permissions("client_memory.manage")), db: Session = Depends(get_db)):
-    _client(db, user, client_id); row = tenant_get(db, ClientMemory, memory_id, user)
+    _require_college_capability(db, user, "college.notes.private.view", "Private student note access is required")
+    client = _client(db, user, client_id)
+    _require_college_client_domain(db, user, client, "readiness", "work")
+    row = tenant_get(db, ClientMemory, memory_id, user)
     if row.client_id != client_id: raise HTTPException(404, "Memory not found")
     if row.version != body.version: raise HTTPException(409, "Memory was changed by another user")
     if body.visibility not in MEMORY_VISIBILITY: raise HTTPException(422, "Invalid memory visibility")
@@ -919,14 +1091,19 @@ def update_memory(client_id: str, memory_id: str, body: MemoryUpdate, user: User
 
 @router.delete("/clients/{client_id}/memory/{memory_id}")
 def delete_memory(client_id: str, memory_id: str, user: User = Depends(require_permissions("client_memory.manage")), db: Session = Depends(get_db)):
-    _client(db, user, client_id); row = tenant_get(db, ClientMemory, memory_id, user)
+    _require_college_capability(db, user, "college.notes.private.view", "Private student note access is required")
+    client = _client(db, user, client_id)
+    _require_college_client_domain(db, user, client, "readiness", "work")
+    row = tenant_get(db, ClientMemory, memory_id, user)
     if row.client_id != client_id: raise HTTPException(404, "Memory not found")
     row.is_active = False; row.updated_by_user_id = user.id; row.version += 1; log_action(db, organization_id=user.organization_id, user_id=user.id, action="client_memory.delete", resource_type="client_memory", resource_id=row.id); db.commit(); return {"ok": True}
 
 
 @router.post("/clients/{client_id}/commitments", status_code=201)
 def add_commitment(client_id: str, body: CommitmentBody, user: User = Depends(require_permissions("client_memory.manage")), db: Session = Depends(get_db)):
+    _require_college_capability(db, user, "college.notes.private.view", "Private student note access is required")
     client = _client(db, user, client_id)
+    _require_college_client_domain(db, user, client, "readiness", "work")
     if body.owner_user_id:
         owner = db.get(User, body.owner_user_id)
         if not owner or owner.organization_id != user.organization_id: raise HTTPException(422, "Commitment owner is invalid")
@@ -936,13 +1113,18 @@ def add_commitment(client_id: str, body: CommitmentBody, user: User = Depends(re
 
 @router.patch("/clients/{client_id}/commitments/{commitment_id}")
 def update_commitment(client_id: str, commitment_id: str, body: CommitmentUpdate, user: User = Depends(require_permissions("client_memory.manage")), db: Session = Depends(get_db)):
-    _client(db, user, client_id); row = tenant_get(db, ClientCommitment, commitment_id, user)
+    _require_college_capability(db, user, "college.notes.private.view", "Private student note access is required")
+    client = _client(db, user, client_id)
+    _require_college_client_domain(db, user, client, "readiness", "work")
+    row = tenant_get(db, ClientCommitment, commitment_id, user)
     if row.client_id != client_id or row.version != body.version: raise HTTPException(409, "Commitment is stale or unavailable")
     row.status = body.status; row.completion_note = body.completion_note; row.completed_at = datetime.now(timezone.utc) if body.status == "completed" else None; row.version += 1; db.commit(); return serialize(row)
 
 
 @router.patch("/client-signals/{signal_id}")
 def update_signal(signal_id: str, body: SignalUpdate, user: User = Depends(require_permissions("client_signals.manage")), db: Session = Depends(get_db)):
+    if _is_college(db, user):
+        raise HTTPException(403, "Use College readiness interventions for student support")
     row = tenant_get(db, ClientSignal, signal_id, user); _client(db, user, row.client_id)
     if row.version != body.version: raise HTTPException(409, "Signal was changed by another user")
     now = datetime.now(timezone.utc)
@@ -963,10 +1145,19 @@ def _media_response(row: ClientMedia, document: Document):
 
 @router.get("/clients/{client_id}/media")
 def client_media(client_id: str, user: User = Depends(require_permissions("clients.media.view")), db: Session = Depends(get_db)):
-    _client(db, user, client_id)
+    client = _client(db, user, client_id)
+    _require_college_client_domain(db, user, client, "documents", "view")
     rows = db.execute(select(ClientMedia, Document).join(Document, Document.id == ClientMedia.document_id).where(ClientMedia.organization_id == user.organization_id, ClientMedia.client_id == client_id).order_by(ClientMedia.created_at.desc())).all()
     permissions = get_user_permissions(db, user)
-    return [_media_response(media, document) for media, document in rows if media.visibility != "clinical" or "clinical.view" in permissions]
+    is_college = _is_college(db, user)
+    can_view_sensitive = not is_college or "college.documents.sensitive.view" in permissions
+    can_view_profile = not is_college or "college.protected_fields.view" in permissions
+    return [
+        _media_response(media, document)
+        for media, document in rows
+        if (can_view_sensitive or (media.is_profile and can_view_profile))
+        and (media.visibility != "clinical" or "clinical.view" in permissions)
+    ]
 
 
 @router.post("/clients/{client_id}/media", status_code=201)
@@ -976,6 +1167,7 @@ async def upload_client_media(
     user: User = Depends(require_permissions("clients.media.manage")), db: Session = Depends(get_db),
 ):
     client = _client(db, user, client_id)
+    _require_college_client_domain(db, user, client, "documents", "work")
     content_type = (file.content_type or "").lower()
     if content_type not in MEDIA_TYPES: raise HTTPException(415, "Supported formats are JPG, PNG, WebP, MP4, WebM, PDF, DOCX, and TXT")
     if not media_kind or len(media_kind) > 40 or not media_kind.replace("_", "").isalnum(): raise HTTPException(422, "Invalid media kind")
@@ -984,6 +1176,16 @@ async def upload_client_media(
         if caption and len(caption) > 500: raise HTTPException(422, "Caption must be 500 characters or fewer")
     if visibility not in MEMORY_VISIBILITY: raise HTTPException(422, "Invalid media visibility")
     permissions = get_user_permissions(db, user)
+    if media_kind == "profile_photo":
+        _require_college_capability(
+            db, user, "college.protected_fields.view",
+            "Protected student profile access is required", permissions=permissions,
+        )
+    else:
+        _require_college_capability(
+            db, user, "college.documents.sensitive.view",
+            "Sensitive student document access is required", permissions=permissions,
+        )
     if visibility == "clinical" and "clinical.write" not in permissions: raise HTTPException(403, "Clinical permission is required")
     if media_kind == "profile_photo" and content_type not in IMAGE_TYPES: raise HTTPException(415, "A profile photo must be JPG, PNG, or WebP")
     maximum = 5 * 1024 * 1024 if media_kind == "profile_photo" else 100 * 1024 * 1024 if content_type in VIDEO_TYPES else 20 * 1024 * 1024
@@ -1032,21 +1234,36 @@ def _serve_document(document: Document):
 
 @router.get("/clients/{client_id}/photo")
 def client_photo(client_id: str, user: User = Depends(require_permissions("clients.view", "clients.media.view")), db: Session = Depends(get_db)):
-    _client(db, user, client_id); media = _photo_media(db, client_id)
+    client = _client(db, user, client_id)
+    _require_college_client_domain(db, user, client, "documents", "view")
+    _require_college_capability(db, user, "college.protected_fields.view", "Protected student profile access is required")
+    media = _photo_media(db, client_id)
     if not media: raise HTTPException(404, "Client has no profile photo")
     return _serve_document(db.get(Document, media.document_id))
 
 
 @router.get("/client-media/{media_id}/content")
 def media_content(media_id: str, user: User = Depends(require_permissions("clients.media.view")), db: Session = Depends(get_db)):
-    media = tenant_get(db, ClientMedia, media_id, user); _client(db, user, media.client_id)
+    media = tenant_get(db, ClientMedia, media_id, user)
+    client = _client(db, user, media.client_id)
+    _require_college_client_domain(db, user, client, "documents", "view")
+    if media.is_profile:
+        _require_college_capability(db, user, "college.protected_fields.view", "Protected student profile access is required")
+    else:
+        _require_college_capability(db, user, "college.documents.sensitive.view", "Sensitive student document access is required")
     if media.visibility == "clinical" and "clinical.view" not in get_user_permissions(db, user): raise HTTPException(403, "Clinical permission is required")
     return _serve_document(db.get(Document, media.document_id))
 
 
 @router.delete("/client-media/{media_id}")
 def delete_media(media_id: str, user: User = Depends(require_permissions("clients.media.manage")), db: Session = Depends(get_db)):
-    media = tenant_get(db, ClientMedia, media_id, user); _client(db, user, media.client_id)
+    media = tenant_get(db, ClientMedia, media_id, user)
+    client = _client(db, user, media.client_id)
+    _require_college_client_domain(db, user, client, "documents", "work")
+    if media.is_profile:
+        _require_college_capability(db, user, "college.protected_fields.view", "Protected student profile access is required")
+    else:
+        _require_college_capability(db, user, "college.documents.sensitive.view", "Sensitive student document access is required")
     if media.visibility == "clinical" and "clinical.write" not in get_user_permissions(db, user): raise HTTPException(403, "Clinical permission is required")
     document = db.get(Document, media.document_id)
     log_action(db, organization_id=user.organization_id, user_id=user.id, action="client_media.delete", resource_type="client_media", resource_id=media.id)

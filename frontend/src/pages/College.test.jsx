@@ -23,10 +23,57 @@ vi.mock("@/features/college/collegeApi", () => {
   };
   const stagesResult = { data: { items: [{ id: "stage-1", name: "Applied", slug: "applied", is_enabled: true }] } };
   const referencesResult = { data: { offerings: [], programs: [], cohorts: [], courses: [] } };
+  const departmentsResult = { ...emptyResult, data: { items: [{ id: "dept-aiml", name: "Artificial Intelligence and Machine Learning", code: "AIML", is_active: true, version: 1 }], next_cursor: null, has_more: false } };
+  const programsResult = { ...emptyResult, data: { items: [{ id: "program-aiml", department_id: "dept-aiml", department_name: "Artificial Intelligence and Machine Learning", department_code: "AIML", name: "B.Tech Artificial Intelligence", code: "BTECH-AIML", duration_semesters: 8, is_active: true, version: 1 }], next_cursor: null, has_more: false } };
+  const cohortsResult = { ...emptyResult, data: { items: [{ id: "aiml-a", program_id: "program-aiml", department_id: "dept-aiml", department_code: "AIML", program_code: "BTECH-AIML", name: "AI 2027 / A", code: "AIML-2027-A", admission_year: 2023, graduation_year: 2027, section: "A", current_semester: 7, is_active: true, version: 1 }], next_cursor: null, has_more: false } };
+  const hierarchyResult = {
+    data: {
+      items: [{
+        graduation_year: 2027,
+        label: "Class of 2027",
+        student_count: 40,
+        placed_count: 18,
+        unplaced_count: 22,
+        department_count: 1,
+        section_count: 2,
+        departments: [{
+          id: "dept-cse",
+          name: "Computer Science and Engineering",
+          code: "CSE",
+          student_count: 40,
+          placed_count: 18,
+          unplaced_count: 22,
+          section_count: 2,
+          programs: [{
+            id: "program-cse",
+            name: "B.E. Computer Science",
+            code: "BE-CSE",
+            student_count: 40,
+            placed_count: 18,
+            unplaced_count: 22,
+            section_count: 2,
+            sections: [
+              { id: "cse-a", name: "CSE A", section: "A", current_semester: 7, student_count: 20, placed_count: 10, unplaced_count: 10 },
+              { id: "cse-b", name: "CSE B", section: "B", current_semester: 7, student_count: 20, placed_count: 8, unplaced_count: 12 },
+            ],
+          }],
+        }],
+      }],
+    },
+    isLoading: false,
+    isError: false,
+    refetch: vi.fn(),
+  };
   const leaderboardsResult = { data: { readiness: [], coding: [], academics: [], improvement: [] }, isLoading: false };
   const policyResult = { data: { name: "Placement readiness", weights: { academics: 25 }, minimum_coverage_percent: 60 }, isError: false, refetch: vi.fn() };
   return {
     useGetCollegeApplicationsQuery: () => applicationsResult,
+    useGetCollegeAcademicHierarchyQuery: () => hierarchyResult,
+    useGetCollegeDepartmentsPageQuery: () => departmentsResult,
+    useGetCollegeProgramsPageQuery: () => programsResult,
+    useGetCollegeTermsPageQuery: emptyPage,
+    useGetCollegeCoursesPageQuery: emptyPage,
+    useGetCollegeOfferingsPageQuery: emptyPage,
     useGetCollegePipelineStagesQuery: () => stagesResult,
     useGetCollegeInternshipClearancePageQuery: () => clearanceResult,
     useGetCollegeReferencesQuery: () => referencesResult,
@@ -35,7 +82,7 @@ vi.mock("@/features/college/collegeApi", () => {
     useGetCollegeAssessmentsPageQuery: emptyPage,
     useGetCollegeAttendanceRegisterQuery: emptyPage,
     useGetCollegeAttendanceSessionsPageQuery: emptyPage,
-    useGetCollegeCohortsPageQuery: emptyPage,
+    useGetCollegeCohortsPageQuery: () => cohortsResult,
     useGetCollegeCompaniesQuery: emptyPage,
     useGetCollegeImportsQuery: emptyPage,
     useGetCollegeIntegrationsQuery: emptyPage,
@@ -47,14 +94,23 @@ vi.mock("@/features/college/collegeApi", () => {
     useCreateCollegeApplicationMutation: mutation,
     useCreateCollegeAssessmentMutation: mutation,
     useCreateCollegeAttendanceMutation: mutation,
+    useCreateCollegeCohortMutation: mutation,
+    useCreateCollegeCohortsBulkMutation: mutation,
     useCreateCollegeCompanyMutation: mutation,
+    useCreateCollegeCourseMutation: mutation,
+    useCreateCollegeDepartmentMutation: mutation,
     useCreateCollegeIntegrationMutation: mutation,
+    useCreateCollegeOfferingMutation: mutation,
     useCreateCollegeOpportunityMutation: mutation,
+    useCreateCollegeProgramMutation: mutation,
+    useCreateCollegeTermMutation: mutation,
     useMoveCollegeApplicationStageMutation: mutation,
     usePreviewCollegeCsvImportMutation: mutation,
     useQueueCollegeIntegrationSyncMutation: mutation,
     useSaveCollegeAttendanceMutation: mutation,
     useSaveCollegeScoresMutation: mutation,
+    useSetCollegeAcademicRecordArchivedMutation: mutation,
+    useUpdateCollegeAcademicRecordMutation: mutation,
   };
 });
 
@@ -98,5 +154,16 @@ test("keeps fee evidence as a compact internship-clearance administration view",
   expect(view.container.textContent).toContain("Asha Raman");
   expect(view.container.textContent).toContain("Action needed");
   expect(view.container.textContent).not.toContain("Outstanding amount");
+  view.cleanup();
+});
+
+
+test("opens legacy batch links in the managed academic structure console", async () => {
+  const view = await renderAt("/app/college?section=batches");
+  expect(view.container.textContent).toContain("Academic structure");
+  expect(view.container.textContent).toContain("Start with placement essentials");
+  expect(view.container.textContent).toContain("Departments");
+  expect(view.container.textContent).toContain("Batches & sections");
+  expect(view.container.textContent).toContain("ERP-safe ownership");
   view.cleanup();
 });

@@ -144,6 +144,13 @@ def interpret_business_query(
         return IntentMatch(outcome="fallback", confidence=1, reason="ai_required")
 
     org = db.get(Organization, user.organization_id)
+    industry = getattr(org.industry, "value", org.industry) if org else None
+    if industry == "college":
+        return IntentMatch(
+            outcome="fallback",
+            confidence=1,
+            reason="college_structure_requires_college_router",
+        )
     date_range, comparison = parse_date_ranges(text, org.timezone if org else "Asia/Kolkata")
     previous = _previous_query(context_state)
     if previous and _is_follow_up(text) and _follow_up_matches_scope(previous, text):

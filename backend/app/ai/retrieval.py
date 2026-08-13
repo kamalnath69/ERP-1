@@ -6,8 +6,10 @@ from sqlalchemy import false, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.ai.provider import provider
-from app.models import Document, DocumentChunk, User
+from app.models import CollegeStudentProfile, Document, DocumentChunk, Organization, User
+from app.services.access_policy import resolve_policy_context
 from app.services.business_access import allowed_client_ids, allowed_location_ids
+from app.services.college_access import resolve_college_access
 from app.services.rbac import user_has_permissions
 
 
@@ -16,6 +18,8 @@ logger = logging.getLogger("edvatiq.ai.retrieval")
 
 def document_access_conditions(db: Session, user: User):
     conditions = [Document.organization_id == user.organization_id]
+    organization = db.get(Organization, user.organization_id)
+    is_college = organization and organization.industry.value == "college"
     locations = allowed_location_ids(db, user)
     if locations is not None:
         conditions.append(or_(Document.location_id.is_(None), Document.location_id.in_(locations)))
@@ -31,11 +35,53 @@ def document_access_conditions(db: Session, user: User):
         visibility.append(Document.visibility == "clinical")
     conditions.append(or_(*visibility))
 
-    clients = allowed_client_ids(db, user)
-    if clients is not None:
-        client_docs = Document.entity_type.in_(["client", "patient"])
-        conditions.append(or_(~client_docs, Document.entity_id.in_(clients) if clients else false()))
+    if is_college:
+        context = resolve_policy_context(db, user)
+        access = resolve_college_access(db, user, "documents")
+        student_docs = Document.entity_type.in_(["client", "patient", "student", "college_student"])
+        offering_docs = Document.entity_type == "course_offering"
+        if not context.has_sensitive("college.documents.sensitive.view"):
+            conditions.append(~student_docs)
+        elif not access.unrestricted:
+            client_ids = set(db.execute(select(CollegeStudentProfile.client_id).where(
+                CollegeStudentProfile.organization_id == user.organization_id,
+                CollegeStudentProfile.id.in_(access.student_ids),
+            )).scalars()) if access.student_ids else set()
+            authorized_ids = client_ids | set(access.student_ids)
+            conditions.append(or_(~student_docs, Document.entity_id.in_(authorized_ids) if authorized_ids else false()))
+        if not access.unrestricted:
+            conditions.append(or_(
+                ~offering_docs,
+                Document.entity_id.in_(access.course_offering_ids) if access.course_offering_ids else false(),
+            ))
+    else:
+        clients = allowed_client_ids(db, user)
+        if clients is not None:
+            client_docs = Document.entity_type.in_(["client", "patient"])
+            conditions.append(or_(~client_docs, Document.entity_id.in_(clients) if clients else false()))
     return conditions
+
+
+def ensure_college_document_entity_access(db: Session, user: User, entity_type: str | None, entity_id: str | None) -> None:
+    organization = db.get(Organization, user.organization_id)
+    if not organization or organization.industry.value != "college":
+        return
+    context = resolve_policy_context(db, user)
+    access = resolve_college_access(db, user, "documents")
+    if entity_type in {"client", "patient", "student", "college_student"}:
+        if not context.has_sensitive("college.documents.sensitive.view"):
+            from fastapi import HTTPException
+            raise HTTPException(403, "Sensitive student document access is required")
+        student = db.execute(select(CollegeStudentProfile).where(
+            CollegeStudentProfile.organization_id == user.organization_id,
+            or_(CollegeStudentProfile.id == entity_id, CollegeStudentProfile.client_id == entity_id),
+        )).scalar_one_or_none()
+        if not student or not access.allows_student(student.id):
+            from fastapi import HTTPException
+            raise HTTPException(404, "Student not found")
+    if entity_type == "course_offering" and not access.allows_course_offering(str(entity_id)):
+        from fastapi import HTTPException
+        raise HTTPException(404, "Course offering not found")
 
 
 def retrieve(db: Session, user: User, query: str, limit: int = 8, document_id: str | None = None) -> dict:

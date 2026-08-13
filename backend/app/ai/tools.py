@@ -1,6 +1,7 @@
 """Typed and access-scoped business, knowledge, and action tools."""
 import logging
 import re
+from difflib import SequenceMatcher
 from uuid import UUID
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Callable
@@ -14,17 +15,17 @@ from app.ai.record_serializers import sale_invoice_context, serialize_sale_invoi
 from app.ai.retrieval import retrieve
 from app.models import (
     AIResultSession, Appointment, CatalogItem, Category, Client, Employee, EmployeeLocation,
-    ClientMedia, CollegeCohort, CollegePlacementOpportunity,
-    CollegeProgram, CollegeStudentProfile, GymCheckIn,
+    ClientMedia, CollegeCohort, CollegeCourse, CollegeCourseOffering, CollegeDepartment,
+    CollegePlacementOpportunity, CollegeProgram, CollegeStudentProfile, CollegeTerm, GymCheckIn,
     Membership, MembershipPlan, Organization, PatientProfile, SaleInvoice, SaleLine,
     SalePayment, StockLevel, User,
 )
 from app.services.business_access import (
     allowed_client_ids, allowed_location_ids, ensure_location, filter_clients,
 )
-from app.services.rbac import user_has_permissions
+from app.services.rbac import get_user_permissions, user_has_permissions
 from app.services.entity_resolution import ENTITY_KINDS, resolve_entities, validate_entity_ref
-from app.services.college_access import resolve_college_access, validate_college_filters
+from app.services.college_access import CollegeAccess, resolve_college_access, validate_college_filters
 from app.services.college_placement import (
     active_readiness_policy, eligibility_context, evaluate_eligibility, fee_clearance_by_student,
     latest_readiness, placement_dashboard, placement_leaderboards,
@@ -47,7 +48,8 @@ TOOL_SCHEMAS = [
     {"type": "function", "name": "client_workspace", "description": "Get the authorized role-aware brief, pulse, metrics, and current industry workspace for one client. Accepts either the internal client ID or the visible client number.", "parameters": {"type": "object", "properties": {"client_id": {"type": "string"}}, "required": ["client_id"], "additionalProperties": False}},
     {"type": "function", "name": "resolve_records", "description": "Resolve names, phone numbers, emails, visible business numbers, SKUs, invoice numbers, or other readable references to authorized live records. Use this before asking the user for an ID. Never choose an ambiguous result.", "parameters": {"type": "object", "properties": {"reference": {"type": "string", "minLength": 2, "maxLength": 300}, "kinds": {"type": ["array", "null"], "items": {"type": "string", "enum": list(ENTITY_KINDS)}, "maxItems": 8}}, "required": ["reference"], "additionalProperties": False}},
     {"type": "function", "name": "entity_workspace", "description": "Load a fresh permission-aware workspace or safe snapshot for one previously resolved record.", "parameters": {"type": "object", "properties": {"kind": {"type": "string", "enum": list(ENTITY_KINDS)}, "id": {"type": "string"}}, "required": ["kind", "id"], "additionalProperties": False}},
-    {"type": "function", "name": "college_students", "description": "Search authorized College students and review exact readiness, CGPA, attendance, coding, resume, and placement status. Missing evidence is reported, never treated as zero.", "parameters": {"type": "object", "properties": {"query": {"type": ["string", "null"], "maxLength": 120}, "department_id": {"type": ["string", "null"]}, "program_id": {"type": ["string", "null"]}, "cohort_id": {"type": ["string", "null"]}, "readiness_band": {"type": ["string", "null"], "enum": ["ready", "developing", "needs_support", "insufficient_evidence", None]}, "limit": {"type": "integer", "minimum": 1, "maximum": 50}}, "additionalProperties": False}},
+    {"type": "function", "name": "college_students", "description": "Search authorized College students using the institution's live academic structure. Use placement_status=unplaced for 'not placed' and sort=academics_desc for strongest academics. Missing evidence is reported, never treated as zero.", "parameters": {"type": "object", "properties": {"query": {"type": ["string", "null"], "maxLength": 120, "description": "A literal student name, admission number, or roll number only."}, "department": {"type": ["string", "null"], "maxLength": 120, "description": "A department name or code configured by this college."}, "program": {"type": ["string", "null"], "maxLength": 160, "description": "A program name or code configured by this college."}, "section": {"type": ["string", "null"], "maxLength": 40, "description": "An institution-defined section label."}, "graduation_years": {"type": ["array", "null"], "items": {"type": "integer", "minimum": 2000, "maximum": 2200}, "maxItems": 8, "description": "Graduation batches, for example [2026, 2027]."}, "department_id": {"type": ["string", "null"]}, "program_id": {"type": ["string", "null"]}, "cohort_id": {"type": ["string", "null"]}, "cohort_ids": {"type": ["array", "null"], "items": {"type": "string"}, "maxItems": 50, "description": "Explicit cohort identifiers selected from the live hierarchy."}, "readiness_band": {"type": ["string", "null"], "enum": ["ready", "developing", "needs_support", "insufficient_evidence", None]}, "placement_status": {"type": ["string", "null"], "enum": ["all", "placed", "unplaced", "seeking", "not_participating", None]}, "sort": {"type": ["string", "null"], "enum": ["name", "academics_desc", None]}, "limit": {"type": "integer", "minimum": 1, "maximum": 50}}, "additionalProperties": False}},
+    {"type": "function", "name": "college_academic_structure", "description": "Read the authorized College academic structure, explain setup gaps, or resolve institution-defined departments, programs, graduation batches, terms, courses, and offerings. This tool is read-only.", "parameters": {"type": "object", "properties": {"resource": {"type": ["string", "null"], "enum": ["departments", "programs", "cohorts", "terms", "courses", "offerings", None]}, "query": {"type": ["string", "null"], "maxLength": 160}, "include_archived": {"type": "boolean", "default": False}, "limit": {"type": "integer", "minimum": 1, "maximum": 50}}, "additionalProperties": False}},
     {"type": "function", "name": "college_student_intelligence", "description": "Explain one authorized student's academics, attendance, coding, skills, readiness factors, fee-clearance status, missing evidence, applications, interviews, and offers. Use a name, admission number, roll number, or exact student ID; never guess an ambiguous match.", "parameters": {"type": "object", "properties": {"student_reference": {"type": "string", "minLength": 1, "maxLength": 180}}, "required": ["student_reference"], "additionalProperties": False}},
     {"type": "function", "name": "college_placement_dashboard", "description": "Get authorized placement metrics, batch or department comparison, readiness distribution, attendance/coding trends, action queues, placement funnel, and offer outcomes.", "parameters": {"type": "object", "properties": {"academic_year": {"type": ["string", "null"]}, "graduation_year": {"type": ["integer", "null"], "minimum": 2000, "maximum": 2200}, "department_id": {"type": ["string", "null"]}, "program_id": {"type": ["string", "null"]}, "cohort_id": {"type": ["string", "null"]}}, "additionalProperties": False}},
     {"type": "function", "name": "college_opportunity_candidates", "description": "Evaluate or recommend authorized candidates for one placement opportunity using only configured eligibility and evidence-backed readiness. This is read-only, excludes protected attributes, and never changes eligibility or applications.", "parameters": {"type": "object", "properties": {"opportunity_reference": {"type": "string", "minLength": 1, "maxLength": 220}, "student_reference": {"type": ["string", "null"], "maxLength": 180}, "limit": {"type": "integer", "minimum": 1, "maximum": 30}}, "required": ["opportunity_reference"], "additionalProperties": False}},
@@ -128,6 +130,18 @@ def tool_business_summary(db: Session, user: User, location_id: str | None = Non
     if locations is not None:
         employee_stmt = employee_stmt.join(EmployeeLocation, EmployeeLocation.employee_id == Employee.id).where(EmployeeLocation.location_id.in_(locations))
     active_identities = int(db.scalar(client_stmt) or 0)
+    if org.industry.value == "college":
+        # College is a placement-intelligence workspace, not a financial
+        # business dashboard. Rich metrics come from the College tool.
+        return {
+            "industry": "college",
+            "active_students": active_identities,
+            "employees": db.scalar(employee_stmt) if user_has_permissions(db, user, ["employees.view"]) else None,
+            "today_revenue_paise": None,
+            "month_revenue_paise": None,
+            "appointments_today": None,
+            "low_stock_items": None,
+        }
     return {
         "industry": org.industry.value,
         "currency": org.currency,
@@ -239,14 +253,15 @@ def _records_statement(db, user, subject, query=None, location_id=None, days=Non
         if status and status != "all":
             stmt = stmt.where(CollegeStudentProfile.status == status)
         if q:
-            stmt = stmt.where(or_(
+            predicates = [
                 func.lower(Client.first_name).like(q),
                 func.lower(Client.last_name).like(q),
-                func.lower(Client.phone).like(q),
-                func.lower(Client.email).like(q),
                 func.lower(CollegeStudentProfile.admission_number).like(q),
                 func.lower(CollegeStudentProfile.roll_number).like(q),
-            ))
+            ]
+            if user_has_permissions(db, user, ["college.students.contact.view"]):
+                predicates.extend((func.lower(Client.phone).like(q), func.lower(Client.email).like(q)))
+            stmt = stmt.where(or_(*predicates))
         if created_within_days:
             created_since = datetime.now(timezone.utc) - timedelta(days=created_within_days)
             stmt = stmt.where(CollegeStudentProfile.created_at >= created_since)
@@ -468,6 +483,14 @@ def tool_business_records(db, user, subject, query=None, location_id=None, days=
                           created_within_days=None, conversation_id=None):
     spec = _normalize_record_spec(subject, query, location_id, days, status, created_within_days)
     subject = spec["subject"]
+    organization = db.get(Organization, user.organization_id)
+    if (
+        organization
+        and organization.industry.value == "college"
+        and subject in {"sales", "purchases"}
+        and not user_has_permissions(db, user, ["college.fees.view"])
+    ):
+        return {"access_denied": True, "message": "Fee amounts are not included in your College access."}
     result = run_result_page(db, user, spec, 0, 5)
     if result.get("access_denied"): return result
     if result["count"] > 5:
@@ -491,6 +514,8 @@ def tool_business_analytics(db, user, metric, days, location_id=None):
     permission = {"revenue": "sales.view", "appointments": "appointments.view", "clients": "clients.view", "memberships": "gym.memberships.view", "checkins": "gym.attendance.view", "top_products": "sales.view", "sales_by_category": "sales.view"}[metric]
     if denied := _denied(db, user, permission): return denied
     org = db.get(Organization, user.organization_id); since = datetime.now(timezone.utc) - timedelta(days=days)
+    if org.industry.value == "college" and metric in {"revenue", "top_products", "sales_by_category"} and not user_has_permissions(db, user, ["college.fees.view"]):
+        return {"access_denied": True, "message": "Fee amounts are not included in your College access."}
     if metric in {"top_products", "sales_by_category"}:
         if metric == "top_products":
             label = SaleLine.item_name
@@ -618,11 +643,33 @@ def _college_available(db: Session, user: User, permissions: list[str]) -> dict 
     return None
 
 
-def _resolve_college_student(db: Session, user: User, reference: str):
+def _intersect_college_access(*items: CollegeAccess, domain: str) -> CollegeAccess:
+    constrained = [item for item in items if not item.unrestricted]
+    if not constrained:
+        return CollegeAccess(
+            unrestricted=True,
+            policy_version=max((item.policy_version for item in items), default=0),
+            domain=domain,
+        )
+    return CollegeAccess(
+        unrestricted=False,
+        student_ids=frozenset.intersection(*(item.student_ids for item in constrained)),
+        full_student_ids=frozenset.intersection(*(item.full_student_ids for item in constrained)),
+        department_ids=frozenset.intersection(*(item.department_ids for item in constrained)),
+        program_ids=frozenset.intersection(*(item.program_ids for item in constrained)),
+        cohort_ids=frozenset.intersection(*(item.cohort_ids for item in constrained)),
+        course_offering_ids=frozenset.intersection(*(item.course_offering_ids for item in constrained)),
+        location_ids=frozenset.intersection(*(item.location_ids for item in constrained)),
+        policy_version=max((item.policy_version for item in items), default=0),
+        domain=domain,
+    )
+
+
+def _resolve_college_student(db: Session, user: User, reference: str, domain: str = "students"):
     value = str(reference or "").strip()
     if not value:
         return None, {"error": "A student name, admission number, roll number, or ID is required."}
-    access = resolve_college_access(db, user)
+    access = resolve_college_access(db, user, domain)
     base = (
         select(CollegeStudentProfile, Client)
         .join(Client, Client.id == CollegeStudentProfile.client_id)
@@ -675,37 +722,284 @@ def _resolve_college_student(db: Session, user: User, reference: str):
     }
 
 
+def _academic_scope_key(value: str | None) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (value or "").casefold())
+
+
+_ACADEMIC_STOP_WORDS = {"and", "of", "the", "in", "for", "department", "program", "programme"}
+
+
+def _academic_scope_signatures(row) -> dict:
+    name = str(getattr(row, "name", "") or "")
+    code = str(getattr(row, "code", "") or "")
+    words = re.findall(r"[a-z0-9]+", name.casefold())
+    significant = [word for word in words if word not in _ACADEMIC_STOP_WORDS]
+    acronym = "".join(word[0] for word in significant)
+    acronym_prefixes = {acronym[:size] for size in range(2, len(acronym))}
+    return {
+        "name": _academic_scope_key(name),
+        "code": _academic_scope_key(code),
+        "acronym": acronym,
+        "acronym_prefixes": acronym_prefixes,
+        "tokens": set(significant),
+    }
+
+
+def _academic_match_score(row, value: str) -> float:
+    query_key = _academic_scope_key(value)
+    if not query_key:
+        return 0.0
+    query_tokens = set(re.findall(r"[a-z0-9]+", value.casefold())) - _ACADEMIC_STOP_WORDS
+    signatures = _academic_scope_signatures(row)
+    if query_key == signatures["code"]:
+        return 1.0
+    if query_key == signatures["name"]:
+        return 0.99
+    if query_key == signatures["acronym"]:
+        return 0.98
+    if query_key in signatures["acronym_prefixes"]:
+        return 0.93
+    if query_tokens and query_tokens == signatures["tokens"]:
+        return 0.97
+    if query_tokens and query_tokens.issubset(signatures["tokens"]):
+        coverage = len(query_tokens) / max(1, len(signatures["tokens"]))
+        return 0.90 + min(0.05, coverage * 0.05)
+    candidates = [signatures["code"], signatures["name"], signatures["acronym"]]
+    similarity = max((SequenceMatcher(None, query_key, candidate).ratio() for candidate in candidates if candidate), default=0.0)
+    if len(query_key) >= 3 and any(query_key in candidate or candidate in query_key for candidate in candidates if candidate):
+        similarity = max(similarity, 0.86)
+    return round(similarity, 4)
+
+
+def _match_academic_row(rows: list, value: str, label: str):
+    ranked = sorted(
+        ((_academic_match_score(row, value), row) for row in rows),
+        key=lambda item: (-item[0], str(getattr(item[1], "name", "")).casefold()),
+    )
+    if not ranked or ranked[0][0] < 0.72:
+        return None, {"error": f"No authorized {label} matches '{value}'."}
+    top_score, top_row = ranked[0]
+    runner_up = ranked[1][0] if len(ranked) > 1 else 0.0
+    if top_score >= 0.92 and top_score - runner_up >= 0.08:
+        return top_row, None
+    matches = [row for score, row in ranked if score >= max(0.72, top_score - 0.12)]
+    return None, {
+        "error": f"That {label} is ambiguous or not an exact institution-defined match. Choose one record.",
+        "clarification_required": True,
+        "options": [
+            {
+                "id": row.id,
+                "name": row.name,
+                "code": getattr(row, "code", None),
+                "confidence": round(_academic_match_score(row, value), 3),
+            }
+            for row in matches[:8]
+        ],
+    }
+
+
+def _section_key(value: str | None) -> str:
+    cleaned = re.sub(r"\b(section|sec)\b", " ", (value or "").casefold())
+    tokens = re.findall(r"[a-z0-9]+", cleaned)
+    return tokens[-1] if tokens else ""
+
+
+def _resolve_college_student_scope(
+    db: Session,
+    user: User,
+    access,
+    *,
+    department: str | None = None,
+    program: str | None = None,
+    section: str | None = None,
+    graduation_years: list[int] | None = None,
+    department_id: str | None = None,
+    program_id: str | None = None,
+    cohort_id: str | None = None,
+    cohort_ids: list[str] | set[str] | tuple[str, ...] | None = None,
+):
+    departments_query = select(CollegeDepartment).where(
+        CollegeDepartment.organization_id == user.organization_id,
+        CollegeDepartment.is_active.is_(True),
+    )
+    programs_query = select(CollegeProgram).where(
+        CollegeProgram.organization_id == user.organization_id,
+        CollegeProgram.is_active.is_(True),
+    )
+    cohorts_query = (
+        select(CollegeCohort, CollegeProgram, CollegeDepartment)
+        .join(CollegeProgram, CollegeProgram.id == CollegeCohort.program_id)
+        .join(CollegeDepartment, CollegeDepartment.id == CollegeProgram.department_id)
+        .where(
+            CollegeCohort.organization_id == user.organization_id,
+            CollegeCohort.is_active.is_(True),
+        )
+    )
+    if not access.unrestricted:
+        departments_query = departments_query.where(CollegeDepartment.id.in_(access.department_ids))
+        programs_query = programs_query.where(CollegeProgram.id.in_(access.program_ids))
+        cohorts_query = cohorts_query.where(CollegeCohort.id.in_(access.cohort_ids))
+
+    resolved_department = None
+    resolved_program = None
+    if department:
+        resolved_department, error = _match_academic_row(
+            list(db.execute(departments_query.order_by(CollegeDepartment.name)).scalars()),
+            department,
+            "department",
+        )
+        if error:
+            return None, error
+        if department_id and department_id != resolved_department.id:
+            return None, {"error": "The department name and identifier refer to different records."}
+        department_id = resolved_department.id
+    if program:
+        available_programs = list(db.execute(programs_query.order_by(CollegeProgram.name)).scalars())
+        if department_id:
+            available_programs = [row for row in available_programs if row.department_id == department_id]
+        resolved_program, error = _match_academic_row(available_programs, program, "program")
+        if error:
+            return None, error
+        if program_id and program_id != resolved_program.id:
+            return None, {"error": "The program name and identifier refer to different records."}
+        program_id = resolved_program.id
+
+    years = sorted({int(year) for year in (graduation_years or [])})
+    selected_cohort_ids = set(cohort_ids or [])
+    cohort_rows = list(db.execute(cohorts_query.order_by(
+        CollegeCohort.graduation_year,
+        CollegeDepartment.name,
+        CollegeProgram.name,
+        CollegeCohort.section,
+    )).all())
+    candidates = []
+    for cohort, cohort_program, cohort_department in cohort_rows:
+        if department_id and cohort_department.id != department_id:
+            continue
+        if program_id and cohort_program.id != program_id:
+            continue
+        if cohort_id and cohort.id != cohort_id:
+            continue
+        if selected_cohort_ids and cohort.id not in selected_cohort_ids:
+            continue
+        if years and cohort.graduation_year not in years:
+            continue
+        if section and _section_key(cohort.section or cohort.name) != _section_key(section):
+            continue
+        candidates.append((cohort, cohort_program, cohort_department))
+
+    has_hierarchy_filter = bool(
+        department or program or section or years or department_id or program_id
+        or cohort_id or selected_cohort_ids
+    )
+    if has_hierarchy_filter and not candidates:
+        return None, {"error": "No authorized student section matches that academic scope."}
+    if section and not (department_id or program_id) and len({row[2].id for row in candidates}) > 1:
+        return None, {
+            "error": "That section exists in multiple departments. Specify the department.",
+            "clarification_required": True,
+            "options": [
+                {
+                    "department": row[2].code,
+                    "program": row[1].code,
+                    "section": row[0].section or row[0].name,
+                    "graduation_year": row[0].graduation_year,
+                }
+                for row in candidates[:8]
+            ],
+        }
+
+    return {
+        "department_id": department_id,
+        "program_id": program_id,
+        "cohort_id": cohort_id,
+        "cohort_ids": {row[0].id for row in candidates} if has_hierarchy_filter else None,
+        "graduation_years": years,
+        "resolved_scope": {
+            "department": ({"id": resolved_department.id, "name": resolved_department.name, "code": resolved_department.code} if resolved_department else None),
+            "program": ({"id": resolved_program.id, "name": resolved_program.name, "code": resolved_program.code} if resolved_program else None),
+            "section": _section_key(section).upper() if section else None,
+            "graduation_years": years,
+            "cohorts": [
+                {
+                    "id": row[0].id,
+                    "name": row[0].name,
+                    "section": row[0].section or "General",
+                    "graduation_year": row[0].graduation_year,
+                }
+                for row in candidates
+            ],
+        },
+    }, None
+
+
 def tool_college_students(
     db: Session,
     user: User,
     query=None,
+    department=None,
+    program=None,
+    section=None,
+    graduation_years=None,
     department_id=None,
     program_id=None,
     cohort_id=None,
+    cohort_ids=None,
     readiness_band=None,
+    placement_status=None,
+    sort=None,
     limit=20,
 ):
-    if unavailable := _college_available(db, user, ["college.students.view", "college.readiness.view"]):
+    if unavailable := _college_available(db, user, ["college.students.view", "college.readiness.view", "college.placements.view"]):
         return unavailable
-    access = resolve_college_access(db, user)
+    access = _intersect_college_access(
+        resolve_college_access(db, user, "students"),
+        resolve_college_access(db, user, "readiness"),
+        resolve_college_access(db, user, "placements"),
+        domain="college-students",
+    )
     validate_college_filters(
         access,
         department_id=department_id,
         program_id=program_id,
         cohort_id=cohort_id,
+        cohort_ids=cohort_ids,
     )
+    scope, error = _resolve_college_student_scope(
+        db,
+        user,
+        access,
+        department=department,
+        program=program,
+        section=_section_key(section) if section else None,
+        graduation_years=graduation_years,
+        department_id=department_id,
+        program_id=program_id,
+        cohort_id=cohort_id,
+        cohort_ids=cohort_ids,
+    )
+    if error:
+        return error
     result = student_roster(
         db,
         user.organization_id,
         q=query,
-        department_id=department_id,
-        program_id=program_id,
-        cohort_id=cohort_id,
+        department_id=scope["department_id"],
+        program_id=scope["program_id"],
+        cohort_id=scope["cohort_id"],
+        cohort_ids=scope["cohort_ids"],
+        graduation_years=scope["graduation_years"],
+        section=_section_key(section) if section else None,
         readiness_band=readiness_band,
+        placement_status=placement_status,
+        sort=sort or "name",
         limit=min(int(limit or 20), 50),
         allowed_student_ids=access.constrained_student_ids,
     )
+    from app.api.v1.college_placement import _sanitize_roster_items
+    result = _sanitize_roster_items(db, user, result)
     result["count"] = result["total"]
+    result["resolved_scope"] = scope["resolved_scope"]
     result["presentation"] = {
         "display": "cards",
         "title": "Student placement evidence",
@@ -714,15 +1008,223 @@ def tool_college_students(
     return result
 
 
+def _academic_tool_item(resource: str, row, *, related: dict | None = None) -> dict:
+    related = related or {}
+    active = getattr(row, "is_active", None)
+    status_value = getattr(row, "status", None)
+    if active is None:
+        active = status_value != "archived"
+    item = {
+        "id": row.id,
+        "resource": resource,
+        "name": getattr(row, "name", None),
+        "code": getattr(row, "code", None),
+        "active": bool(active),
+        "status": status_value or ("active" if active else "archived"),
+        "profile_ref": {
+            "kind": "college_academic_structure",
+            "id": row.id,
+            "href": f"/app/college?section=structure&tab={resource}",
+        },
+        **related,
+    }
+    if resource == "cohorts":
+        item.update({
+            "graduation_year": row.graduation_year,
+            "admission_year": row.admission_year,
+            "section": row.section,
+            "current_semester": row.current_semester,
+        })
+    elif resource == "terms":
+        item.update({
+            "academic_year": row.academic_year,
+            "term_number": row.term_number,
+            "starts_on": row.starts_on.isoformat(),
+            "ends_on": row.ends_on.isoformat(),
+            "is_current": row.is_current,
+        })
+    elif resource == "courses":
+        item.update({"credits": row.credits, "course_type": row.course_type})
+    item["display_name"] = item.get("name") or item.get("code") or resource.rstrip("s").title()
+    item["display_meta"] = " / ".join(str(value) for value in (
+        item.get("code"), item.get("academic_year"), item.get("graduation_year"), item.get("section"),
+    ) if value not in (None, "", "GENERAL")) or resource.rstrip("s").replace("_", " ").title()
+    return item
+
+
+def tool_college_academic_structure(
+    db: Session,
+    user: User,
+    resource=None,
+    query=None,
+    include_archived=False,
+    limit=25,
+):
+    if unavailable := _college_available(db, user, ["college.academics.view"]):
+        return unavailable
+    access = resolve_college_access(db, user, "academics")
+    resource_names = {"departments", "programs", "cohorts", "terms", "courses", "offerings"}
+    if resource and resource not in resource_names:
+        return {"error": "That academic structure resource is not supported."}
+    limit = max(1, min(int(limit or 25), 50))
+
+    department_query = select(CollegeDepartment).where(CollegeDepartment.organization_id == user.organization_id)
+    program_query = select(CollegeProgram).where(CollegeProgram.organization_id == user.organization_id)
+    cohort_query = select(CollegeCohort).where(CollegeCohort.organization_id == user.organization_id)
+    course_query = select(CollegeCourse).where(CollegeCourse.organization_id == user.organization_id)
+    offering_query = select(CollegeCourseOffering).where(CollegeCourseOffering.organization_id == user.organization_id)
+    if not access.unrestricted:
+        department_query = department_query.where(CollegeDepartment.id.in_(access.department_ids))
+        program_query = program_query.where(CollegeProgram.id.in_(access.program_ids))
+        cohort_query = cohort_query.where(CollegeCohort.id.in_(access.cohort_ids))
+        course_query = course_query.where(CollegeCourse.department_id.in_(access.department_ids))
+        offering_query = offering_query.where(CollegeCourseOffering.cohort_id.in_(access.cohort_ids))
+    if not include_archived:
+        department_query = department_query.where(CollegeDepartment.is_active.is_(True))
+        program_query = program_query.where(CollegeProgram.is_active.is_(True))
+        cohort_query = cohort_query.where(CollegeCohort.is_active.is_(True))
+        course_query = course_query.where(CollegeCourse.is_active.is_(True))
+        offering_query = offering_query.where(CollegeCourseOffering.status != "archived")
+
+    departments = list(db.execute(department_query.order_by(CollegeDepartment.name)).scalars())
+    programs = list(db.execute(program_query.order_by(CollegeProgram.name)).scalars())
+    cohorts = list(db.execute(cohort_query.order_by(CollegeCohort.graduation_year, CollegeCohort.name)).scalars())
+    terms_query = select(CollegeTerm).where(CollegeTerm.organization_id == user.organization_id)
+    if not include_archived:
+        terms_query = terms_query.where(CollegeTerm.status != "archived")
+    terms = list(db.execute(terms_query.order_by(CollegeTerm.starts_on.desc())).scalars())
+    courses = list(db.execute(course_query.order_by(CollegeCourse.name)).scalars())
+    offerings = list(db.execute(offering_query.order_by(CollegeCourseOffering.created_at.desc())).scalars())
+    rows_by_resource = {
+        "departments": departments,
+        "programs": programs,
+        "cohorts": cohorts,
+        "terms": terms,
+        "courses": courses,
+        "offerings": offerings,
+    }
+
+    selected_resources = [resource] if resource else list(rows_by_resource)
+    items = []
+    per_resource_limit = limit if resource else max(1, limit // len(selected_resources))
+    for resource_name in selected_resources:
+        rows = rows_by_resource[resource_name]
+        year_match = re.search(r"\b(20\d{2}|21\d{2})\b", str(query or ""))
+        if query and resource_name == "cohorts" and year_match:
+            rows = [row for row in rows if row.graduation_year == int(year_match.group(1))]
+            scope_tokens = set(re.findall(r"[a-z0-9]+", str(query).casefold())) - {
+                year_match.group(1), "batch", "batches", "class", "of", "graduation", "year",
+            }
+            if scope_tokens:
+                programs_by_id = {row.id: row for row in programs}
+                departments_by_id = {row.id: row for row in departments}
+                rows = [row for row in rows if scope_tokens.issubset(set(re.findall(
+                    r"[a-z0-9]+",
+                    " ".join(filter(None, (
+                        row.name, row.code, row.section,
+                        getattr(programs_by_id.get(row.program_id), "name", None),
+                        getattr(programs_by_id.get(row.program_id), "code", None),
+                        getattr(
+                            departments_by_id.get(getattr(programs_by_id.get(row.program_id), "department_id", None)),
+                            "name", None,
+                        ),
+                        getattr(
+                            departments_by_id.get(getattr(programs_by_id.get(row.program_id), "department_id", None)),
+                            "code", None,
+                        ),
+                    ))).casefold(),
+                )))]
+            if not rows and resource:
+                return {"error": f"No authorized graduation batch matches {year_match.group(1)}."}
+        elif query and resource_name == "terms":
+            key = _academic_scope_key(query)
+            matches = [row for row in rows if key in _academic_scope_key(f"{row.name} {row.academic_year}")]
+            if matches:
+                rows = matches
+            else:
+                matched, error = _match_academic_row(rows, query, "term")
+                if error:
+                    if resource:
+                        return error
+                    continue
+                rows = [matched]
+        elif query and resource_name != "offerings":
+            matched, error = _match_academic_row(rows, query, resource_name.rstrip("s").replace("_", " "))
+            if error:
+                if resource:
+                    return error
+                continue
+            rows = [matched]
+        elif query:
+            key = _academic_scope_key(query)
+            course_names = {row.id: f"{row.name} {row.code}" for row in courses}
+            cohort_names = {row.id: f"{row.name} {row.code} {row.section} {row.graduation_year}" for row in cohorts}
+            term_names = {row.id: f"{row.name} {row.academic_year}" for row in terms}
+            rows = [row for row in rows if key in _academic_scope_key(" ".join((
+                course_names.get(row.course_id, ""),
+                cohort_names.get(row.cohort_id, ""),
+                term_names.get(row.term_id, ""),
+            )))]
+        for row in rows[:per_resource_limit]:
+            related = {}
+            if resource_name == "programs":
+                department = next((item for item in departments if item.id == row.department_id), None)
+                related = {"department_id": row.department_id, "department": department.name if department else None}
+            elif resource_name == "cohorts":
+                program_row = next((item for item in programs if item.id == row.program_id), None)
+                related = {"program_id": row.program_id, "program": program_row.name if program_row else None}
+            elif resource_name == "courses":
+                department = next((item for item in departments if item.id == row.department_id), None)
+                related = {"department_id": row.department_id, "department": department.name if department else None}
+            elif resource_name == "offerings":
+                course = next((item for item in courses if item.id == row.course_id), None)
+                cohort = next((item for item in cohorts if item.id == row.cohort_id), None)
+                term = next((item for item in terms if item.id == row.term_id), None)
+                related = {
+                    "course": course.name if course else None,
+                    "cohort": cohort.name if cohort else None,
+                    "term": term.name if term else None,
+                }
+            items.append(_academic_tool_item(resource_name, row, related=related))
+
+    gaps = []
+    if not departments:
+        gaps.append({"step": "department", "message": "Create the first department."})
+    elif not programs:
+        gaps.append({"step": "program", "message": "Create a program under a department."})
+    elif not cohorts:
+        gaps.append({"step": "cohort", "message": "Create a graduation batch and its sections."})
+    if not terms:
+        gaps.append({"step": "term", "message": "Academic years and terms are optional until teaching evidence is needed."})
+    if not courses:
+        gaps.append({"step": "course", "message": "Courses are optional until attendance or assessments need offerings."})
+    return {
+        "summary": {name: len(rows) for name, rows in rows_by_resource.items()},
+        "items": items[:limit],
+        "count": len(items[:limit]),
+        "setup_gaps": gaps,
+        "read_only": True,
+        "management_href": "/app/college?section=structure",
+        "presentation": {
+            "display": "cards",
+            "title": "Academic structure",
+            "entity_kind": "college_academic_structure",
+        },
+    }
+
+
 def tool_college_student_intelligence(db: Session, user: User, student_reference: str):
     if unavailable := _college_available(db, user, ["college.students.view", "college.readiness.view"]):
         return unavailable
-    student, resolution = _resolve_college_student(db, user, student_reference)
+    student, resolution = _resolve_college_student(db, user, student_reference, "students")
     if resolution:
         return resolution
     profile = student_intelligence(db, user.organization_id, student.id)
     if not profile:
         return {"error": "The student intelligence record is unavailable."}
+    resolve_college_access(db, user, "readiness").require_student(student.id)
+    from app.api.v1.college_placement import _sanitize_student_intelligence
+    profile = _sanitize_student_intelligence(db, user, student.id, profile)
     summary = {
         **profile["student"],
         "display_name": profile["student"]["name"],
@@ -758,9 +1260,9 @@ def tool_college_placement_dashboard(
     program_id=None,
     cohort_id=None,
 ):
-    if unavailable := _college_available(db, user, ["college.placements.view", "college.readiness.view"]):
+    if unavailable := _college_available(db, user, ["college.placement_reports.view"]):
         return unavailable
-    access = resolve_college_access(db, user)
+    access = resolve_college_access(db, user, "reports")
     validate_college_filters(
         access,
         department_id=department_id,
@@ -777,15 +1279,22 @@ def tool_college_placement_dashboard(
         cohort_id=cohort_id,
         allowed_student_ids=access.constrained_student_ids,
     )
-    result["leaderboards"] = placement_leaderboards(
-        db,
-        user.organization_id,
-        department_id=department_id,
-        program_id=program_id,
-        cohort_id=cohort_id,
-        limit=10,
-        allowed_student_ids=access.constrained_student_ids,
-    )
+    if user_has_permissions(db, user, ["college.coding.view", "college.readiness.view"]):
+        leaderboard_access = _intersect_college_access(
+            access,
+            resolve_college_access(db, user, "coding"),
+            resolve_college_access(db, user, "readiness"),
+            domain="college-leaderboards",
+        )
+        result["leaderboards"] = placement_leaderboards(
+            db,
+            user.organization_id,
+            department_id=department_id,
+            program_id=program_id,
+            cohort_id=cohort_id,
+            limit=10,
+            allowed_student_ids=leaderboard_access.constrained_student_ids,
+        )
     result["rows"] = [
         {**row, "label": row.get("department")}
         for row in result.get("department_comparison", [])
@@ -810,7 +1319,7 @@ def _resolve_college_opportunity(db: Session, user: User, reference: str):
     base = select(CollegePlacementOpportunity).where(
         CollegePlacementOpportunity.organization_id == user.organization_id,
     )
-    access = resolve_college_access(db, user)
+    access = resolve_college_access(db, user, "placements")
     exact_conditions = [
         func.lower(CollegePlacementOpportunity.title) == lower,
     ]
@@ -848,20 +1357,27 @@ def tool_college_opportunity_candidates(
     student_reference=None,
     limit=10,
 ):
-    if unavailable := _college_available(db, user, ["college.placements.view", "college.readiness.view"]):
+    if unavailable := _college_available(db, user, ["college.placements.view", "college.readiness.view", "college.clearance.view"]):
         return unavailable
     opportunity, resolution = _resolve_college_opportunity(db, user, opportunity_reference)
     if resolution:
         return resolution
-    access = resolve_college_access(db, user)
+    access = _intersect_college_access(
+        resolve_college_access(db, user, "placements"),
+        resolve_college_access(db, user, "readiness"),
+        resolve_college_access(db, user, "clearance"),
+        domain="candidate-review",
+    )
     if not access.allows_opportunity(opportunity.eligibility_rules):
         return {"error": "That opportunity is outside your College access."}
 
     only_student_id = None
     if student_reference:
-        student, student_resolution = _resolve_college_student(db, user, student_reference)
+        student, student_resolution = _resolve_college_student(db, user, student_reference, "placements")
         if student_resolution:
             return student_resolution
+        if not access.allows_student(student.id):
+            return {"error": "That student is outside your candidate-review access."}
         only_student_id = student.id
     roster = student_roster(
         db,
@@ -902,7 +1418,7 @@ def tool_college_opportunity_candidates(
             "coverage_percent": float(snapshot.coverage_percent) if snapshot else 0,
             "readiness_band": snapshot.band if snapshot else "insufficient_evidence",
             "missing_evidence": snapshot.missing_evidence if snapshot else list(policy.weights),
-            "source_records": snapshot.source_records if snapshot else {},
+            "source_records": {},
             "profile_ref": {"kind": "client", "id": row["client_id"], "href": f"/app/clients/{row['client_id']}"},
         })
     order = {"eligible": 0, "needs_review": 1, "ineligible": 2}
@@ -937,6 +1453,7 @@ TOOL_REGISTRY: dict[str, Callable] = {
     "client_workspace": tool_client_workspace,
     "resolve_records": tool_resolve_records,
     "entity_workspace": tool_entity_workspace,
+    "college_academic_structure": tool_college_academic_structure,
     "college_students": tool_college_students,
     "college_student_intelligence": tool_college_student_intelligence,
     "college_placement_dashboard": tool_college_placement_dashboard,

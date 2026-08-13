@@ -12,7 +12,7 @@ import {
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { applyApiErrors } from "@/lib/validation";
+import { applyApiErrors, FORM_OPTIONS } from "@/lib/validation";
 
 function ActionField({ definition, control }) {
   return <FormField
@@ -72,9 +72,7 @@ export function ValidatedActionDialog({
   const form = useForm({
     resolver: zodResolver(schema),
     defaultValues,
-    mode: "onBlur",
-    reValidateMode: "onChange",
-    shouldFocusError: true,
+    ...FORM_OPTIONS,
   });
   const defaultsRef = useRef(defaultValues);
   defaultsRef.current = defaultValues;

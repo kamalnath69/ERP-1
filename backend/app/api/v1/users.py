@@ -9,7 +9,9 @@ from app.core.deps import CurrentUser, require_permissions
 from app.core.security import hash_password, verify_password
 from app.schemas.validation import RequestModel
 from app.models import (
+    AccessPolicy,
     Permission,
+    Organization,
     Role,
     RolePermission,
     RefreshToken, User, UserPreference,
@@ -27,6 +29,12 @@ from app.schemas import (
 )
 from app.services.rbac import get_user_permissions
 from app.models import AccessScope, Location
+from app.services.access_policy import (
+    grantable_permission_codes,
+    is_owner,
+    policy_v2_enabled,
+    require_access_administrator,
+)
 from app.services.auth_security import clear_auth_cookies
 from app.services.auth_security import create_auth_code
 from app.services.email import send_auth_code_email
@@ -42,6 +50,46 @@ class PreferenceUpdate(RequestModel):
 
 
 PREFERENCE_NAMESPACES = {"appearance", "assistant", "dashboard", "navigation", "notifications"}
+
+
+def _is_policy_college(db: Session, user: User) -> bool:
+    if not user.organization_id:
+        return False
+    organization = db.get(Organization, user.organization_id)
+    return bool(
+        organization
+        and getattr(organization.industry, "value", organization.industry) == "college"
+        and policy_v2_enabled(db, user.organization_id)
+    )
+
+
+def _college_role_assignment_guard(
+    db: Session,
+    actor: User,
+    target: User | None,
+    roles: list[Role],
+) -> None:
+    """Apply the delegation ceiling to every College role-assignment path."""
+    require_access_administrator(db, actor)
+    actor_owner = is_owner(db, actor)
+    if target and target.id == actor.id:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Another owner must review changes to your own access")
+
+    protected_slugs = {"owner", "access-admin"}
+    current_slugs = {role.slug for role in get_user_roles(db, target) if role.is_system} if target else set()
+    next_slugs = {role.slug for role in roles if role.is_system}
+    if not actor_owner and (current_slugs | next_slugs).intersection(protected_slugs):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only an owner can assign or change Owner and Access Admin")
+
+    ceiling = grantable_permission_codes(db, actor)
+    if ceiling is None:
+        return
+    role_ids = [role.id for role in roles]
+    role_codes = set(db.execute(select(Permission.code).join(
+        RolePermission, RolePermission.permission_id == Permission.id,
+    ).where(RolePermission.role_id.in_(role_ids))).scalars()) if role_ids else set()
+    if not role_codes.issubset(ceiling):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This role exceeds your delegated access ceiling")
 
 
 class MFAStartBody(RequestModel):
@@ -243,11 +291,18 @@ def create_user(body: UserCreate, request: Request, user: User = Depends(require
     )
     db.add(new_user)
     db.flush()
+    selected_roles = list(db.execute(select(Role).where(
+        Role.organization_id == user.organization_id,
+        Role.id.in_(body.role_ids),
+        Role.is_active.is_(True),
+    )).scalars()) if body.role_ids else []
     if body.role_ids:
-        valid_role_ids = set(db.execute(select(Role.id).where(Role.organization_id == user.organization_id, Role.id.in_(body.role_ids))).scalars().all())
+        valid_role_ids = {role.id for role in selected_roles}
         if valid_role_ids != set(body.role_ids):
             db.rollback()
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "One or more roles are invalid")
+    if _is_policy_college(db, user):
+        _college_role_assignment_guard(db, user, None, selected_roles)
     for rid in body.role_ids:
         db.add(UserRole(user_id=new_user.id, role_id=rid))
     valid_locations = set(db.execute(select(Location.id).where(Location.organization_id == user.organization_id, Location.id.in_(body.location_ids))).scalars())
@@ -255,6 +310,13 @@ def create_user(body: UserCreate, request: Request, user: User = Depends(require
         db.rollback(); raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "One or more locations are invalid")
     for location_id in valid_locations:
         db.add(AccessScope(organization_id=user.organization_id, user_id=new_user.id, scope_type="location", scope_value=location_id, meta={}))
+    if _is_policy_college(db, user):
+        db.add(AccessPolicy(
+            organization_id=user.organization_id,
+            user_id=new_user.id,
+            status="pending_review",
+            created_by_user_id=user.id,
+        ))
     code = create_auth_code(db, new_user, "email_verification", request)
     db.commit()
     db.refresh(new_user)
@@ -324,8 +386,19 @@ def update_user(
     target = db.get(User, user_id)
     if not target or target.organization_id != user.organization_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    if _is_policy_college(db, user):
+        require_access_administrator(db, user)
+        if target.id == user.id:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Another owner must change your account status")
+        target_slugs = {role.slug for role in get_user_roles(db, target) if role.is_system}
+        if not is_owner(db, user) and target_slugs.intersection({"owner", "access-admin"}):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Only an owner can change Owner and Access Admin accounts")
+    previous_active = target.is_active
     for k, v in body.model_dump(exclude_none=True).items():
         setattr(target, k, v)
+    if target.is_active != previous_active:
+        target.access_version += 1
+        target.session_version += 1
     db.commit()
     db.refresh(target)
     return target
@@ -341,15 +414,28 @@ def assign_roles(
     target = db.get(User, user_id)
     if not target or target.organization_id != user.organization_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
-    valid = set(db.execute(select(Role.id).where(Role.organization_id == user.organization_id, Role.id.in_(body.role_ids))).scalars())
+    roles = list(db.execute(select(Role).where(
+        Role.organization_id == user.organization_id,
+        Role.id.in_(body.role_ids),
+        Role.is_active.is_(True),
+    )).scalars()) if body.role_ids else []
+    valid = {role.id for role in roles}
     if valid != set(body.role_ids): raise HTTPException(422, "One or more roles are invalid")
-    actor_codes = get_user_permissions(db, user)
-    for role_id in valid:
-        codes = set(db.execute(select(Permission.code).join(RolePermission, RolePermission.permission_id == Permission.id).where(RolePermission.role_id == role_id)).scalars())
-        if not codes.issubset(actor_codes): raise HTTPException(403, "Cannot assign a role with permissions you do not have")
+    if _is_policy_college(db, user):
+        require_access_administrator(db, user)
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Use the College access review to change responsibilities and data reach together",
+        )
+    else:
+        actor_codes = get_user_permissions(db, user)
+        for role_id in valid:
+            codes = set(db.execute(select(Permission.code).join(RolePermission, RolePermission.permission_id == Permission.id).where(RolePermission.role_id == role_id)).scalars())
+            if not codes.issubset(actor_codes): raise HTTPException(403, "Cannot assign a role with permissions you do not have")
     db.query(UserRole).filter(UserRole.user_id == user_id).delete()
     for rid in body.role_ids:
         db.add(UserRole(user_id=user_id, role_id=rid))
+    target.access_version += 1
     db.commit()
     return {"ok": True, "role_count": len(body.role_ids)}
 
@@ -365,6 +451,8 @@ def list_user_overrides(
     target = db.get(User, user_id)
     if not target or target.organization_id != user.organization_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    if _is_policy_college(db, user):
+        require_access_administrator(db, user)
     rows = db.execute(
         select(UserPermissionOverride).where(UserPermissionOverride.user_id == user_id)
     ).scalars().all()
@@ -386,6 +474,13 @@ def set_user_overrides(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
     if target.id == user.id:
         raise HTTPException(status.HTTP_409_CONFLICT, "Use another administrator to change your own permission overrides")
+    college_policy = _is_policy_college(db, user)
+    if college_policy:
+        require_access_administrator(db, user)
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Use the College access review instead of raw permission overrides",
+        )
 
     # Validate every permission_id
     if body.overrides:
@@ -396,13 +491,14 @@ def set_user_overrides(
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unknown permission ids: {sorted(missing)}")
         if any(org_id not in {None, user.organization_id} for _, _, org_id in found):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Cross-tenant permission grant blocked")
-        actor_codes = get_user_permissions(db, user)
-        if any(code not in actor_codes for _, code, _ in found) and not user.is_super_admin:
+        actor_codes = grantable_permission_codes(db, user) if college_policy else get_user_permissions(db, user)
+        if actor_codes is not None and any(code not in actor_codes for _, code, _ in found) and not user.is_super_admin:
             raise HTTPException(status.HTTP_403_FORBIDDEN, "You cannot grant a permission you do not have")
 
     db.query(UserPermissionOverride).filter(UserPermissionOverride.user_id == user_id).delete()
     for o in body.overrides:
         db.add(UserPermissionOverride(user_id=user_id, permission_id=o.permission_id, granted=o.granted))
+    target.access_version += 1
     db.commit()
     return {"ok": True, "override_count": len(body.overrides)}
 
@@ -418,6 +514,13 @@ def clear_user_overrides(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
     if target.id == user.id:
         raise HTTPException(status.HTTP_409_CONFLICT, "Use another administrator to change your own permission overrides")
+    if _is_policy_college(db, user):
+        require_access_administrator(db, user)
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Use the College access review instead of raw permission overrides",
+        )
     n = db.query(UserPermissionOverride).filter(UserPermissionOverride.user_id == user_id).delete()
+    target.access_version += 1
     db.commit()
     return {"ok": True, "deleted": n}

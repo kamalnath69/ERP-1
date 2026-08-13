@@ -2,6 +2,7 @@ import * as React from "react"
 import { Slot } from "@radix-ui/react-slot"
 import { cva } from "class-variance-authority";
 import { SpinnerGap } from "@phosphor-icons/react";
+import { useFormContext } from "react-hook-form";
 
 import { cn } from "@/lib/utils"
 
@@ -39,14 +40,22 @@ const Button = React.forwardRef(({
   className, variant, size, asChild = false, loading = false, loadingText, disabled, children, onClick, ...props
 }, ref) => {
   const Comp = asChild ? Slot : "button"
+  const form = useFormContext()
   const [actionPending, setActionPending] = React.useState(false)
   const actionPendingRef = React.useRef(false)
   const mounted = React.useRef(true)
-  React.useEffect(() => () => { mounted.current = false }, [])
+  React.useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false }
+  }, [])
 
   const isLoading = loading || actionPending
+  const invalidSubmit = props.type === "submit" && form
+    ? !form.formState.isValid || form.formState.isValidating
+    : false
+  const isDisabled = disabled || invalidSubmit
   const handleClick = (event) => {
-    if (disabled || loading || actionPendingRef.current) {
+    if (isDisabled || loading || actionPendingRef.current) {
       event.preventDefault()
       return
     }
@@ -66,8 +75,8 @@ const Button = React.forwardRef(({
       className={cn(buttonVariants({ variant, size, className }))}
       ref={ref}
       aria-busy={isLoading || undefined}
-      aria-disabled={asChild && (disabled || isLoading) ? true : undefined}
-      disabled={!asChild ? disabled || isLoading : undefined}
+      aria-disabled={asChild && (isDisabled || isLoading) ? true : undefined}
+      disabled={!asChild ? isDisabled || isLoading : undefined}
       onClick={handleClick}
       {...props}
     >

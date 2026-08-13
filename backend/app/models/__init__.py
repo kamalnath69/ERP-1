@@ -7,7 +7,10 @@ from app.models.user import (
     AuthAttempt, AuthCode, RefreshToken, User, UserMFADevice, UserPreference,
     UserRecoveryCode,
 )
-from app.models.role import AccessScope, Permission, Role, RolePermission, UserPermissionOverride, UserRole
+from app.models.role import (
+    AccessDelegation, AccessDelegationScope, AccessPolicy, AccessPolicyScope,
+    AccessScope, Permission, Role, RolePermission, UserPermissionOverride, UserRole,
+)
 from app.models.business import (
     Appointment, CatalogItem, Category, Client, Employee, EmployeeLocation, SaleInvoice,
     SaleLine, SalePayment, StaffSchedule, StockLevel, StockMovement, Task,
@@ -21,9 +24,10 @@ from app.models.clinic import (
     Prescription, PrescriptionItem, Vital,
 )
 from app.models.college import (
-    CollegeAssessment, CollegeAssessmentScore, CollegeAttendanceRecord,
+    CollegeAssessment, CollegeAssessmentComponent, CollegeAssessmentReadinessMapping, CollegeAssessmentScheme,
+    CollegeAssessmentSchemeAssignment, CollegeAssessmentScore, CollegeAttendanceRecord,
     CollegeAttendanceSession, CollegeCohort, CollegeCourse, CollegeCourseOffering,
-    CollegeDepartment, CollegeFeePlan, CollegeProgram, CollegeStudentFee,
+    CollegeDepartment, CollegeExamCycle, CollegeFeePlan, CollegeProgram, CollegeStudentFee,
     CollegeStudentProfile, CollegeTerm,
 )
 from app.models.college_placement import (
@@ -38,6 +42,7 @@ from app.models.college_placement import (
     CollegeTermResult,
 )
 from app.models.documents import Document, DocumentChunk, Job, OutboundMessage
+from app.models.data_exchange import DataExchangeArtifact, DataExchangeRow, DataExchangeRun
 from app.models.ai import (
     AIAction, AIIntentResolution, AIMessageFeedback, AIResultSession, AISavedView, AIUsage,
     ChatConversation, ChatMessage, ChatTurn,

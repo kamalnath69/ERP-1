@@ -34,6 +34,7 @@ from app.models import (
 )
 from app.schemas import ChatMessageOut, ChatRequest, ConversationOut
 from app.services.audit import log_action
+from app.services.access_policy import policy_v2_enabled, resolve_policy_context
 from app.services.business_access import ensure_client_access, ensure_location, tenant_get
 from app.services.rbac import user_has_permissions
 from app.services.entity_resolution import validate_entity_ref
@@ -44,6 +45,18 @@ from app.services.cursor_pagination import decode_cursor, encode_cursor, page_si
 
 logger = logging.getLogger("edvatiq.ai")
 router = APIRouter(prefix="/ai", tags=["ai"])
+
+
+def require_ai_access(
+    user: User = Depends(require_permissions("ai.use")),
+    db: Session = Depends(get_db),
+) -> User:
+    organization = db.get(Organization, user.organization_id)
+    if organization and organization.industry.value == "college" and policy_v2_enabled(db, user.organization_id):
+        context = resolve_policy_context(db, user)
+        if not context.active or "ai.use" not in context.permissions:
+            raise HTTPException(403, "Edvatiq AI is not included in your active College access")
+    return user
 
 
 class ConfirmAction(RequestModel):
@@ -91,7 +104,7 @@ def list_conversations(
     scope: str = Query(default="active", pattern="^(active|archived|all)$"),
     q: str | None = Query(default=None, max_length=120),
     limit: int = Query(default=50, ge=1, le=100),
-    user: User = Depends(require_permissions("ai.use")),
+    user: User = Depends(require_ai_access),
     db: Session = Depends(get_db),
 ):
     now = datetime.now(timezone.utc)
@@ -140,7 +153,7 @@ def conversation_page(
     q: str | None = Query(default=None, max_length=120),
     cursor: str | None = None,
     limit: int = Query(default=25, ge=1, le=100),
-    user: User = Depends(require_permissions("ai.use")),
+    user: User = Depends(require_ai_access),
     db: Session = Depends(get_db),
 ):
     now = datetime.now(timezone.utc)
@@ -223,19 +236,19 @@ def conversation_page(
 
 
 @router.get("/conversations/{cid}", response_model=ConversationOut)
-def get_conversation(cid: str, user: User = Depends(require_permissions("ai.use")), db: Session = Depends(get_db)):
+def get_conversation(cid: str, user: User = Depends(require_ai_access), db: Session = Depends(get_db)):
     return _conversation_summary(db, _conversation(db, user, cid))
 
 
 @router.get("/conversations/{cid}/messages", response_model=list[ChatMessageOut])
-def get_messages(cid: str, user: User = Depends(require_permissions("ai.use")), db: Session = Depends(get_db)):
+def get_messages(cid: str, user: User = Depends(require_ai_access), db: Session = Depends(get_db)):
     conversation = _conversation(db, user, cid)
     rows = db.execute(select(ChatMessage).where(ChatMessage.conversation_id == conversation.id).order_by(ChatMessage.created_at)).scalars().all()
     ratings = dict(db.execute(select(AIMessageFeedback.message_id, AIMessageFeedback.rating).where(
         AIMessageFeedback.user_id == user.id,
         AIMessageFeedback.message_id.in_([row.id for row in rows]),
     )).all()) if rows else {}
-    return [_message_dict(row, feedback_rating=ratings.get(row.id)) for row in rows]
+    return [_authorized_message_dict(db, user, row, feedback_rating=ratings.get(row.id)) for row in rows]
 
 
 @router.get("/conversations/{cid}/messages/page")
@@ -243,7 +256,7 @@ def message_page(
     cid: str,
     cursor: str | None = None,
     limit: int = Query(default=50, ge=1, le=100),
-    user: User = Depends(require_permissions("ai.use")),
+    user: User = Depends(require_ai_access),
     db: Session = Depends(get_db),
 ):
     conversation = _conversation(db, user, cid)
@@ -274,7 +287,7 @@ def message_page(
         values={"at": oldest.created_at.isoformat(), "id": oldest.id},
     ) if has_more and oldest else None
     return {
-        "items": [_message_dict(row, feedback_rating=ratings.get(row.id)) for row in reversed(rows)],
+        "items": [_authorized_message_dict(db, user, row, feedback_rating=ratings.get(row.id)) for row in reversed(rows)],
         "next_cursor": next_cursor,
         "has_more": has_more,
     }
@@ -284,7 +297,7 @@ def message_page(
 def update_conversation(
     cid: str,
     body: ConversationUpdate,
-    user: User = Depends(require_permissions("ai.use")),
+    user: User = Depends(require_ai_access),
     db: Session = Depends(get_db),
 ):
     fields = body.model_fields_set & {"title", "pinned", "archived"}
@@ -507,7 +520,29 @@ async def _process_chat(body, user, db, emit=None):
     if body.location_id: ensure_location(db, user, body.location_id)
     local_match = None
     local_outcome = "disabled"
-    route = "conversation" if fast_reply else classify_route(body.message, context)
+    organization = db.get(Organization, user.organization_id)
+    industry = getattr(organization.industry, "value", organization.industry) if organization else None
+    is_college = industry == "college"
+    college_policy_enabled = bool(is_college and policy_v2_enabled(db, user.organization_id))
+    initial_access_version = user.access_version
+    initial_policy_version = None
+    verified_policy_context = None
+    original_emit = emit
+    buffered_text_events: list[tuple[str, dict]] = []
+    if college_policy_enabled:
+        initial_policy_context = resolve_policy_context(db, user)
+        if not initial_policy_context.active or "ai.use" not in initial_policy_context.permissions:
+            raise HTTPException(403, "Edvatiq AI is not included in your active College access")
+        initial_policy_version = initial_policy_context.policy_version
+        if original_emit:
+            async def policy_guarded_emit(name, payload):
+                if name == "text_delta":
+                    buffered_text_events.append((name, payload))
+                    return
+                await original_emit(name, payload)
+
+            emit = policy_guarded_emit
+    route = "conversation" if fast_reply else "college" if is_college else classify_route(body.message, context)
     key = body.idempotency_key or f"ai:{user.id}:{secrets.token_urlsafe(16)}"
     lock_key = f"ai-turn:{user.organization_id}:{user.id}:{key}"
     db.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(lock_key, 0))))
@@ -519,7 +554,7 @@ async def _process_chat(body, user, db, emit=None):
         if existing:
             conversation = _conversation(db, user, existing.conversation_id)
             return {"conversation_id": existing.conversation_id, "conversation": _conversation_summary(db, conversation),
-                    "message": _message_dict(existing), "credits_used": 0,
+                    "message": _authorized_message_dict(db, user, existing), "credits_used": 0,
                     "ai_wallet": _wallet_payload(db, user.organization_id)}
     if existing_turn and existing_turn.status == "processing": raise HTTPException(409, "This request is already being processed")
     reservation = None; turn = existing_turn
@@ -549,7 +584,7 @@ async def _process_chat(body, user, db, emit=None):
         if body.location_id:
             conversation.context_state = {**conversation.context_state, "location_id": body.location_id}
         mode = _local_intent_mode(db, user.organization_id)
-        if not fast_reply and mode != "disabled":
+        if not fast_reply and mode != "disabled" and not is_college:
             intent_started = perf_counter()
             local_match = interpret_business_query(
                 db, user, body.message,
@@ -593,11 +628,21 @@ async def _process_chat(body, user, db, emit=None):
         if not fast_reply and not (
             local_match and local_outcome in {"local", "clarify"}
         ):
-            deterministic_plan = deterministic_query_plan(
+            candidate_plan = deterministic_query_plan(
                 body.message,
                 body.location_id or conversation.context_state.get("location_id"),
                 conversation.context_state,
             )
+            if is_college:
+                arguments = (candidate_plan or {}).get("arguments") or {}
+                deterministic_plan = candidate_plan if (
+                    candidate_plan
+                    and candidate_plan.get("tool") == "business_records"
+                    and arguments.get("subject") == "students"
+                    and set(arguments).issubset({"subject", "location_id", "status"})
+                ) else None
+            else:
+                deterministic_plan = candidate_plan
         free_path = bool(fast_reply or (
             local_match and local_outcome in {"local", "clarify"}
         ) or deterministic_plan)
@@ -670,6 +715,22 @@ async def _process_chat(body, user, db, emit=None):
                 emit=emit,
                 preferences=assistant_preferences,
             )
+        if college_policy_enabled:
+            current_access_version = db.execute(
+                select(User.access_version).where(User.id == user.id).with_for_update()
+            ).scalar_one()
+            db.refresh(user)
+            verified_policy_context = resolve_policy_context(db, user)
+            if (
+                current_access_version != initial_access_version
+                or not verified_policy_context.active
+                or "ai.use" not in verified_policy_context.permissions
+                or verified_policy_context.policy_version != initial_policy_version
+            ):
+                raise HTTPException(
+                    409,
+                    "Your access changed while this answer was being prepared. Ask again for a current answer.",
+                )
         structured = result["response"]
         usage = result.get("usage") or {}
         charge = calculate_charge(db, result.get("model", "configured"), usage)
@@ -691,6 +752,17 @@ async def _process_chat(body, user, db, emit=None):
                           "turn_entities": turn_entities, "turn_read": turn_read,
                           "result_entities": conversation.context_state.get("result_entities", []),
                           "local_query": conversation.context_state.get("local_query")}
+        if college_policy_enabled:
+            policy_context = verified_policy_context or resolve_policy_context(db, user)
+            document_refs = [{"kind": "document", "id": item.get("document_id")} for item in (
+                structured.get("citations") or []
+            ) if item.get("document_id")]
+            assistant.meta = {
+                **assistant.meta,
+                "policy_version": policy_context.policy_version,
+                "access_version": policy_context.access_version,
+                "evidence_refs": [*turn_entities, *document_refs],
+            }
         turn.status = "completed"; turn.completed_at = datetime.now(timezone.utc); turn.error_code = None
         conversation.updated_at = datetime.now(timezone.utc)
         credits_used = 0
@@ -714,6 +786,9 @@ async def _process_chat(body, user, db, emit=None):
                    resource_type="conversation", resource_id=conversation.id,
                    meta={"route": result.get("route"), "tools": [item["name"] for item in result.get("tool_calls", [])]})
         db.commit(); db.refresh(assistant)
+        if original_emit and buffered_text_events:
+            for event_name, event_payload in buffered_text_events:
+                await original_emit(event_name, event_payload)
         if settled_wallet:
             try:
                 await asyncio.to_thread(publish_change, str(user.organization_id), "/ai/wallet")
@@ -752,6 +827,53 @@ def _message_dict(message, actions=None, blocks=None, feedback_rating=None):
             "feedback_rating": feedback_rating}
 
 
+def _authorized_message_dict(db: Session, user: User, message: ChatMessage, **kwargs) -> dict:
+    result = _message_dict(message, **kwargs)
+    if message.role != "assistant":
+        return result
+    organization = db.get(Organization, user.organization_id)
+    if not organization or organization.industry.value != "college" or not policy_v2_enabled(db, user.organization_id):
+        return result
+    context = resolve_policy_context(db, user)
+    if not context.active or "ai.use" not in context.permissions:
+        authorized = False
+    else:
+        meta = message.meta or {}
+        stored_access_version = meta.get("access_version")
+        if stored_access_version == user.access_version:
+            authorized = True
+        else:
+            references = meta.get("evidence_refs") or meta.get("turn_entities") or []
+            authorized = bool(references) or context.maximum_scope.unrestricted
+            for reference in references:
+                kind, identifier = reference.get("kind"), reference.get("id")
+                if not kind or not identifier:
+                    authorized = False
+                    break
+                try:
+                    if kind == "document":
+                        from app.ai.retrieval import document_access_conditions
+                        visible = db.execute(select(Document.id).where(
+                            Document.id == identifier, *document_access_conditions(db, user),
+                        )).scalar_one_or_none()
+                    else:
+                        visible = validate_entity_ref(db, user, kind, identifier)
+                except HTTPException:
+                    visible = None
+                if not visible:
+                    authorized = False
+                    break
+    if authorized:
+        return result
+    return {
+        **result,
+        "content": "This answer is hidden because your data access changed. Ask again for a current, authorized answer.",
+        "blocks": [],
+        "citations": [],
+        "actions": [],
+    }
+
+
 def _decorate_blocks(message: ChatMessage) -> list[dict]:
     blocks = [dict(block or {}) for block in (message.blocks or [])]
     meta = message.meta or {}
@@ -774,7 +896,7 @@ def _decorate_blocks(message: ChatMessage) -> list[dict]:
 
 
 @router.post("/chat")
-async def chat(body: ChatRequest, user: User = Depends(require_permissions("ai.use")), db: Session = Depends(get_db)):
+async def chat(body: ChatRequest, user: User = Depends(require_ai_access), db: Session = Depends(get_db)):
     try: return await _process_chat(body, user, db)
     except HTTPException: raise
     except Exception:
@@ -787,7 +909,7 @@ def _event(name, payload):
 
 
 @router.post("/chat/stream")
-async def chat_stream(body: ChatRequest, user: User = Depends(require_permissions("ai.use")), db: Session = Depends(get_db)):
+async def chat_stream(body: ChatRequest, user: User = Depends(require_ai_access), db: Session = Depends(get_db)):
     async def events():
         queue = asyncio.Queue()
 
@@ -834,7 +956,7 @@ async def chat_stream(body: ChatRequest, user: User = Depends(require_permission
 
 @router.get("/results/{session_id}")
 def result_page(session_id: str, cursor: str | None = None, limit: int = 25,
-                user: User = Depends(require_permissions("ai.use")), db: Session = Depends(get_db)):
+                user: User = Depends(require_ai_access), db: Session = Depends(get_db)):
     row = db.get(AIResultSession, session_id)
     if not row or row.organization_id != user.organization_id or row.user_id != user.id: raise HTTPException(404, "Result not found")
     if row.expires_at < datetime.now(timezone.utc): raise HTTPException(410, "This result has expired")
@@ -842,7 +964,7 @@ def result_page(session_id: str, cursor: str | None = None, limit: int = 25,
 
 
 @router.post("/results/run")
-def run_result_query(body: ResultQueryBody, user: User = Depends(require_permissions("ai.use")), db: Session = Depends(get_db)):
+def run_result_query(body: ResultQueryBody, user: User = Depends(require_ai_access), db: Session = Depends(get_db)):
     _validate_query_spec(body.query_spec)
     result_type = body.query_spec.get("subject") or "results"
     return _run_query_page(db, user, body.query_spec, result_type, body.cursor, body.limit)
@@ -864,7 +986,7 @@ def _run_query_page(db: Session, user: User, query_spec: dict, result_type: str,
 
 
 @router.get("/views")
-def list_views(user: User = Depends(require_permissions("ai.use")), db: Session = Depends(get_db)):
+def list_views(user: User = Depends(require_ai_access), db: Session = Depends(get_db)):
     rows = db.execute(select(AISavedView).where(AISavedView.organization_id == user.organization_id,
                       AISavedView.is_active.is_(True), or_(AISavedView.owner_user_id == user.id, AISavedView.visibility == "team"))
                       .order_by(AISavedView.updated_at.desc())).scalars()
@@ -872,7 +994,7 @@ def list_views(user: User = Depends(require_permissions("ai.use")), db: Session 
 
 
 @router.post("/views", status_code=201)
-def create_view(body: SavedViewBody, user: User = Depends(require_permissions("ai.use")), db: Session = Depends(get_db)):
+def create_view(body: SavedViewBody, user: User = Depends(require_ai_access), db: Session = Depends(get_db)):
     if body.visibility == "team":
         from app.models import Organization
         from app.services.entitlements import entitlement_value
@@ -883,7 +1005,7 @@ def create_view(body: SavedViewBody, user: User = Depends(require_permissions("a
 
 
 @router.patch("/views/{view_id}")
-def update_view(view_id: str, body: SavedViewBody, user: User = Depends(require_permissions("ai.use")), db: Session = Depends(get_db)):
+def update_view(view_id: str, body: SavedViewBody, user: User = Depends(require_ai_access), db: Session = Depends(get_db)):
     row = tenant_get(db, AISavedView, view_id, user)
     if row.owner_user_id != user.id: raise HTTPException(403, "Only the owner can edit this view")
     if body.version != row.version: raise HTTPException(409, "This view changed. Refresh and try again")
@@ -897,14 +1019,14 @@ def update_view(view_id: str, body: SavedViewBody, user: User = Depends(require_
 
 
 @router.delete("/views/{view_id}")
-def delete_view(view_id: str, user: User = Depends(require_permissions("ai.use")), db: Session = Depends(get_db)):
+def delete_view(view_id: str, user: User = Depends(require_ai_access), db: Session = Depends(get_db)):
     row = tenant_get(db, AISavedView, view_id, user)
     if row.owner_user_id != user.id: raise HTTPException(403, "Only the owner can remove this view")
     row.is_active = False; row.version += 1; db.commit(); return {"ok": True}
 
 
 @router.post("/views/{view_id}/run")
-def run_view(view_id: str, user: User = Depends(require_permissions("ai.use")), db: Session = Depends(get_db)):
+def run_view(view_id: str, user: User = Depends(require_ai_access), db: Session = Depends(get_db)):
     row = tenant_get(db, AISavedView, view_id, user)
     if row.owner_user_id != user.id and row.visibility != "team": raise HTTPException(404, "View not found")
     result = run_local_result_page(db, user, row.query_spec, 0, 25) if row.query_spec.get("engine") == "local_v1" else run_result_page(db, user, row.query_spec, 0, 25)
@@ -956,7 +1078,7 @@ def undo(action_id: str, user: User = Depends(require_permissions("ai.actions"))
 
 
 @router.post("/messages/{message_id}/feedback")
-def feedback(message_id: str, body: FeedbackBody, user: User = Depends(require_permissions("ai.use")), db: Session = Depends(get_db)):
+def feedback(message_id: str, body: FeedbackBody, user: User = Depends(require_ai_access), db: Session = Depends(get_db)):
     message = db.get(ChatMessage, message_id)
     if not message or message.organization_id != user.organization_id or message.role != "assistant": raise HTTPException(404, "Message not found")
     _conversation(db, user, message.conversation_id)
@@ -982,7 +1104,7 @@ def usage(user: User = Depends(require_permissions("billing.view")), db: Session
 
 
 @router.delete("/conversations/{cid}")
-def delete_conversation(cid: str, user: User = Depends(require_permissions("ai.use")), db: Session = Depends(get_db)):
+def delete_conversation(cid: str, user: User = Depends(require_ai_access), db: Session = Depends(get_db)):
     row = _conversation(db, user, cid)
     if db.scalar(select(func.count(ChatTurn.id)).where(ChatTurn.conversation_id == row.id, ChatTurn.status == "processing")):
         raise HTTPException(409, "Wait for the current answer to finish before deleting this chat")
@@ -1026,7 +1148,7 @@ def _rebuild_conversation_context(db, conversation):
 
 
 @router.delete("/conversations/{cid}/turns/{turn_id}")
-def delete_turn(cid: str, turn_id: str, user: User = Depends(require_permissions("ai.use")), db: Session = Depends(get_db)):
+def delete_turn(cid: str, turn_id: str, user: User = Depends(require_ai_access), db: Session = Depends(get_db)):
     conversation = _conversation(db, user, cid)
     turn = db.get(ChatTurn, turn_id)
     if not turn or turn.conversation_id != conversation.id or turn.organization_id != user.organization_id or turn.user_id != user.id:

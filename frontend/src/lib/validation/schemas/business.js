@@ -92,6 +92,78 @@ export const studentAdmissionSchema = z.object({
   home_location_id: optionalText({ max: 80 }),
 });
 
+export const collegeDepartmentSchema = z.object({
+  name: requiredText("Department name", { min: 2, max: 180 }),
+  code: code("Department code", { min: 2, max: 30 }),
+  description: optionalText({ max: 1000 }),
+});
+
+export const collegeProgramSchema = z.object({
+  department_id: requiredText("Department"),
+  name: requiredText("Program name", { min: 2, max: 200 }),
+  code: code("Program code", { min: 2, max: 40 }),
+  degree_type: z.enum(["undergraduate", "postgraduate", "diploma", "certificate"]),
+  duration_semesters: numberInput({ label: "Program duration", min: 1, max: 16, integer: true }),
+});
+
+export const collegeCohortSchema = z.object({
+  program_id: requiredText("Program"),
+  name: requiredText("Batch name", { min: 2, max: 120 }),
+  code: code("Batch code", { min: 2, max: 50 }),
+  admission_year: numberInput({ label: "Admission year", min: 2000, max: 2200, integer: true }),
+  graduation_year: numberInput({ label: "Graduation year", min: 2000, max: 2200, integer: true }),
+  current_semester: numberInput({ label: "Current semester", min: 1, max: 16, integer: true }),
+  section: optionalText({ max: 20 }),
+}).refine((value) => value.graduation_year >= value.admission_year, {
+  path: ["graduation_year"], message: "Graduation year cannot be before admission year",
+});
+
+export const collegeBulkCohortSchema = z.object({
+  program_id: requiredText("Program"),
+  admission_year: numberInput({ label: "Admission year", min: 2000, max: 2200, integer: true }),
+  graduation_year: numberInput({ label: "Graduation year", min: 2000, max: 2200, integer: true }),
+  current_semester: numberInput({ label: "Current semester", min: 1, max: 16, integer: true }),
+  sections: requiredText("Sections", { max: 300 }).transform((value) => value
+    .split(",").map((item) => item.trim().toUpperCase() || "GENERAL").filter(Boolean)),
+  code_prefix: optionalText({ max: 36 }),
+}).superRefine((value, context) => {
+  if (value.graduation_year < value.admission_year) context.addIssue({ code: "custom", path: ["graduation_year"], message: "Graduation year cannot be before admission year" });
+  if (!value.sections.length) context.addIssue({ code: "custom", path: ["sections"], message: "Enter at least one section" });
+  if (value.sections.some((section) => section.length > 20)) context.addIssue({ code: "custom", path: ["sections"], message: "Each section must be 20 characters or fewer" });
+  if (new Set(value.sections).size !== value.sections.length) context.addIssue({ code: "custom", path: ["sections"], message: "Each section can appear only once" });
+});
+
+export const collegeTermSchema = z.object({
+  name: requiredText("Term name", { min: 2, max: 80 }),
+  academic_year: requiredText("Academic year", { min: 4, max: 20 }),
+  term_number: numberInput({ label: "Term number", min: 1, max: 16, integer: true }),
+  starts_on: dateInput({ label: "Start date" }),
+  ends_on: dateInput({ label: "End date" }),
+  status: z.enum(["planned", "active", "closed"]),
+  is_current: z.boolean().default(false),
+}).refine((value) => value.ends_on > value.starts_on, {
+  path: ["ends_on"], message: "End date must be after start date",
+});
+
+export const collegeCourseSchema = z.object({
+  department_id: requiredText("Department"),
+  name: requiredText("Course name", { min: 2, max: 200 }),
+  code: code("Course code", { min: 2, max: 40 }),
+  credits: numberInput({ label: "Credits", min: 0, max: 30, integer: true }),
+  course_type: z.enum(["core", "elective", "lab", "project", "audit"]),
+});
+
+export const collegeOfferingSchema = z.object({
+  term_id: requiredText("Term"),
+  course_id: requiredText("Course"),
+  cohort_id: requiredText("Batch"),
+  room: optionalText({ max: 60 }),
+});
+
+export const academicLifecycleSchema = z.object({
+  reason: requiredText("Reason", { min: 3, max: 500 }),
+});
+
 export const employeeSchema = z.object({
   employee_number: optionalText({ max: 50 }),
   first_name: requiredText("First name", { min: 1, max: 100 }),

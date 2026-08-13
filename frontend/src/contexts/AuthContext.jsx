@@ -7,12 +7,13 @@ import {
   logoutThunk,
   selectAuth,
 } from "@/store/slices/authSlice";
+import { baseApi } from "@/store/api/baseApi";
 
 const AuthCtx = createContext(null);
 
 export function AuthProvider({ children }) {
   const dispatch = useDispatch();
-  const { user, organization, permissions, roles, loading } = useSelector(selectAuth);
+  const { user, organization, permissions, roles, accessContext, loading } = useSelector(selectAuth);
 
   const refreshMe = useCallback(async () => {
     await dispatch(fetchMe());
@@ -21,6 +22,15 @@ export function AuthProvider({ children }) {
   useEffect(() => {
     // The browser sends the HttpOnly access cookie automatically.
     dispatch(fetchMe());
+  }, [dispatch]);
+
+  useEffect(() => {
+    const refreshAccess = () => {
+      dispatch(baseApi.util.resetApiState());
+      dispatch(fetchMe());
+    };
+    window.addEventListener("edvatiq:access-changed", refreshAccess);
+    return () => window.removeEventListener("edvatiq:access-changed", refreshAccess);
   }, [dispatch]);
 
   const login = async (email, password, orgSlug, mfaCode) => {
@@ -52,7 +62,7 @@ export function AuthProvider({ children }) {
 
   return (
     <AuthCtx.Provider
-      value={{ user, organization, permissions, roles, loading, login, registerOrg, logout, refreshMe, can, hasAny }}
+      value={{ user, organization, permissions, roles, accessContext, loading, login, registerOrg, logout, refreshMe, can, hasAny }}
     >
       {children}
     </AuthCtx.Provider>

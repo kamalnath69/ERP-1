@@ -40,7 +40,7 @@ export const platformInviteSchema = matchesField(z.object({
   confirm: z.string(),
 }), "password", "confirm", "Passwords do not match");
 
-export const registrationSchema = matchesField(z.object({
+const registrationFields = z.object({
   industry: z.enum(["gym", "salon", "clinic", "college"]),
   organization_name: requiredText("Organization name", { min: 2, max: 200 }),
   organization_slug: workspaceSlug,
@@ -56,7 +56,30 @@ export const registrationSchema = matchesField(z.object({
   plan: requiredText("Plan", { min: 2, max: 60 }),
   billing_interval: z.enum(["monthly", "annual"]),
   legal_accepted: z.boolean().refine(Boolean, "Agree to the Terms and acknowledge the policies to continue"),
+});
+
+export const registrationOrganizationSchema = registrationFields.pick({
+  organization_name: true,
+  organization_slug: true,
+  location_name: true,
+  city: true,
+});
+
+export const registrationOwnerSchema = matchesField(registrationFields.pick({
+  admin_first_name: true,
+  admin_last_name: true,
+  admin_email: true,
+  admin_phone: true,
+  admin_password: true,
+  admin_password_confirm: true,
 }), "admin_password", "admin_password_confirm", "Passwords do not match");
+
+export const registrationSchema = matchesField(
+  registrationFields,
+  "admin_password",
+  "admin_password_confirm",
+  "Passwords do not match",
+);
 
 export const myProfileSchema = z.object({
   first_name: requiredText("First name", { min: 1, max: 100 }),

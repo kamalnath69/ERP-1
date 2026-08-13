@@ -22,7 +22,7 @@ from app.services.cursor_pagination import decode_cursor, encode_cursor, page_re
 from app.services.email import send_email
 from app.services.platform_security import require_platform_permission
 from app.services.public_site import (
-    LEGAL_PROFILE_KEY, content_hash,
+    LEGAL_PROFILE_KEY, VERSION_TWO_DOCUMENTS, content_hash,
     current_legal_documents, legal_document_payload, legal_profile,
     materialize_legal_content, missing_legal_profile_fields, public_legal_payload,
 )
@@ -221,6 +221,65 @@ def update_legal_profile(body: LegalProfileBody, actor=Depends(require_platform_
     log_action(db, organization_id=None, user_id=actor.id, action="platform.legal_profile_updated", resource_type="platform_setting", resource_id=LEGAL_PROFILE_KEY)
     db.commit()
     return {"profile": values, "version": row.version}
+
+
+@super_router.post("/documents/version-two-drafts", status_code=status.HTTP_201_CREATED)
+def create_version_two_legal_drafts(actor=Depends(require_platform_permission("settings.manage")), db: Session = Depends(get_db)):
+    created = []
+    existing = []
+    blocked = []
+
+    for kind, spec in VERSION_TWO_DOCUMENTS.items():
+        version_two = db.execute(select(LegalDocument).where(
+            LegalDocument.document_type == kind,
+            LegalDocument.version == 2,
+        )).scalar_one_or_none()
+        if version_two:
+            existing.append(legal_document_payload(version_two))
+            continue
+
+        open_draft = db.execute(select(LegalDocument).where(
+            LegalDocument.document_type == kind,
+            LegalDocument.status == "draft",
+        )).scalar_one_or_none()
+        latest_version = db.scalar(select(func.max(LegalDocument.version)).where(
+            LegalDocument.document_type == kind,
+        ))
+        if open_draft or latest_version != 1:
+            blocked.append({
+                "type": kind,
+                "reason": "Finish the existing draft first" if open_draft else "Version 1 must exist before Version 2",
+            })
+            continue
+
+        body = spec["content"].strip()
+        row = LegalDocument(
+            document_type=kind,
+            version=2,
+            title=spec["title"],
+            content_markdown=body,
+            content_hash=content_hash(body),
+            status="draft",
+        )
+        db.add(row)
+        db.flush()
+        log_action(
+            db,
+            organization_id=None,
+            user_id=actor.id,
+            action="platform.legal_v2_draft_created",
+            resource_type="legal_document",
+            resource_id=row.id,
+            meta={"type": kind, "version": 2},
+        )
+        created.append(legal_document_payload(row))
+
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "Legal drafts changed. Refresh and try again")
+    return {"created": created, "existing": existing, "blocked": blocked}
 
 
 @super_router.post("/documents/{kind}/drafts", status_code=status.HTTP_201_CREATED)

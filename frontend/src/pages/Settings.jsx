@@ -352,6 +352,8 @@ export default function Settings() {
   const capability = SECTION_CAPABILITIES[active];
   const canManage = capability ? Boolean(data.capabilities[capability]) : undefined;
   const activeDirty = Boolean(drafts[active]);
+  const activeSchema = { identity: identitySettingsSchema, tax: taxSettingsSchema, security: securitySettingsSchema }[active];
+  const activeValid = !activeSchema || activeSchema.safeParse(forms[active]).success;
   const savingLocation = createLocationState.isLoading || updateLocationState.isLoading;
 
   return <>
@@ -433,6 +435,7 @@ export default function Settings() {
           {activeDirty && canManage && <DirtySaveBar
             section={activeSection?.label || sectionLabel(active)}
             saving={saveState.isLoading}
+            valid={activeValid}
             onDiscard={() => discard(active)}
             onSave={() => save(active)}
           />}
@@ -667,11 +670,11 @@ function AuditSection({ events }) {
   </div>;
 }
 
-function DirtySaveBar({ section, saving, onDiscard, onSave }) {
+function DirtySaveBar({ section, saving, valid, onDiscard, onSave }) {
   return <div className="sticky bottom-20 z-20 mx-auto w-full max-w-[860px] px-5 pb-5 sm:px-8 md:bottom-4 lg:px-10">
     <div className="flex flex-col gap-3 rounded-xl border bg-card/96 px-4 py-3 shadow-xl backdrop-blur sm:flex-row sm:items-center sm:justify-between">
       <div><div className="text-sm font-semibold">Unsaved changes</div><div className="mt-0.5 text-xs text-muted-foreground">Your {section.toLowerCase()} draft is saved in this browser session.</div></div>
-      <div className="flex gap-2"><Button type="button" variant="ghost" disabled={saving} onClick={onDiscard}>Discard</Button><Button type="button" loading={saving} loadingText="Saving..." onClick={onSave}>Save changes</Button></div>
+      <div className="flex gap-2"><Button type="button" variant="ghost" disabled={saving} onClick={onDiscard}>Discard</Button><Button type="button" disabled={!valid} loading={saving} loadingText="Saving..." onClick={onSave}>Save changes</Button></div>
     </div>
   </div>;
 }

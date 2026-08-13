@@ -2,7 +2,7 @@
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, status
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import and_, case, false, func, or_, select, true
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -20,6 +20,7 @@ from app.models import (
     User,
 )
 from app.services.business_access import ensure_location, filter_clients
+from app.services.access_policy import policy_v2_enabled, require_policy_domain
 from app.services.cursor_pagination import decode_cursor_or_legacy_id, encode_cursor
 from app.services.rbac import get_user_permissions
 
@@ -40,7 +41,15 @@ def _scoped_client_ids(db: Session, user: User, location_id: str | None):
     return filter_clients(statement, db, user).subquery()
 
 
-def _summary(db: Session, user: User, location_id: str | None, now: datetime) -> dict:
+def _summary(
+    db: Session,
+    user: User,
+    location_id: str | None,
+    now: datetime,
+    *,
+    can_view_financial: bool = True,
+    financial_client_ids: set[str] | None = None,
+) -> dict:
     scoped = _scoped_client_ids(db, user, location_id)
     organization = db.get(Organization, user.organization_id)
     is_college = bool(organization and organization.industry.value == "college")
@@ -64,13 +73,13 @@ def _summary(db: Session, user: User, location_id: str | None, now: datetime) ->
         func.coalesce(func.sum(case((base.c.status == "active", 1), else_=0)), 0),
         func.coalesce(func.sum(case((base.c.created_at >= (recent_since.date() if is_college else recent_since), 1), else_=0)), 0),
     )).one()
-    attention = db.scalar(select(func.count(func.distinct(ClientSignal.client_id))).where(
+    attention = 0 if is_college else db.scalar(select(func.count(func.distinct(ClientSignal.client_id))).where(
         ClientSignal.organization_id == user.organization_id,
         ClientSignal.client_id.in_(select(scoped.c.id)),
         ClientSignal.status.in_(["open", "snoozed"]),
         or_(ClientSignal.snoozed_until.is_(None), ClientSignal.snoozed_until <= now),
     )) or 0
-    members = db.scalar(select(func.count(func.distinct(Membership.client_id))).where(
+    members = 0 if is_college else db.scalar(select(func.count(func.distinct(Membership.client_id))).where(
         Membership.organization_id == user.organization_id,
         Membership.client_id.in_(select(scoped.c.id)),
         Membership.status.in_(["active", "frozen"]),
@@ -78,9 +87,14 @@ def _summary(db: Session, user: User, location_id: str | None, now: datetime) ->
     outstanding = db.scalar(select(func.coalesce(func.sum(SaleInvoice.total_paise - SaleInvoice.paid_paise), 0)).where(
         SaleInvoice.organization_id == user.organization_id,
         SaleInvoice.client_id.in_(select(scoped.c.id)),
+        (
+            true()
+            if financial_client_ids is None
+            else SaleInvoice.client_id.in_(financial_client_ids) if financial_client_ids else false()
+        ),
         SaleInvoice.status.notin_(["void", "refunded"]),
         SaleInvoice.total_paise > SaleInvoice.paid_paise,
-    )) or 0
+    )) or 0 if can_view_financial else 0
     return {
         "total": int(total or 0),
         "active": int(active or 0),
@@ -91,7 +105,14 @@ def _summary(db: Session, user: User, location_id: str | None, now: datetime) ->
     }
 
 
-def _aggregates(user: User, now: datetime):
+def _aggregates(
+    user: User,
+    now: datetime,
+    *,
+    include_financial: bool = True,
+    include_operations: bool = True,
+    financial_client_ids: set[str] | None = None,
+):
     sales = select(
         SaleInvoice.client_id.label("client_id"),
         func.coalesce(func.sum(SaleInvoice.paid_paise), 0).label("lifetime_value_paise"),
@@ -103,6 +124,12 @@ def _aggregates(user: User, now: datetime):
     ).where(
         SaleInvoice.organization_id == user.organization_id,
         SaleInvoice.client_id.is_not(None),
+        true() if include_financial else false(),
+        (
+            true()
+            if financial_client_ids is None
+            else SaleInvoice.client_id.in_(financial_client_ids) if financial_client_ids else false()
+        ),
     ).group_by(SaleInvoice.client_id).subquery()
 
     memberships = select(
@@ -111,6 +138,7 @@ def _aggregates(user: User, now: datetime):
     ).where(
         Membership.organization_id == user.organization_id,
         Membership.status.in_(["active", "frozen"]),
+        true() if include_operations else false(),
     ).group_by(Membership.client_id).subquery()
 
     appointments = select(
@@ -120,6 +148,7 @@ def _aggregates(user: User, now: datetime):
         Appointment.organization_id == user.organization_id,
         Appointment.starts_at >= now,
         Appointment.status.in_(["scheduled", "confirmed", "checked_in"]),
+        true() if include_operations else false(),
     ).group_by(Appointment.client_id).subquery()
 
     signals = select(
@@ -129,6 +158,7 @@ def _aggregates(user: User, now: datetime):
         ClientSignal.organization_id == user.organization_id,
         ClientSignal.status.in_(["open", "snoozed"]),
         or_(ClientSignal.snoozed_until.is_(None), ClientSignal.snoozed_until <= now),
+        true() if include_operations else false(),
     ).group_by(ClientSignal.client_id).subquery()
 
     photos = select(
@@ -158,7 +188,35 @@ def client_directory(
     now = datetime.now(timezone.utc)
     org = db.get(Organization, user.organization_id)
     permissions = get_user_permissions(db, user)
-    sales, memberships, appointments, signals, photos = _aggregates(user, now)
+    is_college = bool(org and org.industry.value == "college")
+    context = None
+    if is_college and policy_v2_enabled(db, user.organization_id):
+        context = require_policy_domain(db, user, "students", "view")
+    can_view_contact = not context or context.has_sensitive("college.students.contact.view")
+    can_view_financial = not context or (
+        context.level("clearance") != "none"
+        and context.has_sensitive("college.fees.view")
+    )
+    financial_profile_ids: set[str] | None = None
+    financial_client_ids: set[str] | None = None
+    if context and can_view_financial:
+        clearance_scope = context.scope("clearance")
+        if not clearance_scope.unrestricted:
+            financial_profile_ids = set(clearance_scope.full_student_ids)
+            financial_client_ids = set(db.execute(select(CollegeStudentProfile.client_id).where(
+                CollegeStudentProfile.organization_id == user.organization_id,
+                CollegeStudentProfile.id.in_(financial_profile_ids) if financial_profile_ids else false(),
+            )).scalars())
+    can_view_photos = "clients.media.view" in permissions and (
+        not context or context.has_sensitive("college.protected_fields.view")
+    )
+    sales, memberships, appointments, signals, photos = _aggregates(
+        user,
+        now,
+        include_financial=can_view_financial,
+        include_operations=not is_college,
+        financial_client_ids=financial_client_ids,
+    )
 
     statement = select(
         Client,
@@ -174,6 +232,7 @@ def client_directory(
         CollegeStudentProfile.roll_number,
         CollegeStudentProfile.current_semester,
         CollegeStudentProfile.status.label("student_status"),
+        CollegeStudentProfile.id.label("student_profile_id"),
         CollegeProgram.name.label("program_name"),
         CollegeCohort.name.label("cohort_name"),
     ).outerjoin(Location, Location.id == Client.home_location_id)
@@ -186,7 +245,6 @@ def client_directory(
     statement = statement.outerjoin(signals, signals.c.client_id == Client.id)
     statement = statement.outerjoin(photos, photos.c.client_id == Client.id)
     statement = filter_clients(statement.where(Client.organization_id == user.organization_id), db, user)
-    is_college = bool(org and org.industry.value == "college")
     if is_college:
         statement = statement.where(
             CollegeStudentProfile.id.is_not(None),
@@ -198,11 +256,13 @@ def client_directory(
     if query:
         normalized = " ".join(query.casefold().split())
         compact = "".join(character for character in normalized if character.isalnum())
-        searchable = func.lower(func.concat_ws(
-            " ", Client.first_name, Client.last_name, Client.phone, Client.email,
-            Client.client_number, CollegeStudentProfile.admission_number,
-            CollegeStudentProfile.roll_number,
-        ))
+        searchable_fields = [
+            Client.first_name, Client.last_name, Client.client_number,
+            CollegeStudentProfile.admission_number, CollegeStudentProfile.roll_number,
+        ]
+        if can_view_contact:
+            searchable_fields.extend([Client.phone, Client.email])
+        searchable = func.lower(func.concat_ws(" ", *searchable_fields))
         compact_name = func.regexp_replace(func.lower(func.concat(Client.first_name, Client.last_name)), r"[^[:alnum:]]+", "", "g")
         terms = [term for term in normalized.split(" ") if term]
         clauses = [searchable.contains(normalized)]
@@ -252,28 +312,30 @@ def client_directory(
     rows = db.execute(statement.order_by(Client.created_at.desc(), Client.id.desc()).limit(page_size + 1)).all()
     has_more = len(rows) > page_size
     rows = rows[:page_size]
-    can_view_photos = "clients.media.view" in permissions
     items = []
     for row in rows:
         client = row[0]
         photo_updated_at = row.photo_updated_at
+        row_can_view_financial = can_view_financial and (
+            financial_profile_ids is None or row.student_profile_id in financial_profile_ids
+        )
         items.append({
             "id": client.id,
             "client_number": client.client_number,
             "first_name": client.first_name,
             "last_name": client.last_name,
             "display_name": f"{client.first_name} {client.last_name}".strip(),
-            "phone": client.phone,
-            "email": client.email,
+            "phone": client.phone if can_view_contact else None,
+            "email": client.email if can_view_contact else None,
             "status": client.status,
             "tags": client.tags,
             "joined_on": client.joined_on,
             "last_visit_at": client.last_visit_at,
             "home_location_id": client.home_location_id,
             "location_name": row.location_name,
-            "lifetime_value_paise": int(row.lifetime_value_paise or 0),
-            "outstanding_paise": int(row.outstanding_paise or 0),
-            "invoice_count": int(row.invoice_count or 0),
+            "lifetime_value_paise": int(row.lifetime_value_paise or 0) if row_can_view_financial else None,
+            "outstanding_paise": int(row.outstanding_paise or 0) if row_can_view_financial else None,
+            "invoice_count": int(row.invoice_count or 0) if row_can_view_financial else None,
             "membership_ends_on": row.membership_ends_on,
             "next_appointment_at": row.next_appointment_at,
             "open_signal_count": int(row.open_signal_count or 0),
@@ -294,14 +356,18 @@ def client_directory(
             values={"at": rows[-1][0].created_at.isoformat(), "id": rows[-1][0].id},
         ) if has_more and rows else None,
         "has_more": has_more,
-        "summary": _summary(db, user, location_id, now),
+        "summary": _summary(
+            db, user, location_id, now,
+            can_view_financial=can_view_financial,
+            financial_client_ids=financial_client_ids,
+        ),
         "segment": segment,
         "industry": org.industry.value if org else None,
         "capabilities": {
-            "create": ("college.students.manage" in permissions) if is_college else ("clients.manage" in permissions),
-            "edit": ("college.students.manage" in permissions) if is_college else ("clients.manage" in permissions),
+            "create": (context.level("students") == "manage") if context else (("college.students.manage" in permissions) if is_college else ("clients.manage" in permissions)),
+            "edit": (context.level("students") in {"work", "manage"}) if context else (("college.students.manage" in permissions) if is_college else ("clients.manage" in permissions)),
             "view_media": can_view_photos,
-            "export": "reports.exports" in permissions,
+            "export": context.has_sensitive("college.data.export") if context else "reports.exports" in permissions,
         },
         "source_timestamp": now,
     }

@@ -406,7 +406,11 @@ def transfer_owner(org_id: str, body: OwnerTransferBody, actor=Depends(require_p
     _require_mfa(db, actor, body.mfa_code); _organization_or_404(db, org_id)
     target = db.get(User, body.new_owner_user_id)
     if not target or target.organization_id != org_id or not target.is_active: raise HTTPException(400, "Choose an active user in this organization")
-    owner_role = db.execute(select(Role).where(Role.organization_id == org_id, Role.slug == "owner")).scalar_one_or_none()
+    owner_role = db.execute(select(Role).where(
+        Role.organization_id == org_id,
+        Role.slug == "owner",
+        Role.is_system.is_(True),
+    )).scalar_one_or_none()
     if not owner_role: raise HTTPException(409, "This organization has no owner role")
     existing = db.execute(select(UserRole).where(UserRole.role_id == owner_role.id)).scalars().all()
     if not db.execute(select(UserRole).where(UserRole.role_id == owner_role.id, UserRole.user_id == target.id)).scalar_one_or_none(): db.add(UserRole(role_id=owner_role.id, user_id=target.id))

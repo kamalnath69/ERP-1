@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.deps import require_entitlements, require_permissions
-from app.models import SaleInvoice, SalePayment
+from app.models import CollegeStudentProfile, Organization, SaleInvoice, SalePayment
 from app.services.business_access import (
     allowed_client_ids,
     ensure_location,
@@ -21,9 +21,22 @@ from app.services.business_access import (
     organization_for,
 )
 from app.services.entitlements import entitlement_value
+from app.services.access_policy import policy_v2_enabled, require_policy_domain, resolve_policy_context
 from app.services.rbac import get_user_permissions
 
 router = APIRouter(prefix="/reports", tags=["reports"])
+
+
+def _require_financial_visibility(db: Session, user, organization) -> None:
+    if organization.industry.value != "college":
+        return
+    context = resolve_policy_context(db, user)
+    if not context.active or not context.has_sensitive("college.fees.view"):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Finance access is required to view College fee amounts",
+        )
+    require_policy_domain(db, user, "clearance", "view")
 
 
 def _period_bounds(org_timezone: str, start: date, end: date) -> tuple[datetime, datetime]:
@@ -38,11 +51,30 @@ def _period_bounds(org_timezone: str, start: date, end: date) -> tuple[datetime,
 
 
 def _scope_invoices(statement, db: Session, user, location_id: str | None):
-    statement = filter_locations(statement, SaleInvoice, db, user)
-    if location_id:
-        ensure_location(db, user, location_id)
-        statement = statement.where(SaleInvoice.location_id == location_id)
-    clients = allowed_client_ids(db, user)
+    organization = db.get(Organization, user.organization_id)
+    is_college_policy = bool(
+        organization
+        and organization.industry.value == "college"
+        and policy_v2_enabled(db, user.organization_id)
+    )
+    if is_college_policy:
+        context = require_policy_domain(db, user, "clearance", "view")
+        scope = context.scope("clearance")
+        clients = None if scope.unrestricted else set(db.execute(select(
+            CollegeStudentProfile.client_id,
+        ).where(
+            CollegeStudentProfile.organization_id == user.organization_id,
+            CollegeStudentProfile.id.in_(scope.student_ids) if scope.student_ids else false(),
+        )).scalars())
+        if location_id:
+            ensure_location(db, user, location_id)
+            statement = statement.where(SaleInvoice.location_id == location_id)
+    else:
+        statement = filter_locations(statement, SaleInvoice, db, user)
+        if location_id:
+            ensure_location(db, user, location_id)
+            statement = statement.where(SaleInvoice.location_id == location_id)
+        clients = allowed_client_ids(db, user)
     if clients is not None:
         statement = statement.where(SaleInvoice.client_id.in_(clients) if clients else false())
     return statement
@@ -133,6 +165,7 @@ def summary(
     db: Session = Depends(get_db),
 ):
     org = organization_for(db, user)
+    _require_financial_visibility(db, user, org)
     local_today = datetime.now(ZoneInfo(org.timezone)).date()
     start = start or local_today.replace(day=1)
     end = end or local_today
@@ -230,6 +263,10 @@ def sales_excel(
     db: Session = Depends(get_db),
 ):
     org = organization_for(db, user)
+    _require_financial_visibility(db, user, org)
+    context = resolve_policy_context(db, user) if org.industry.value == "college" else None
+    if context and not context.has_sensitive("college.data.export"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "College export access is required")
     local_today = datetime.now(ZoneInfo(org.timezone)).date()
     start = start or local_today.replace(day=1)
     end = end or local_today
@@ -281,6 +318,10 @@ def sales_pdf(
     db: Session = Depends(get_db),
 ):
     org = organization_for(db, user)
+    _require_financial_visibility(db, user, org)
+    context = resolve_policy_context(db, user) if org.industry.value == "college" else None
+    if context and not context.has_sensitive("college.data.export"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "College export access is required")
     local_today = datetime.now(ZoneInfo(org.timezone)).date()
     start = start or local_today.replace(day=1)
     end = end or local_today

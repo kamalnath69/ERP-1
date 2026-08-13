@@ -7,14 +7,17 @@ from fastapi.testclient import TestClient
 from sqlalchemy import delete, select
 
 from app.ai.fast_queries import _summary_text
+from app.ai.tools import tool_college_students
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.db.seed import ensure_missing_business_roles, ensure_permissions, sync_granular_role_permissions
 from app.models import (
-    CollegeApplicationStageEvent, CollegeCareerEvidence, CollegeStudentProfile,
-    Organization, Permission, Role, RolePermission, User,
+    AuditLog, CollegeApplicationStageEvent, CollegeCareerEvidence, CollegeDataConnector,
+    CollegeDepartment, CollegeStudentProfile, Organization, Permission, Role,
+    RolePermission, User,
 )
 from app.services.college_access import CollegeAccess
+from app.services.college_imports import commit_run, stage_rows
 from app.services.college_placement import evaluate_eligibility
 from app.services.college_jobs import _public_host, _url_origin
 from server import app
@@ -84,6 +87,374 @@ def _post(path, headers, payload, expected=201):
     return response.json()
 
 
+def test_college_academic_structure_lifecycle_bulk_and_multi_cohort_scope(college_account):
+    headers, context, organization_id = college_account
+    location_id = context["locations"][0]["id"]
+    department = _post("/api/college/departments", headers, {
+        "name": "Artificial Intelligence and Machine Learning",
+        "code": "AIML",
+        "location_id": location_id,
+    })
+    program = _post("/api/college/programs", headers, {
+        "department_id": department["id"],
+        "name": "B.Tech Artificial Intelligence",
+        "code": "BTECH-AIML",
+        "degree_type": "undergraduate",
+        "duration_semesters": 8,
+    })
+    bulk_body = {
+        "program_id": program["id"],
+        "admission_year": 2023,
+        "graduation_year": 2027,
+        "current_semester": 7,
+        "sections": ["a", " B "],
+        "idempotency_key": "academic-bulk-aiml-2027",
+    }
+    bulk = _post("/api/college/cohorts/bulk", headers, bulk_body)
+    assert [row["section"] for row in bulk["items"]] == ["A", "B"]
+    replay = _post("/api/college/cohorts/bulk", headers, bulk_body)
+    assert replay["replayed"] is True
+    changed_replay = client.post("/api/college/cohorts/bulk", headers=headers, json={
+        **bulk_body, "sections": ["A", "C"],
+    })
+    assert changed_replay.status_code == 409
+
+    stale_update = client.patch(f"/api/college/departments/{department['id']}", headers=headers, json={
+        "version": department["version"] + 1,
+        "name": "School of AI",
+    })
+    assert stale_update.status_code == 409
+    updated_department = client.patch(
+        f"/api/college/departments/{department['id']}", headers=headers,
+        json={"version": department["version"], "name": "School of AI", "reason": "Academic council update"},
+    )
+    assert updated_department.status_code == 200, updated_department.text
+    assert updated_department.json()["version"] == department["version"] + 1
+
+    blocked_program = client.post(f"/api/college/programs/{program['id']}/archive", headers=headers, json={
+        "version": program["version"], "reason": "Lifecycle test",
+    })
+    assert blocked_program.status_code == 409
+
+    section_a, section_b = bulk["items"]
+    general = _post("/api/college/cohorts", headers, {
+        "program_id": program["id"],
+        "name": "Artificial Intelligence 2028",
+        "code": "AIML-2028",
+        "admission_year": 2024,
+        "graduation_year": 2028,
+        "current_semester": 5,
+        "section": "",
+    })
+    assert general["section"] == "GENERAL"
+
+    def admit(number, first_name, cohort):
+        return _post("/api/college/students", headers, {
+            "first_name": first_name,
+            "last_name": "Student",
+            "email": f"{number.lower()}@example.edu",
+            "home_location_id": location_id,
+            "admission_number": number,
+            "program_id": program["id"],
+            "cohort_id": cohort["id"],
+            "current_semester": cohort["current_semester"],
+            "admitted_on": "2024-07-01",
+        })
+
+    first = admit("ADM-AIML-001", "Anika", section_a)
+    second = admit("ADM-AIML-002", "Bharat", general)
+    blocked_cohort = client.post(f"/api/college/cohorts/{section_a['id']}/archive", headers=headers, json={
+        "version": section_a["version"], "reason": "Contains an active student",
+    })
+    assert blocked_cohort.status_code == 409
+    archived = client.post(f"/api/college/cohorts/{section_b['id']}/archive", headers=headers, json={
+        "version": section_b["version"], "reason": "Section was not opened",
+    })
+    assert archived.status_code == 200, archived.text
+    restored = client.post(f"/api/college/cohorts/{section_b['id']}/restore", headers=headers, json={
+        "version": archived.json()["version"], "reason": "Admissions reopened",
+    })
+    assert restored.status_code == 200, restored.text
+
+    cohort_params = [
+        ("cohort_ids", section_a["id"]),
+        ("cohort_ids", general["id"]),
+        ("limit", "25"),
+    ]
+    students = client.get("/api/college/student-intelligence", headers=headers, params=cohort_params)
+    assert students.status_code == 200, students.text
+    assert {row["id"] for row in students.json()["items"]} == {first["id"], second["id"]}
+    dashboard = client.get("/api/college/placement-dashboard", headers=headers, params=cohort_params[:2])
+    assert dashboard.status_code == 200, dashboard.text
+    assert dashboard.json()["metrics"]["participating_students"] == 2
+
+    with SessionLocal() as db:
+        grants = {
+            row.slug: set(db.execute(
+                select(Permission.code)
+                .join(RolePermission, RolePermission.permission_id == Permission.id)
+                .where(RolePermission.role_id == row.id)
+            ).scalars())
+            for row in db.execute(select(Role).where(
+                Role.organization_id == organization_id,
+                Role.slug.in_(("principal", "academic-admin")),
+            )).scalars()
+        }
+        assert "college.academics.view" in grants["principal"]
+        assert "college.academics.manage" not in grants["principal"]
+        assert "college.academics.manage" in grants["academic-admin"]
+        archive_audit = db.execute(select(AuditLog).where(
+            AuditLog.organization_id == organization_id,
+            AuditLog.action == "college.cohort.archive",
+            AuditLog.resource_id == section_b["id"],
+        )).scalar_one()
+        assert archive_audit.meta["changes"]["reason"] == "Section was not opened"
+
+
+def test_enterprise_policy_scopes_hod_data_fields_dashboard_and_finance(college_account):
+    owner_headers, context, organization_id = college_account
+    location_id = context["locations"][0]["id"]
+
+    def structure(code, name):
+        department = _post("/api/college/departments", owner_headers, {
+            "name": name, "code": code, "location_id": location_id,
+        })
+        program = _post("/api/college/programs", owner_headers, {
+            "department_id": department["id"], "name": f"B.E. {name}",
+            "code": f"BE-{code}", "degree_type": "undergraduate", "duration_semesters": 8,
+        })
+        return department, program
+
+    ece, ece_program = structure("ECE", "Electronics and Communication Engineering")
+    _cse, cse_program = structure("CSE", "Computer Science Engineering")
+
+    def cohort(program, code, section):
+        return _post("/api/college/cohorts", owner_headers, {
+            "program_id": program["id"], "name": f"{code} 2027 {section}",
+            "code": f"{code}-2027-{section}", "admission_year": 2023,
+            "graduation_year": 2027, "current_semester": 7, "section": section,
+        })
+
+    ece_a = cohort(ece_program, "ECE", "A")
+    ece_b = cohort(ece_program, "ECE", "B")
+    cse_a = cohort(cse_program, "CSE", "A")
+
+    def student(program, selected_cohort, admission, first_name):
+        return _post("/api/college/students", owner_headers, {
+            "first_name": first_name, "last_name": "Student",
+            "email": f"{admission.lower()}@example.edu", "phone": "9876543210",
+            "date_of_birth": "2005-01-10", "gender": "female",
+            "guardian": {"name": "Private Guardian", "phone": "9000000000"},
+            "home_location_id": location_id, "admission_number": admission,
+            "program_id": program["id"], "cohort_id": selected_cohort["id"],
+            "current_semester": 7, "admitted_on": "2023-07-01",
+        })
+
+    student_a = student(ece_program, ece_a, "ECE-A-001", "Asha")
+    student_b = student(ece_program, ece_b, "ECE-B-001", "Bina")
+    student_c = student(cse_program, cse_a, "CSE-A-001", "Charan")
+
+    hod_email = f"hod-{uuid4().hex[:10]}@example.edu"
+    with SessionLocal() as db:
+        hod_role = db.execute(select(Role).where(
+            Role.organization_id == organization_id, Role.slug == "hod",
+        )).scalar_one()
+        # A legacy/custom role may still carry generic sales grants. College
+        # Finance must remain an explicit policy safeguard regardless.
+        for code in ("sales.view", "sales.manage", "payments.record"):
+            permission = db.execute(select(Permission).where(Permission.code == code)).scalar_one()
+            if not db.execute(select(RolePermission).where(
+                RolePermission.role_id == hod_role.id,
+                RolePermission.permission_id == permission.id,
+            )).scalar_one_or_none():
+                db.add(RolePermission(role_id=hod_role.id, permission_id=permission.id))
+        db.commit()
+        hod_role_id = hod_role.id
+
+    created = client.post("/api/users", headers=owner_headers, json={
+        "email": hod_email, "first_name": "Ece", "last_name": "Hod",
+        "password": "Testing@123", "role_ids": [hod_role_id], "location_ids": [],
+    })
+    assert created.status_code == 201, created.text
+    hod_user_id = created.json()["id"]
+
+    current_policy = client.get(f"/api/access/users/{hod_user_id}/policy", headers=owner_headers)
+    assert current_policy.status_code == 200, current_policy.text
+    policy_body = {
+        "role_ids": [hod_role_id],
+        "maximum_reach": [{"scope_type": "department", "scope_value": ece["id"]}],
+        "domain_levels": {
+            "students": "view", "academics": "view", "attendance": "work",
+            "assessments": "work", "readiness": "view", "placements": "view",
+            "reports": "view",
+        },
+        "domain_scope_limits": {
+            domain: [{"scope_type": "cohort", "scope_value": ece_a["id"]}]
+            for domain in ("students", "readiness", "placements")
+        },
+        "sensitive_capabilities": [], "ai_enabled": True,
+        "review_note": "ECE HOD with Section A student responsibility",
+        "version": current_policy.json()["version"],
+    }
+    saved = client.put(
+        f"/api/access/users/{hod_user_id}/policy", headers=owner_headers, json=policy_body,
+    )
+    assert saved.status_code == 200, saved.text
+
+    with SessionLocal() as db:
+        hod = db.get(User, hod_user_id)
+        hod.email_verified = True
+        db.commit()
+
+    login = client.post("/api/auth/login", json={
+        "email": hod_email, "password": "Testing@123",
+        "org_slug": context["organization"]["slug"],
+    })
+    assert login.status_code == 200, login.text
+    hod_headers = {"Authorization": f"Bearer {login.cookies.get(settings.ACCESS_COOKIE_NAME)}"}
+
+    hierarchy = client.get("/api/college/academic-hierarchy", headers=hod_headers)
+    assert hierarchy.status_code == 200, hierarchy.text
+    assert {row["id"] for row in hierarchy.json()["departments"]} == {ece["id"]}
+
+    cohorts = client.get("/api/college/cohorts/page", headers=hod_headers)
+    assert cohorts.status_code == 200, cohorts.text
+    assert {row["id"] for row in cohorts.json()["items"]} == {ece_a["id"], ece_b["id"]}
+
+    directory = client.get("/api/clients", headers=hod_headers)
+    assert directory.status_code == 200, directory.text
+    assert [row["id"] for row in directory.json()["items"]] == [student_a["client_id"]]
+    visible = directory.json()["items"][0]
+    assert visible["email"] is None
+    assert visible["phone"] is None
+    assert visible["date_of_birth"] is None
+    assert visible["gender"] is None
+
+    for hidden_student in (student_b, student_c):
+        response = client.get(f"/api/clients/{hidden_student['client_id']}", headers=hod_headers)
+        assert response.status_code == 404
+
+    workspace = client.get(f"/api/clients/{student_a['client_id']}/workspace", headers=hod_headers)
+    assert workspace.status_code == 200, workspace.text
+    assert workspace.json()["client"]["date_of_birth"] is None
+    assert workspace.json()["signals"] == []
+    assert workspace.json()["actions"]["view_billing"] is False
+
+    dashboard = client.get("/api/college/placement-dashboard", headers=hod_headers)
+    assert dashboard.status_code == 200, dashboard.text
+    assert {row["id"] for row in dashboard.json()["filters"]["cohorts"]} == {ece_a["id"]}
+
+    finance = client.get("/api/sales/workspace", headers=hod_headers)
+    assert finance.status_code == 403
+
+    latest = client.get(f"/api/access/users/{hod_user_id}/policy", headers=owner_headers).json()
+    revoked = client.put(
+        f"/api/access/users/{hod_user_id}/policy", headers=owner_headers,
+        json={**policy_body, "domain_levels": {}, "ai_enabled": False, "version": latest["version"]},
+    )
+    assert revoked.status_code == 200, revoked.text
+    stale = client.get("/api/clients", headers=hod_headers)
+    assert stale.status_code == 401
+    assert stale.json()["error"]["code"] == "access_changed"
+
+
+def test_college_structure_erp_linking_requires_review_and_preserves_manual_overrides(college_account):
+    headers, context, organization_id = college_account
+    department = _post("/api/college/departments", headers, {
+        "name": "Information Technology",
+        "code": "IT",
+        "location_id": context["locations"][0]["id"],
+    })
+    connector = _post("/api/college/integrations", headers, {
+        "name": "Academic ERP",
+        "base_url": "https://erp.example.edu/api",
+        "auth_mode": "bearer",
+        "mapping": {},
+        "pagination": {},
+        "sync_interval_hours": 6,
+    })
+    source_row = {
+        "external_id": "erp-department-it",
+        "name": "Department of Information Technology",
+        "code": "IT",
+        "source_updated_at": "2026-08-13T08:00:00Z",
+    }
+
+    with SessionLocal() as db:
+        owner = db.execute(select(User).where(User.organization_id == organization_id)).scalar_one()
+        run = stage_rows(
+            db, organization_id=organization_id, user_id=owner.id,
+            source_type="erp", resource_type="departments", rows=[source_row], mapping={},
+            connector_id=connector["id"], idempotency_key="erp-it-collision-1",
+        )
+        commit_run(db, run)
+        db.commit()
+        assert run.committed_count == 0
+        assert "review and link" in run.validation_errors[0]["errors"][0]
+
+    link = _post("/api/college/integrations/structure-links", headers, {
+        "connector_id": connector["id"],
+        "resource_type": "departments",
+        "external_id": source_row["external_id"],
+        "local_resource_id": department["id"],
+        "manual_override_fields": [],
+    })
+    with SessionLocal() as db:
+        owner = db.execute(select(User).where(User.organization_id == organization_id)).scalar_one()
+        run = stage_rows(
+            db, organization_id=organization_id, user_id=owner.id,
+            source_type="erp", resource_type="departments", rows=[source_row], mapping={},
+            connector_id=connector["id"], idempotency_key="erp-it-linked-2",
+        )
+        commit_run(db, run)
+        db.commit()
+        assert run.committed_count == 1
+        updated = db.get(CollegeDepartment, department["id"])
+        assert updated.name == source_row["name"]
+
+    override = client.patch(
+        f"/api/college/integrations/structure-links/{link['id']}", headers=headers,
+        json={"manual_override_fields": ["name"]},
+    )
+    assert override.status_code == 200, override.text
+    with SessionLocal() as db:
+        owner = db.execute(select(User).where(User.organization_id == organization_id)).scalar_one()
+        run = stage_rows(
+            db, organization_id=organization_id, user_id=owner.id,
+            source_type="erp", resource_type="departments",
+            rows=[{
+                **source_row,
+                "name": "ERP must not replace this name",
+                "source_updated_at": "2026-08-13T09:00:00Z",
+            }], mapping={},
+            connector_id=connector["id"], idempotency_key="erp-it-override-3",
+        )
+        commit_run(db, run)
+        db.commit()
+        preserved = db.get(CollegeDepartment, department["id"])
+        assert preserved.name == source_row["name"]
+        assert preserved.is_active is True
+
+    with SessionLocal() as db:
+        owner = db.execute(select(User).where(User.organization_id == organization_id)).scalar_one()
+        stale = stage_rows(
+            db, organization_id=organization_id, user_id=owner.id,
+            source_type="erp", resource_type="departments",
+            rows=[{
+                **source_row,
+                "name": "Stale ERP department name",
+                "source_updated_at": "2026-08-13T08:30:00Z",
+            }], mapping={},
+            connector_id=connector["id"], idempotency_key="erp-it-stale-4",
+        )
+        commit_run(db, stale)
+        db.commit()
+        assert stale.committed_count == 0
+        assert "older than the latest" in stale.validation_errors[0]["errors"][0]
+        preserved = db.get(CollegeDepartment, department["id"])
+        assert preserved.name == source_row["name"]
+
+
 def test_college_workspace_connects_academics_students_attendance_results_and_fees(college_account):
     headers, context, organization_id = college_account
     location_id = context["locations"][0]["id"]
@@ -121,6 +492,7 @@ def test_college_workspace_connects_academics_students_attendance_results_and_fe
         "current_semester": 1,
         "section": "A",
     })
+    assert cohort["graduation_year"] == 2029
     course = _post("/api/college/courses", headers, {
         "department_id": department["id"],
         "name": "Programming Fundamentals",
@@ -469,6 +841,7 @@ def test_college_placement_intelligence_is_evidence_backed_and_audited(college_a
         "program_id": program["id"], "name": "CSE 2026 / A", "code": "CSE-2026-A",
         "admission_year": 2023, "current_semester": 7, "section": "A",
     })
+    assert cohort["graduation_year"] == 2027
 
     def admit(number, first_name):
         return _post("/api/college/students", headers, {
@@ -499,6 +872,50 @@ def test_college_placement_intelligence_is_evidence_backed_and_audited(college_a
             "published_on": "2026-07-15",
         })
         assert response.status_code == 201, response.text
+
+    hierarchy = client.get("/api/college/academic-hierarchy", headers=headers)
+    assert hierarchy.status_code == 200, hierarchy.text
+    batch = next(row for row in hierarchy.json()["items"] if row["graduation_year"] == 2027)
+    hierarchy_department = next(row for row in batch["departments"] if row["id"] == department["id"])
+    assert hierarchy_department["student_count"] == 2
+    assert hierarchy_department["section_count"] == 1
+    assert hierarchy_department["programs"][0]["sections"][0]["section"] == "A"
+
+    cohort_page = client.get("/api/college/cohorts/page", headers=headers, params={
+        "graduation_year": 2027,
+        "department_id": department["id"],
+        "cohort_id": cohort["id"],
+    })
+    assert cohort_page.status_code == 200, cohort_page.text
+    assert len(cohort_page.json()["items"]) == 1
+    assert cohort_page.json()["items"][0]["department_code"] == "CSE"
+    assert cohort_page.json()["items"][0]["section"] == "A"
+
+    academic_order = client.get("/api/college/student-intelligence", headers=headers, params={
+        "graduation_year": 2027,
+        "department_id": department["id"],
+        "cohort_id": cohort["id"],
+        "placement_status": "unplaced",
+        "sort": "academics_desc",
+    })
+    assert academic_order.status_code == 200, academic_order.text
+    assert [row["name"] for row in academic_order.json()["items"]] == ["Asha Student", "Bala Student"]
+    assert all(row["graduation_year"] == 2027 and row["section"] == "A" for row in academic_order.json()["items"])
+
+    with SessionLocal() as db:
+        owner = db.execute(select(User).where(User.organization_id == organization_id)).scalar_one()
+        ai_result = tool_college_students(
+            db,
+            owner,
+            department="CSE",
+            section="A",
+            graduation_years=[2027],
+            placement_status="unplaced",
+            sort="academics_desc",
+        )
+        assert [row["name"] for row in ai_result["items"]] == ["Asha Student", "Bala Student"]
+        assert ai_result["resolved_scope"]["department"]["id"] == department["id"]
+        assert ai_result["resolved_scope"]["graduation_years"] == [2027]
 
     attendance = client.post(f"/api/college/students/{ready_student['id']}/attendance-snapshots", headers=headers, json={
         "scope": "overall", "classes_held": 120, "classes_attended": 108,

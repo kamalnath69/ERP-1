@@ -2,17 +2,34 @@
 from datetime import datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import Field, model_validator
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.schemas.validation import RequestModel
 from app.core.deps import require_permissions
+from app.models import Organization
+from app.services.access_policy import policy_v2_enabled, require_policy_domain
+from app.services.rbac import get_user_permissions
 from app.services.sales import create_sale, invoice_detail, record_payment, sales_workspace, void_invoice
 
 
 router = APIRouter(prefix="/sales", tags=["sales"])
+
+
+def _require_college_finance(db: Session, user, *, manage: bool = False) -> None:
+    organization = db.get(Organization, user.organization_id) if user.organization_id else None
+    if not organization or getattr(organization.industry, "value", organization.industry) != "college":
+        return
+    required = "college.fees.manage" if manage else "college.fees.view"
+    if policy_v2_enabled(db, user.organization_id):
+        context = require_policy_domain(db, user, "clearance", "work" if manage else "view")
+        allowed = context.has_sensitive(required)
+    else:
+        allowed = required in get_user_permissions(db, user)
+    if not allowed:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "College Finance access is required")
 
 
 class InvoiceLineBody(RequestModel):
@@ -65,6 +82,7 @@ def workspace(
     user=Depends(require_permissions("sales.view")),
     db: Session = Depends(get_db),
 ):
+    _require_college_finance(db, user)
     return sales_workspace(
         db,
         user,
@@ -86,6 +104,7 @@ def list_compatibility(
     db: Session = Depends(get_db),
 ):
     """Compatibility list while callers move to the richer workspace contract."""
+    _require_college_finance(db, user)
     return sales_workspace(
         db,
         user,
@@ -97,19 +116,23 @@ def list_compatibility(
 
 @router.get("/{invoice_id}")
 def detail(invoice_id: str, user=Depends(require_permissions("sales.view")), db: Session = Depends(get_db)):
+    _require_college_finance(db, user)
     return invoice_detail(db, user, invoice_id)
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
 def create(body: InvoiceBody, user=Depends(require_permissions("sales.manage")), db: Session = Depends(get_db)):
+    _require_college_finance(db, user, manage=True)
     return create_sale(db, user, body)
 
 
 @router.post("/{invoice_id}/payments", status_code=status.HTTP_201_CREATED)
 def payment(invoice_id: str, body: PaymentBody, user=Depends(require_permissions("payments.record")), db: Session = Depends(get_db)):
+    _require_college_finance(db, user, manage=True)
     return record_payment(db, user, invoice_id, body)
 
 
 @router.post("/{invoice_id}/void")
 def void(invoice_id: str, body: VoidInvoiceBody, user=Depends(require_permissions("sales.manage")), db: Session = Depends(get_db)):
+    _require_college_finance(db, user, manage=True)
     return void_invoice(db, user, invoice_id, body)

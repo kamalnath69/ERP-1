@@ -20,6 +20,22 @@ def organization_for(db: Session, user: User) -> Organization:
 
 def allowed_location_ids(db: Session, user: User) -> set[str] | None:
     """None means all tenant locations; a set is an explicit location boundary."""
+    from app.models import Organization
+    from app.services.access_policy import policy_v2_enabled, resolve_policy_context
+
+    organization = db.get(Organization, user.organization_id) if user.organization_id else None
+    if (
+        organization
+        and getattr(organization.industry, "value", organization.industry) == "college"
+        and policy_v2_enabled(db, user.organization_id)
+    ):
+        context = resolve_policy_context(db, user)
+        if not context.active:
+            return set()
+        if context.maximum_scope.unrestricted:
+            return None
+        return set(context.maximum_scope.location_ids)
+
     rows = db.execute(select(AccessScope).where(
         AccessScope.organization_id == user.organization_id,
         AccessScope.user_id == user.id,
@@ -48,6 +64,27 @@ def client_scope_mode(db: Session, user: User) -> str:
 
 def allowed_client_ids(db: Session, user: User) -> set[str] | None:
     """None means all clients in allowed locations; a set is an explicit boundary."""
+    from app.models import CollegeStudentProfile, Organization
+    from app.services.access_policy import policy_v2_enabled, resolve_policy_context
+
+    organization = db.get(Organization, user.organization_id) if user.organization_id else None
+    if (
+        organization
+        and getattr(organization.industry, "value", organization.industry) == "college"
+        and policy_v2_enabled(db, user.organization_id)
+    ):
+        context = resolve_policy_context(db, user)
+        if not context.active:
+            return set()
+        if context.maximum_scope.unrestricted:
+            return None
+        if not context.maximum_scope.student_ids:
+            return set()
+        return set(db.execute(select(CollegeStudentProfile.client_id).where(
+            CollegeStudentProfile.organization_id == user.organization_id,
+            CollegeStudentProfile.id.in_(context.maximum_scope.student_ids),
+        )).scalars())
+
     mode = client_scope_mode(db, user)
     if mode == "all":
         return None
@@ -83,6 +120,8 @@ def allowed_client_ids(db: Session, user: User) -> set[str] | None:
 
 
 def ensure_location(db: Session, user: User, location_id: str) -> Location:
+    from app.services.access_policy import policy_v2_enabled
+
     location = db.execute(select(Location).where(
         Location.id == location_id, Location.organization_id == user.organization_id, Location.is_active.is_(True)
     )).scalar_one_or_none()
@@ -90,6 +129,14 @@ def ensure_location(db: Session, user: User, location_id: str) -> Location:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Location not found")
     allowed = allowed_location_ids(db, user)
     if allowed is not None and location.id not in allowed:
+        organization = db.get(Organization, user.organization_id)
+        is_college_policy = (
+            organization
+            and getattr(organization.industry, "value", organization.industry) == "college"
+            and policy_v2_enabled(db, user.organization_id)
+        )
+        if is_college_policy:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Location not found")
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Location is outside your access")
     return location
 
@@ -97,6 +144,24 @@ def ensure_location(db: Session, user: User, location_id: str) -> Location:
 def ensure_client_access(db: Session, user: User, client):
     if client.organization_id != user.organization_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Client not found")
+    from app.models import CollegeStudentProfile, Organization
+    from app.services.access_policy import policy_v2_enabled, resolve_policy_context
+
+    organization = db.get(Organization, user.organization_id) if user.organization_id else None
+    if (
+        organization
+        and getattr(organization.industry, "value", organization.industry) == "college"
+        and policy_v2_enabled(db, user.organization_id)
+    ):
+        context = resolve_policy_context(db, user)
+        scope = context.scope("students")
+        profile = db.execute(select(CollegeStudentProfile).where(
+            CollegeStudentProfile.organization_id == user.organization_id,
+            CollegeStudentProfile.client_id == client.id,
+        )).scalar_one_or_none()
+        if not context.active or context.level("students") == "none" or not profile or not scope.contains("student", profile.id):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Student not found")
+        return client
     if client.home_location_id:
         ensure_location(db, user, client.home_location_id)
     allowed = allowed_client_ids(db, user)
@@ -106,11 +171,28 @@ def ensure_client_access(db: Session, user: User, client):
 
 
 def filter_clients(statement, db: Session, user: User, model=None):
-    from app.models import Client
+    from app.models import Client, CollegeStudentProfile, Organization
+    from app.services.access_policy import policy_v2_enabled, resolve_policy_context
     model = model or Client
     # Tenant isolation is mandatory here so callers cannot accidentally rely on
     # location/client scopes as a substitute for the organization boundary.
     statement = statement.where(model.organization_id == user.organization_id)
+    organization = db.get(Organization, user.organization_id) if user.organization_id else None
+    if (
+        organization
+        and getattr(organization.industry, "value", organization.industry) == "college"
+        and policy_v2_enabled(db, user.organization_id)
+    ):
+        context = resolve_policy_context(db, user)
+        if not context.active or context.level("students") == "none":
+            return statement.where(false())
+        scope = context.scope("students")
+        if not scope.unrestricted:
+            statement = statement.where(model.id.in_(select(CollegeStudentProfile.client_id).where(
+                CollegeStudentProfile.organization_id == user.organization_id,
+                CollegeStudentProfile.id.in_(scope.student_ids) if scope.student_ids else false(),
+            )))
+        return statement
     locations = allowed_location_ids(db, user)
     if locations is not None:
         statement = statement.where(or_(model.home_location_id.in_(locations), model.home_location_id.is_(None)))

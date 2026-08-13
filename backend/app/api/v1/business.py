@@ -16,12 +16,13 @@ from app.schemas.validation import RequestModel, valid_phone
 from app.core.deps import get_current_user, require_any_permission, require_permissions
 from app.core.security import hash_password
 from app.models import (
-    AccessScope, Appointment, CatalogItem, Category, Client, ClientMedia, Document, Employee, EmployeeLocation,
+    AccessScope, Appointment, CatalogItem, Category, Client, ClientMedia, CollegeStudentProfile, Document, Employee, EmployeeLocation,
     Encounter, FitnessMeasurement, GymCheckIn, Location, Membership, Notification, Organization, PatientProfile,
     SaleInvoice, SaleLine, SalePayment, StaffSchedule, StockLevel, StockMovement, Task,
     Permission, Role, RolePermission, TrainerAssignment, User, UserPreference, UserRole,
 )
 from app.services.audit import log_action
+from app.services.access_policy import policy_summary, policy_v2_enabled, require_policy_domain, resolve_policy_context
 from app.services.business_access import (
     allowed_client_ids, allowed_location_ids, enforce_plan_limit, ensure_client_access, ensure_location,
     filter_clients, filter_locations, organization_for, tenant_get,
@@ -299,6 +300,51 @@ def serialize(row, extra: dict | None = None) -> dict:
     return data
 
 
+def _college_policy_context(db: Session, user: User):
+    organization = db.get(Organization, user.organization_id) if user.organization_id else None
+    if not organization or getattr(organization.industry, "value", organization.industry) != "college":
+        return None
+    if not policy_v2_enabled(db, user.organization_id):
+        return None
+    return resolve_policy_context(db, user)
+
+
+def _serialize_client(db: Session, user: User, row: Client, extra: dict | None = None) -> dict:
+    data = serialize(row, extra)
+    context = _college_policy_context(db, user)
+    if not context:
+        return data
+    if not context.has_sensitive("college.students.contact.view"):
+        for key in (
+            "phone", "email", "address", "whatsapp_consent", "whatsapp_consent_at",
+            "whatsapp_consent_source", "email_consent",
+        ):
+            data[key] = None
+    if not context.has_sensitive("college.protected_fields.view"):
+        data["date_of_birth"] = None
+        data["gender"] = None
+    if not context.has_sensitive("college.notes.private.view"):
+        data["notes"] = None
+    return data
+
+
+def _require_college_client_write(db: Session, user: User, payload: dict) -> None:
+    context = _college_policy_context(db, user)
+    if not context:
+        return
+    context = require_policy_domain(db, user, "students", "work")
+    contact_fields = {
+        "phone", "email", "address", "whatsapp_consent", "email_consent",
+    }
+    protected_fields = {"date_of_birth", "gender"}
+    if contact_fields.intersection(payload) and not context.has_sensitive("college.students.contact.view"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Student contact access is required")
+    if protected_fields.intersection(payload) and not context.has_sensitive("college.protected_fields.view"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Protected student field access is required")
+    if "notes" in payload and not context.has_sensitive("college.notes.private.view"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Private student note access is required")
+
+
 def paged(db: Session, statement, model, limit: int, cursor: str | None):
     limit = min(max(limit, 1), 100)
     if cursor:
@@ -366,7 +412,18 @@ def _client_avatar_urls(db: Session, user, client_ids: list[str]) -> dict[str, s
 def organization_context(user=Depends(get_current_user), db: Session = Depends(get_db)):
     from app.services.rbac import get_user_permissions, get_user_roles
     org = organization_for(db, user)
-    allowed = allowed_location_ids(db, user)
+    permissions = get_user_permissions(db, user)
+    college_policy = None
+    if org.industry.value == "college" and policy_v2_enabled(db, org.id):
+        college_policy = resolve_policy_context(db, user)
+        if not college_policy.active:
+            allowed: set[str] | None = set()
+        elif college_policy.maximum_scope.unrestricted:
+            allowed = None
+        else:
+            allowed = set(college_policy.maximum_scope.location_ids)
+    else:
+        allowed = allowed_location_ids(db, user)
     locations = db.execute(select(Location).where(
         Location.organization_id == org.id, Location.is_active.is_(True)
     ).order_by(Location.is_primary.desc(), Location.name)).scalars().all()
@@ -374,19 +431,48 @@ def organization_context(user=Depends(get_current_user), db: Session = Depends(g
         locations = [loc for loc in locations if loc.id in allowed]
     entitlements = resolve_entitlements(db, org)
     wallet = ensure_wallet(db, org)
-    usage = {
-        "employees": db.scalar(select(func.count(Employee.id)).where(Employee.organization_id == org.id)) or 0,
-        "clients": db.scalar(select(func.count(Client.id)).where(Client.organization_id == org.id)) or 0,
-        "locations": db.scalar(select(func.count(Location.id)).where(Location.organization_id == org.id, Location.is_active.is_(True))) or 0,
-        "storage_bytes": db.scalar(select(func.coalesce(func.sum(Document.size_bytes), 0)).where(Document.organization_id == org.id)) or 0,
-    }
+    if college_policy:
+        if not college_policy.active:
+            student_count = 0
+        elif college_policy.maximum_scope.unrestricted:
+            student_count = db.scalar(select(func.count(CollegeStudentProfile.id)).where(
+                CollegeStudentProfile.organization_id == org.id,
+            )) or 0
+        elif college_policy.maximum_scope.student_ids:
+            student_count = db.scalar(select(func.count(CollegeStudentProfile.id)).where(
+                CollegeStudentProfile.organization_id == org.id,
+                CollegeStudentProfile.id.in_(college_policy.maximum_scope.student_ids),
+            )) or 0
+        else:
+            student_count = 0
+        can_see_org_usage = college_policy.active and college_policy.maximum_scope.unrestricted
+        usage = {
+            "employees": (
+                db.scalar(select(func.count(Employee.id)).where(Employee.organization_id == org.id)) or 0
+            ) if can_see_org_usage and "employees.view" in permissions else 0,
+            "clients": student_count,
+            "locations": len(locations),
+            "storage_bytes": (
+                db.scalar(select(func.coalesce(func.sum(Document.size_bytes), 0)).where(
+                    Document.organization_id == org.id,
+                )) or 0
+            ) if can_see_org_usage and "documents.view" in permissions else 0,
+        }
+    else:
+        usage = {
+            "employees": db.scalar(select(func.count(Employee.id)).where(Employee.organization_id == org.id)) or 0,
+            "clients": db.scalar(select(func.count(Client.id)).where(Client.organization_id == org.id)) or 0,
+            "locations": db.scalar(select(func.count(Location.id)).where(Location.organization_id == org.id, Location.is_active.is_(True))) or 0,
+            "storage_bytes": db.scalar(select(func.coalesce(func.sum(Document.size_bytes), 0)).where(Document.organization_id == org.id)) or 0,
+        }
     preference_rows = db.execute(select(UserPreference).where(UserPreference.user_id == user.id)).scalars().all()
     db.commit()
     return {
         "organization": serialize(org), "locations": [serialize(loc) for loc in locations],
-        "permissions": sorted(get_user_permissions(db, user)),
+        "permissions": sorted(permissions),
         "roles": [serialize(role) for role in get_user_roles(db, user)],
         "location_restricted": allowed is not None,
+        "access_policy": policy_summary(college_policy) if college_policy else None,
         "entitlements": entitlements,
         "usage": usage,
         "ai_wallet": wallet_summary(wallet),
@@ -627,10 +713,16 @@ def update_employee(employee_id: str, body: EmployeeUpdateBody, user=Depends(req
 
 @router.get("/clients")
 def list_clients(q: str | None = None, status_filter: str | None = Query(None, alias="status"), location_id: str | None = None, limit: int = 50, cursor: str | None = None, user=Depends(require_permissions("clients.view")), db: Session = Depends(get_db)):
+    context = _college_policy_context(db, user)
+    if context:
+        require_policy_domain(db, user, "students", "view")
     stmt = select(Client).where(Client.organization_id == user.organization_id)
     if q:
         like = f"%{q.lower()}%"
-        stmt = stmt.where(or_(func.lower(Client.first_name).like(like), func.lower(Client.last_name).like(like), func.lower(Client.phone).like(like), func.lower(Client.email).like(like), func.lower(Client.client_number).like(like)))
+        fields = [func.lower(Client.first_name).like(like), func.lower(Client.last_name).like(like), func.lower(Client.client_number).like(like)]
+        if not context or context.has_sensitive("college.students.contact.view"):
+            fields.extend([func.lower(Client.phone).like(like), func.lower(Client.email).like(like)])
+        stmt = stmt.where(or_(*fields))
     if status_filter:
         stmt = stmt.where(Client.status == status_filter)
     if location_id:
@@ -638,11 +730,14 @@ def list_clients(q: str | None = None, status_filter: str | None = Query(None, a
         stmt = stmt.where(Client.home_location_id == location_id)
     stmt = filter_clients(stmt, db, user)
     rows, next_cursor = paged(db, stmt, Client, limit, cursor)
-    return {"items": [serialize(row) for row in rows], "next_cursor": next_cursor}
+    return {"items": [_serialize_client(db, user, row) for row in rows], "next_cursor": next_cursor}
 
 
 @router.post("/clients", status_code=status.HTTP_201_CREATED)
 def create_client(body: ClientBody, user=Depends(require_permissions("clients.manage")), db: Session = Depends(get_db)):
+    if _college_policy_context(db, user):
+        require_policy_domain(db, user, "students", "manage")
+        raise HTTPException(status.HTTP_409_CONFLICT, "Use College student admission so academic ownership is recorded")
     count = db.scalar(select(func.count(Client.id)).where(Client.organization_id == user.organization_id)) or 0
     enforce_plan_limit(db, user, "clients", count)
     if body.home_location_id:
@@ -659,24 +754,31 @@ def create_client(body: ClientBody, user=Depends(require_permissions("clients.ma
 
 @router.get("/clients/{client_id}")
 def get_client(client_id: str, user=Depends(require_permissions("clients.view")), db: Session = Depends(get_db)):
+    if _college_policy_context(db, user):
+        require_policy_domain(db, user, "students", "view")
     row = tenant_get(db, Client, client_id, user)
     ensure_client_access(db, user, row)
-    return serialize(row)
+    return _serialize_client(db, user, row)
 
 
 @router.get("/clients/{client_id}/profile")
 def client_profile(client_id: str, user=Depends(require_permissions("clients.view")), db: Session = Depends(get_db)):
+    context = _college_policy_context(db, user)
+    if context:
+        require_policy_domain(db, user, "students", "view")
     row = tenant_get(db, Client, client_id, user)
     ensure_client_access(db, user, row)
     permissions = get_user_permissions(db, user)
     capabilities = {
-        "view_appointments": "appointments.view" in permissions,
-        "view_sales": "sales.view" in permissions,
-        "view_memberships": "gym.memberships.view" in permissions,
-        "view_checkins": "gym.attendance.view" in permissions,
-        "view_measurements": "gym.measurements.view" in permissions,
-        "view_clinical": "clinical.view" in permissions,
-        "view_documents": "documents.view" in permissions,
+        "view_appointments": "appointments.view" in permissions and not context,
+        "view_sales": "sales.view" in permissions and (not context or context.has_sensitive("college.fees.view")),
+        "view_memberships": "gym.memberships.view" in permissions and not context,
+        "view_checkins": "gym.attendance.view" in permissions and not context,
+        "view_measurements": "gym.measurements.view" in permissions and not context,
+        "view_clinical": "clinical.view" in permissions and not context,
+        "view_documents": "documents.view" in permissions and (
+            not context or context.has_sensitive("college.documents.sensitive.view")
+        ),
     }
     allowed = allowed_location_ids(db, user)
     appointments_stmt = select(Appointment).where(Appointment.organization_id == user.organization_id, Appointment.client_id == row.id)
@@ -708,7 +810,7 @@ def client_profile(client_id: str, user=Depends(require_permissions("clients.vie
     encounters = db.execute(encounters_stmt.order_by(Encounter.created_at.desc()).limit(30)).scalars().all() if encounters_stmt is not None else []
     documents = db.execute(documents_stmt.order_by(Document.created_at.desc())).scalars().all() if capabilities["view_documents"] else []
     return {
-        "client": serialize(row),
+        "client": _serialize_client(db, user, row),
         "appointments": [serialize(item) for item in appointments],
         "sales": [serialize(item) for item in sales],
         "memberships": [serialize(item) for item in memberships],
@@ -728,9 +830,11 @@ def client_profile(client_id: str, user=Depends(require_permissions("clients.vie
 
 
 @router.patch("/clients/{client_id}")
-def update_client(client_id: str, body: ClientUpdateBody, user=Depends(require_permissions("clients.manage")), db: Session = Depends(get_db)):
+def update_client(client_id: str, body: ClientUpdateBody, user=Depends(require_any_permission("clients.manage", "college.students.update")), db: Session = Depends(get_db)):
     row = tenant_get(db, Client, client_id, user)
+    ensure_client_access(db, user, row)
     payload = body.model_dump(exclude_unset=True)
+    _require_college_client_write(db, user, payload)
     expected = payload.pop("version")
     if expected is None or expected != row.version:
         raise HTTPException(409, "Client was changed by another user")
@@ -752,7 +856,7 @@ def update_client(client_id: str, body: ClientUpdateBody, user=Depends(require_p
             changes={"enabled": bool(payload["whatsapp_consent"]), "source": row.whatsapp_consent_source},
         )
     db.commit()
-    return serialize(row)
+    return _serialize_client(db, user, row)
 
 
 @router.get("/categories")
@@ -1158,6 +1262,11 @@ def create_task(body: TaskBody, user=Depends(get_current_user), db: Session = De
 @router.get("/dashboard")
 def dashboard(location_id: str | None = None, user=Depends(require_permissions("dashboard.view")), db: Session = Depends(get_db)):
     org = organization_for(db, user)
+    if org.industry.value == "college":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "College workspaces use the placement intelligence dashboard",
+        )
     if location_id: ensure_location(db, user, location_id)
     now = datetime.now(timezone.utc); today_start = datetime.combine(now.date(), time.min, tzinfo=timezone.utc)
     month_start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)

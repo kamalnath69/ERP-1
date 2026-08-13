@@ -23,12 +23,12 @@ POST /api/integrations/v1/college/students
   "records": [
     {
       "external_id": "erp-student-1042",
-      "admission_number": "CSE-2027-042",
+      "admission_number": "ADM-2027-042",
       "first_name": "Asha",
       "last_name": "Raman",
       "email": "asha@example.edu",
-      "program_code": "BTECH-CSE",
-      "cohort_code": "CSE-2027",
+      "program_code": "BTECH-AIML",
+      "cohort_code": "AIML-2027-A",
       "current_semester": 6
     }
   ],
@@ -36,7 +36,30 @@ POST /api/integrations/v1/college/students
 }
 ```
 
-The request accepts at most 500 records and 2 MB. Each record requires a stable `external_id`. A credential is limited to 60 requests per minute.
+The request accepts at most 500 records and 2 MB. Normal resources require a stable `external_id`. Dynamic `exam_cycles` and `assessment_marks` use their immutable pattern and cycle identifiers instead. A credential is limited to 60 requests per minute.
+
+## Dynamic assessment data
+
+Read the current cycle schema before sending marks:
+
+```http
+GET /api/integrations/v1/college/schemas/assessment_marks?cycle_code=PLACEMENT_DIAGNOSTIC_2027
+```
+
+The response contains the college's actual component codes, value types, limits, pattern revision, and academic-scope requirements. Send those fields inside `metrics`; unknown fields are quarantined rather than guessed.
+
+```json
+{
+  "records": [{
+    "scheme_code": "PLACEMENT_DIAGNOSTIC",
+    "scheme_version": 3,
+    "cycle_code": "PLACEMENT_DIAGNOSTIC_2027",
+    "student": { "admission_number": "ADM-2027-042" },
+    "academic_scope": { "assessment_id": "c8606b26-2bbb-4fcb-b48d-cfae3e6a3032" },
+    "metrics": { "CODING_SCORE": 78, "SQL": 42, "TEST_CASES": 18 }
+  }]
+}
+```
 
 ## Idempotency
 

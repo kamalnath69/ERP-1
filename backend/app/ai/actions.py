@@ -15,6 +15,7 @@ from app.models import (
     OutboundMessage, Organization, Task, TrainerAssignment, User,
 )
 from app.services.audit import log_action
+from app.services.access_policy import policy_v2_enabled, resolve_policy_context
 from app.services.business_access import ensure_client_access, ensure_location, enforce_plan_limit, tenant_get
 from app.services.entitlements import entitlement_value
 from app.services.rbac import user_has_permissions
@@ -207,14 +208,23 @@ def prepare_action(db: Session, user: User, action_type: str, payload: dict, con
     try: validated = definition.payload_model.model_validate(payload)
     except Exception as exc: return {"error": str(exc)}
     now = datetime.now(timezone.utc); token = secrets.token_urlsafe(24)
+    policy_context = resolve_policy_context(db, user) if policy_v2_enabled(db, user.organization_id) else None
+    if policy_context and not policy_context.active:
+        return {"access_denied": True, "message": "Your data access must be reviewed before using AI actions."}
     action = AIAction(
         organization_id=user.organization_id, user_id=user.id, conversation_id=conversation_id,
         action_type=action_type, risk_level=definition.risk, required_permission=definition.permission,
-        preview={"title": definition.title, "changes": validated.model_dump(mode="json"), "requires_confirmation": definition.risk == "high"},
+        preview={
+            "title": definition.title,
+            "changes": validated.model_dump(mode="json"),
+            "requires_confirmation": definition.risk == "high",
+            "access_version": user.access_version,
+        },
         payload=validated.model_dump(mode="json"), status="pending_confirmation" if definition.risk == "high" else "executing",
         confirmation_token_hash=hashlib.sha256(token.encode()).hexdigest() if definition.risk == "high" else None,
         confirmation_expires_at=now + timedelta(minutes=10) if definition.risk == "high" else None,
         idempotency_key=f"ai-{secrets.token_hex(16)}",
+        policy_version=policy_context.policy_version if policy_context else user.access_version,
     )
     db.add(action); db.flush()
     if definition.risk == "low":
@@ -230,6 +240,15 @@ def prepare_action(db: Session, user: User, action_type: str, payload: dict, con
 def _execute(db, user, action, definition):
     if not user_has_permissions(db, user, [definition.permission]):
         raise HTTPException(403, "Your access changed and this action is no longer allowed")
+    if policy_v2_enabled(db, user.organization_id):
+        context = resolve_policy_context(db, user)
+        expected_access_version = (action.preview or {}).get("access_version")
+        if (
+            not context.active
+            or context.policy_version != action.policy_version
+            or expected_access_version != user.access_version
+        ):
+            raise HTTPException(409, "Your access changed. Review and create this action again.")
     data = definition.payload_model.model_validate(action.payload)
     return definition.execute(db, user, data, action)
 

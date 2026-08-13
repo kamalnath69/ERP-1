@@ -56,7 +56,7 @@ export default function AIQuickLauncher({ open, onOpenChange }) {
         <form onSubmit={ask} noValidate className="mt-4">
           <div className="flex gap-2 rounded-2xl bg-secondary p-2">
             <input autoFocus maxLength={5000} {...register("question")} aria-invalid={Boolean(formState.errors.question)} aria-describedby="quick-question-error" className="min-w-0 flex-1 bg-transparent px-3 text-sm outline-none" placeholder="What needs your attention today?" />
-            <Button className="rounded-xl" aria-label="Ask Edvatiq"><PaperPlaneRight /></Button>
+            <Button type="submit" disabled={!formState.isValid} className="rounded-xl" aria-label="Ask Edvatiq"><PaperPlaneRight /></Button>
           </div>
           <FieldError id="quick-question-error" error={formState.errors.question} className="mt-2 px-2" />
         </form>

@@ -33,9 +33,30 @@ Each resource can define a path, JSON root path, source field names, and value m
 }
 ```
 
+Dynamic marks can either expose a canonical `metrics` object or map institution-defined metric codes to source paths. Edvatiq validates those keys against the immutable pattern revision identified by `scheme_code`, `scheme_version`, and `cycle_code`; it never invents an exam name or metric.
+
+```json
+{
+  "resources": {
+    "assessment_marks": {
+      "path": "/v1/assessment-results",
+      "root_path": "result.items",
+      "fields": {
+        "scheme_code": "exam.patternCode",
+        "scheme_version": "exam.patternRevision",
+        "cycle_code": "exam.cycleCode",
+        "student": "student.admissionNumber",
+        "metrics": "scores"
+      },
+      "metrics": {}
+    }
+  }
+}
+```
+
 ## Pagination
 
-Cursor mode reads a configured cursor path and sends it with the configured cursor parameter. `updated_since` mode sends the last successful synchronization time. A same-origin next URL can also be configured. A run stops after 100 pages.
+Cursor state is tracked separately for each configured resource. Cursor mode reads a configured cursor path and sends it with the configured cursor parameter until the resource is exhausted. `updated_since` mode sends the last successful synchronization time. A same-origin next URL can also be configured. A run stops after 100 pages per resource.
 
 ## Commit behavior
 

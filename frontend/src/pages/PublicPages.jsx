@@ -1,13 +1,20 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
-  ArrowRight, Database, Fingerprint, LockKey, UsersThree,
+  ArrowRight, Database, FileText, Fingerprint, LockKey, Receipt, Scales,
+  ShieldCheck, UsersThree,
 } from "@phosphor-icons/react";
 
 import PageMeta from "@/components/public/PageMeta";
-import SafeMarkdown from "@/components/public/SafeMarkdown";
+import PublicDocumentLayout, {
+  DocumentNavLink, DocumentOverview, DocumentSkeleton,
+} from "@/components/public/PublicDocumentLayout";
+import SafeMarkdown, { markdownHeadings } from "@/components/public/SafeMarkdown";
 import { usePublicSite } from "@/components/public/PublicSiteLayout";
-import api from "@/lib/api";
+import { legalDocumentDate, withoutMarkdownTitle } from "@/lib/legalDocuments";
+import {
+  clearPublicLegalDocumentCache, loadPublicLegalDocument,
+} from "@/lib/publicLegalDocuments";
 
 
 function PublicHero({ eyebrow, title, copy, children, compact = false }) {
@@ -28,30 +35,94 @@ export function SecurityPage() {
   </>;
 }
 
-const legalPaths = { terms: "/terms", privacy: "/privacy", refund: "/refund-policy" };
+const LEGAL_DOCUMENTS = {
+  terms: {
+    label: "Terms of Service",
+    shortLabel: "Terms",
+    path: "/terms",
+    icon: Scales,
+    railLabel: "Service agreement",
+    description: "The agreement governing accounts, subscriptions, acceptable use, integrations, AI, and service access.",
+  },
+  privacy: {
+    label: "Privacy Policy",
+    shortLabel: "Privacy",
+    path: "/privacy",
+    icon: ShieldCheck,
+    railLabel: "Data practices",
+    description: "How Edvatiq handles account, organization, operational, academic, and integration data.",
+  },
+  refund: {
+    label: "Refund and Cancellation Policy",
+    shortLabel: "Refunds",
+    path: "/refund-policy",
+    icon: Receipt,
+    railLabel: "Billing remedies",
+    description: "How renewals, cancellations, duplicate charges, service issues, and approved refunds are handled.",
+  },
+};
+
 export function LegalPage({ kind }) {
   const params = useParams();
   const { site } = usePublicSite();
-  const [state, setState] = useState({ document: null, loading: true, error: "" });
   const version = params.version;
+  const definition = LEGAL_DOCUMENTS[kind];
+  const requestKey = `${kind}:${version || "current"}`;
+  const [state, setState] = useState({ key: "", document: null, status: "loading", error: "" });
+  const [attempt, setAttempt] = useState(0);
+
   useEffect(() => {
-    const controller = new AbortController();
-    setState({ document: null, loading: true, error: "" });
-    const current = site?.legal_documents?.[kind];
-    if (!version && current?.content_markdown) { setState({ document: current, loading: false, error: "" }); return () => controller.abort(); }
-    const path = version ? `/public/legal/${kind}/${version}` : "/public/legal/current";
-    api.get(path, { signal: controller.signal, forceRefetch: true }).then(({ data }) => setState({ document: version ? data : data.documents?.[kind], loading: false, error: "" })).catch((error) => { if (error.code !== "ERR_CANCELED") setState({ document: null, loading: false, error: "This legal document is not available." }); });
-    return () => controller.abort();
-  }, [kind, version, site]);
-  const title = state.document?.title || ({ terms: "Terms of Service", privacy: "Privacy Policy", refund: "Refund and Cancellation Policy" }[kind]);
+    let active = true;
+    setState({ key: requestKey, document: null, status: "loading", error: "" });
+    loadPublicLegalDocument(kind, version)
+      .then((document) => { if (active) setState({ key: requestKey, document, status: "ready", error: "" }); })
+      .catch(() => { if (active) setState({ key: requestKey, document: null, status: "error", error: "This legal document is not available." }); });
+    return () => { active = false; };
+  }, [attempt, kind, requestKey, version]);
+
+  const stateIsCurrent = state.key === requestKey;
+  const document = stateIsCurrent ? state.document : null;
+  const loading = !stateIsCurrent || state.status === "loading";
+  const error = stateIsCurrent && state.status === "error" ? state.error : "";
+  const title = document?.title || definition.label;
+  const markdown = useMemo(() => withoutMarkdownTitle(document?.content_markdown), [document?.content_markdown]);
+  const headings = useMemo(() => markdownHeadings(markdown), [markdown]);
+  const currentVersion = site?.legal_documents?.[kind]?.version;
+  const historical = Boolean(version && currentVersion && Number(version) !== Number(currentVersion));
+  const retry = () => {
+    clearPublicLegalDocumentCache();
+    setAttempt((value) => value + 1);
+  };
+
   return <>
-    <PageMeta title={title} description={`Read Edvatiq's ${title}.`} path={`${legalPaths[kind]}${version ? `/${version}` : ""}`} />
-    <section className="border-b bg-surface-subtle"><div className="mx-auto max-w-[1120px] px-4 py-10 sm:px-6 sm:py-12 lg:px-8"><div className="overline">Legal</div><div className="mt-3 flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between"><div><h1 className="text-4xl font-semibold sm:text-5xl">{title}</h1>{state.document && <p className="mt-3 text-sm text-muted-foreground">Version {state.document.version} / Effective {new Date(state.document.effective_at || state.document.published_at).toLocaleDateString("en-IN", { dateStyle: "long" })}</p>}</div>{state.document && <button type="button" onClick={() => window.print()} className="inline-flex h-10 w-fit items-center rounded-xl border bg-card px-4 text-sm font-semibold hover:bg-secondary">Print document</button>}</div><div className="lg:hidden"><LegalLinks active={kind} /></div></div></section>
-    <section className="mx-auto grid min-h-[360px] max-w-[1120px] items-start gap-8 px-4 py-10 sm:px-6 lg:grid-cols-[200px_minmax(0,1fr)] lg:px-8 lg:py-14"><aside className="hidden lg:block"><div className="sticky top-24 rounded-xl border bg-card p-4"><div className="overline">Policies</div><LegalLinks active={kind} vertical /><p className="mt-5 border-t pt-4 text-xs leading-5 text-muted-foreground">Questions about these policies can be sent through our contact section.</p><Link to="/#contact" className="mt-3 inline-flex text-xs font-semibold text-accent">Contact Edvatiq</Link></div></aside><div aria-busy={state.loading}>{state.loading ? <div className="rounded-2xl border bg-card p-6 sm:p-8"><div className="space-y-4">{["w-3/4", "w-full", "w-full", "w-5/6", "w-full", "w-2/3"].map((width, index) => <div key={`${width}-${index}`} className={`h-4 animate-pulse rounded bg-secondary ${width}`} />)}</div></div> : state.error || !state.document ? <div className="rounded-2xl border bg-card p-6 sm:p-8"><h2 className="text-xl font-semibold">Document unavailable</h2><p className="mt-2 text-sm leading-6 text-muted-foreground">{state.error || "The operator has not published this document yet."}</p><Link to="/#contact" className="mt-5 inline-flex text-sm font-semibold text-accent">Contact support</Link></div> : <div className="rounded-2xl border bg-card p-5 shadow-sm sm:p-8 lg:p-10"><SafeMarkdown content={state.document.content_markdown} /></div>}</div></section>
+    <PageMeta title={title} description={definition.description} path={`${definition.path}${version ? `/${version}` : ""}`} />
+    <PublicDocumentLayout
+      title={title}
+      eyebrow="Authoritative policy"
+      meta={document ? <>Effective {legalDocumentDate(document)}</> : null}
+      metaLoading={loading}
+      breadcrumbs={[{ label: "Resources", to: "/docs" }, { label: "Legal center" }, { label: definition.shortLabel }]}
+      navigationTitle="Legal center"
+      navigationLabel="Legal document"
+      renderNavigation={({ close }) => <LegalNavigation active={kind} onNavigate={close} />}
+      headings={headings}
+      showActions={Boolean(document)}
+      actionsLoading={loading}
+      contentsLoading={loading}
+    >
+      <div aria-busy={loading}>{loading ? <DocumentSkeleton /> : error || !document ? <div className="mx-auto max-w-3xl py-10"><div className="grid h-11 w-11 place-items-center rounded-xl border bg-secondary"><FileText /></div><h2 className="mt-5 text-2xl font-semibold">Document unavailable</h2><p className="mt-2 max-w-xl text-sm leading-6 text-muted-foreground">{error || "The operator has not published this document yet."}</p><div className="mt-5 flex flex-wrap items-center gap-4"><button type="button" onClick={retry} className="inline-flex h-10 items-center rounded-lg bg-primary px-4 text-sm font-semibold text-primary-foreground">Try again</button><Link to="/#contact" className="inline-flex items-center gap-2 text-sm font-semibold text-accent">Contact support<ArrowRight /></Link></div></div> : <div className="mx-auto max-w-3xl">
+        {historical && <div className="mb-7 flex items-start gap-3 rounded-xl border border-warning/25 bg-warning-soft p-4 text-sm"><FileText className="mt-0.5 shrink-0 text-warning" /><div><div className="font-semibold text-foreground">You are reading an archived policy</div><p className="mt-1 leading-6 text-muted-foreground">This publication is retained for reference. A newer policy may contain updated terms.</p><Link to={definition.path} className="mt-2 inline-flex font-semibold text-foreground underline underline-offset-4">Open active policy</Link></div></div>}
+        <DocumentOverview>{definition.description}</DocumentOverview>
+        <SafeMarkdown content={markdown} className="document-prose" />
+        <div className="mt-12 border-t pt-7"><div className="overline">Questions about this policy?</div><p className="mt-2 max-w-xl text-sm leading-6 text-muted-foreground">Contact Edvatiq for policy questions. Do not include passwords, payment credentials, health records, or student records in the first message.</p><Link to="/#contact" className="mt-4 inline-flex items-center gap-2 text-sm font-semibold text-accent">Contact Edvatiq<ArrowRight /></Link></div>
+      </div>}</div>
+    </PublicDocumentLayout>
   </>;
 }
 
-function LegalLinks({ active, vertical = false }) {
-  const links = [["terms", "Terms", "/terms"], ["privacy", "Privacy", "/privacy"], ["refund", "Refund policy", "/refund-policy"]];
-  return <nav aria-label="Legal documents" className={vertical ? "mt-3 flex flex-col gap-1" : "mt-7 flex gap-2 overflow-x-auto pb-1"}>{links.map(([value, label, to]) => <Link key={value} to={to} aria-current={active === value ? "page" : undefined} className={`shrink-0 rounded-lg px-3 py-2 text-xs font-semibold transition-colors ${active === value ? "bg-primary text-primary-foreground" : "bg-card text-muted-foreground hover:text-foreground"}`}>{label}</Link>)}</nav>;
+function LegalNavigation({ active, onNavigate }) {
+  return <><div className="px-3 py-2"><div className="overline">Legal center</div><p className="mt-2 text-xs leading-5 text-muted-foreground">Policies and historical records</p></div><nav aria-label="Legal documents" className="mt-3 space-y-1">{Object.entries(LEGAL_DOCUMENTS).map(([value, definition]) => {
+    const Icon = definition.icon;
+    return <DocumentNavLink key={value} to={definition.path} active={active === value} icon={Icon} title={definition.shortLabel} meta={definition.railLabel} onClick={onNavigate} />;
+  })}</nav><div className="mt-6 border-t px-3 pt-5"><div className="text-xs font-semibold">Need policy help?</div><p className="mt-1.5 text-xs leading-5 text-muted-foreground">Reach the monitored Edvatiq contact channel.</p><Link to="/#contact" onClick={onNavigate} className="mt-3 inline-flex items-center gap-1.5 text-xs font-semibold text-accent">Contact us<ArrowRight /></Link></div></>;
 }

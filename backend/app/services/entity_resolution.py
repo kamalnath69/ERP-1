@@ -15,6 +15,7 @@ from app.models import (
     SalePayment, StockLevel, Task, User,
 )
 from app.services.business_access import allowed_client_ids, allowed_location_ids, filter_clients
+from app.services.access_policy import policy_v2_enabled, resolve_policy_context
 from app.services.rbac import get_user_permissions
 
 
@@ -105,6 +106,29 @@ def resolve_entities(db: Session, user: User, reference: str, kinds=None, limit=
     allowed_locations = allowed_location_ids(db, user); allowed_clients = allowed_client_ids(db, user)
     organization = db.get(Organization, user.organization_id)
     is_college = bool(organization and organization.industry.value == "college")
+    college_context = (
+        resolve_policy_context(db, user)
+        if is_college and policy_v2_enabled(db, user.organization_id)
+        else None
+    )
+    can_view_student_contact = bool(
+        not college_context
+        or (college_context.active and college_context.has_sensitive("college.students.contact.view"))
+    )
+    can_view_student_media = bool(
+        not college_context
+        or (college_context.active and college_context.has_sensitive("college.protected_fields.view"))
+    )
+    if college_context:
+        if not college_context.active:
+            requested = []
+        else:
+            college_kinds = {"client", "location"}
+            if college_context.maximum_scope.unrestricted:
+                college_kinds.add("employee")
+            if college_context.has_sensitive("college.fees.view"):
+                college_kinds.update({"invoice", "payment"})
+            requested = [kind for kind in requested if kind in college_kinds]
     row_id = _uuid(reference); found = []
 
     def add(kind, row, label, meta, status=None, fields=(), profile_id=None, payload=None):
@@ -118,9 +142,11 @@ def resolve_entities(db: Session, user: User, reference: str, kinds=None, limit=
     if "client" in requested:
         full = func.trim(Client.first_name + " " + Client.last_name)
         client_fields = [
-            full, Client.client_number, Client.phone, Client.email,
+            full, Client.client_number,
             CollegeStudentProfile.admission_number, CollegeStudentProfile.roll_number,
         ]
+        if can_view_student_contact:
+            client_fields.extend([Client.phone, Client.email])
         stmt = filter_clients(select(Client).outerjoin(
             CollegeStudentProfile, CollegeStudentProfile.client_id == Client.id,
         ).where(Client.organization_id == user.organization_id), db, user)
@@ -134,13 +160,16 @@ def resolve_entities(db: Session, user: User, reference: str, kinds=None, limit=
             )).scalar_one_or_none()
             add("client", row, name, student.admission_number if student else row.phone or row.client_number, student.status if student else row.status,
                 [
-                    ("name", name), ("number", row.client_number), ("phone", row.phone),
-                    ("email", row.email),
+                    ("name", name), ("number", row.client_number),
+                    ("phone", row.phone if can_view_student_contact else None),
+                    ("email", row.email if can_view_student_contact else None),
                     ("admission_number", student.admission_number if student else None),
                     ("roll_number", student.roll_number if student else None),
                 ],
                 payload={
-                    "client_number": row.client_number, "phone": row.phone, "email": row.email,
+                    "client_number": row.client_number,
+                    "phone": row.phone if can_view_student_contact else None,
+                    "email": row.email if can_view_student_contact else None,
                     "last_visit_at": row.last_visit_at,
                     "admission_number": student.admission_number if student else None,
                     "roll_number": student.roll_number if student else None,
@@ -181,7 +210,10 @@ def resolve_entities(db: Session, user: User, reference: str, kinds=None, limit=
 
     # Relational records are resolved by their visible reference or an already
     # scoped client name/contact, never by scanning unrestricted rows.
-    client_match = _text_filter(reference, [func.trim(Client.first_name + " " + Client.last_name), Client.client_number, Client.phone, Client.email])
+    relational_client_fields = [func.trim(Client.first_name + " " + Client.last_name), Client.client_number]
+    if can_view_student_contact:
+        relational_client_fields.extend([Client.phone, Client.email])
+    client_match = _text_filter(reference, relational_client_fields)
     relational = {
         "appointment": (Appointment, "appointments", "appointments.view"),
         "invoice": (SaleInvoice, "invoices", "sales.view"),
@@ -202,7 +234,10 @@ def resolve_entities(db: Session, user: User, reference: str, kinds=None, limit=
             elif kind == "invoice": meta, status, payload = row.invoice_number, row.status, {"invoice_number": row.invoice_number, "total_paise": row.total_paise, "paid_paise": row.paid_paise}
             elif kind == "membership": meta, status, payload = str(row.ends_on), row.status, {"starts_on": row.starts_on, "ends_on": row.ends_on, "amount_paise": row.amount_paise}
             else: meta, status, payload = str(row.checked_in_at), "checked_out" if row.checked_out_at else "checked_in", {"checked_in_at": row.checked_in_at, "checked_out_at": row.checked_out_at}
-            fields = [("id", row.id), ("name", name), ("number", client.client_number), ("phone", client.phone)]
+            fields = [
+                ("id", row.id), ("name", name), ("number", client.client_number),
+                ("phone", client.phone if can_view_student_contact else None),
+            ]
             if kind == "invoice": fields.append(("invoice_number", row.invoice_number))
             add(kind, row, name, meta, status, fields, profile_id=client.id, payload=payload)
 
@@ -305,7 +340,7 @@ def resolve_entities(db: Session, user: User, reference: str, kinds=None, limit=
 
     found.sort(key=lambda item: (-item["confidence"], item["display_name"]))
     found = found[:max(1, min(limit, 20))]
-    if "clients.media.view" in permissions:
+    if "clients.media.view" in permissions and can_view_student_media:
         client_ids = {
             (item.get("profile_ref") or {}).get("id") for item in found
             if (item.get("profile_ref") or {}).get("kind") == "client"

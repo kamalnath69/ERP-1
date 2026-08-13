@@ -17,9 +17,9 @@ function SystemPage({ icon: Icon, eyebrow, title, description, actions, embedded
   </div>;
 }
 
-export function PermissionDeniedPage({ embedded = false }) {
+export function PermissionDeniedPage({ embedded = false, title, description }) {
   const navigate = useNavigate();
-  return <SystemPage embedded={embedded} icon={Lock} eyebrow="Access" title="This area is not part of your role" description="Your account is working normally, but your current responsibilities or data scope do not include this screen." actions={<Button onClick={() => navigate(-1)} variant="outline"><ArrowLeft className="mr-2" />Go back</Button>} />;
+  return <SystemPage embedded={embedded} icon={Lock} eyebrow="Access" title={title || "This area is not part of your role"} description={description || "Your account is working normally, but your current responsibilities or data scope do not include this screen."} actions={<Button onClick={() => navigate(-1)} variant="outline"><ArrowLeft className="mr-2" />Go back</Button>} />;
 }
 
 export function NotFoundPage({ embedded = false }) {

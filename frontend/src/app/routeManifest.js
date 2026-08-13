@@ -11,9 +11,9 @@ const clientLabel = (industry, plural = true) => (
 );
 
 export const ROUTES = [
-  { key: "home", path: "/app", end: true, label: "Home", icon: House, permission: "dashboard.view", group: "primary", mobile: 1, preload: "eager" },
+  { key: "home", path: "/app", end: true, label: "Home", icon: House, permission: "dashboard.view", industryPermissions: { college: "college.placement_reports.view" }, group: "primary", mobile: 1, preload: "eager" },
   { key: "clients", path: "/app/clients", label: ({ industry }) => clientLabel(industry), singular: ({ industry }) => clientLabel(industry, false), icon: UsersThree, permission: "clients.view", module: "clients", group: "primary", mobile: 2, search: true, createPermission: "clients.manage" },
-  { key: "calendar", path: "/app/calendar", label: ({ industry }) => industry === "college" ? "Student schedule" : "Calendar", icon: CalendarBlank, permission: "appointments.view", module: "appointments", group: "primary", mobile: 3, search: true, createPermission: "appointments.manage" },
+  { key: "calendar", path: "/app/calendar", label: "Calendar", icon: CalendarBlank, permission: "appointments.view", module: "appointments", group: "primary", mobile: 3, search: true, createPermission: "appointments.manage", excludedIndustries: ["college"] },
   { key: "gym", path: "/app/gym", label: "Gym", icon: Barbell, permission: "gym.dashboard.view", module: "gym", industries: ["gym"], group: "primary", mobile: 4 },
   { key: "salon", path: "/app/salon", label: "Salon", icon: Scissors, permission: "appointments.view", module: "salon", industries: ["salon"], group: "primary", mobile: 4 },
   { key: "clinic", path: "/app/clinic", label: "Clinic", icon: Stethoscope, permission: "clinic.view", module: "clinic", industries: ["clinic"], group: "primary", mobile: 4 },
@@ -22,7 +22,7 @@ export const ROUTES = [
   { key: "catalog", path: "/app/catalog", label: "Catalog", icon: Package, permission: "catalog.view", module: "catalog", group: "more", search: true, createPermission: "catalog.manage", excludedIndustries: ["college"] },
   { key: "inventory", path: "/app/inventory", label: "Inventory", icon: Warehouse, permission: "inventory.view", module: "inventory", group: "more", excludedIndustries: ["college"] },
   { key: "team", path: "/app/team", label: ({ industry }) => industry === "college" ? "Faculty & staff" : "Team", icon: Users, permission: "employees.view", module: "employees", group: "more", search: true, createPermission: "employees.manage" },
-  { key: "reports", path: "/app/reports", label: ({ industry }) => industry === "college" ? "Placement reports" : "Reports", icon: ChartBar, permission: "reports.view", module: "reports", group: "more" },
+  { key: "reports", path: "/app/reports", label: ({ industry }) => industry === "college" ? "Placement reports" : "Reports", icon: ChartBar, permission: "reports.view", industryPermissions: { college: "college.placement_reports.view" }, module: "reports", group: "more" },
   { key: "notifications", path: "/app/notifications", label: "Notifications", icon: Bell, permission: null, module: "notifications", group: "more" },
   { key: "documents", path: "/app/documents", label: "Documents", icon: Books, permission: "documents.view", module: "documents", group: "more" },
   { key: "ai", path: "/app/ai", label: "Edvatiq AI", icon: Sparkle, permission: "ai.use", module: "ai", group: "more", primaryIndustries: ["college"], layout: "secondary-fixed" },
@@ -40,7 +40,8 @@ export function routeAvailable(route, { industry, can, hasModule }) {
   if (route.industries && !route.industries.includes(industry)) return false;
   if (route.excludedIndustries?.includes(industry)) return false;
   if (route.module && !hasModule(route.module)) return false;
-  if (route.permission && !can(route.permission) && !(route.fallbackPermission && can(route.fallbackPermission))) return false;
+  const permission = route.industryPermissions?.[industry] || route.permission;
+  if (permission && !can(permission) && !(route.fallbackPermission && can(route.fallbackPermission))) return false;
   return true;
 }
 

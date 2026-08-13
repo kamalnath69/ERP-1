@@ -10,7 +10,8 @@ from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models import (
-    Client, CollegeAssessment, CollegeAssessmentScore, CollegeAttendanceRecord,
+    Client, CollegeAssessment, CollegeAssessmentComponent, CollegeAssessmentReadinessMapping,
+    CollegeAssessmentScheme, CollegeAssessmentScore, CollegeAttendanceRecord,
     CollegeAttendanceSession, CollegeAttendanceSnapshot, CollegeCareerEvidence,
     CollegeCareerProfile, CollegeCodingSnapshot, CollegeCohort, CollegeCourseOffering,
     CollegeCodingAccount, CollegeClearanceSnapshot, CollegeDepartment, CollegePipelineStage, CollegePlacementApplication,
@@ -124,6 +125,7 @@ def student_query(
     department_id: str | None = None,
     program_id: str | None = None,
     cohort_id: str | None = None,
+    cohort_ids: list[str] | set[str] | None = None,
     allowed_student_ids: set[str] | None = None,
 ):
     query = (
@@ -140,16 +142,15 @@ def student_query(
         if start_year:
             query = query.where(CollegeCohort.admission_year <= start_year)
     if graduation_year:
-        query = query.outerjoin(
-            CollegeCareerProfile,
-            CollegeCareerProfile.student_profile_id == CollegeStudentProfile.id,
-        ).where(CollegeCareerProfile.graduation_year == graduation_year)
+        query = query.where(CollegeCohort.graduation_year == graduation_year)
     if department_id:
         query = query.where(CollegeProgram.department_id == department_id)
     if program_id:
         query = query.where(CollegeStudentProfile.program_id == program_id)
     if cohort_id:
         query = query.where(CollegeStudentProfile.cohort_id == cohort_id)
+    if cohort_ids:
+        query = query.where(CollegeStudentProfile.cohort_id.in_(set(cohort_ids)))
     if allowed_student_ids is not None:
         query = query.where(CollegeStudentProfile.id.in_(allowed_student_ids))
     return query.order_by(CollegeStudentProfile.admission_number)
@@ -190,6 +191,101 @@ def _attendance_from_sessions(db: Session, organization_id: str, student_ids: li
     }
 
 
+def _mapped_assessment_evidence(
+    db: Session,
+    organization_id: str,
+    student_ids: list[str],
+) -> dict[str, dict[str, dict]]:
+    """Normalize only assessment metrics explicitly authorized for readiness."""
+    mappings = list(db.scalars(select(CollegeAssessmentReadinessMapping).where(
+        CollegeAssessmentReadinessMapping.organization_id == organization_id,
+        CollegeAssessmentReadinessMapping.is_active.is_(True),
+    )))
+    if not mappings:
+        return {}
+    scheme_ids = {row.scheme_id for row in mappings}
+    mappings_by_scheme: dict[str, list[CollegeAssessmentReadinessMapping]] = defaultdict(list)
+    for row in mappings:
+        mappings_by_scheme[row.scheme_id].append(row)
+    components = {
+        (row.scheme_id, row.code): row
+        for row in db.scalars(select(CollegeAssessmentComponent).where(
+            CollegeAssessmentComponent.organization_id == organization_id,
+            CollegeAssessmentComponent.scheme_id.in_(scheme_ids),
+        ))
+    }
+    score_rows = db.execute(
+        select(CollegeAssessmentScore, CollegeAssessment, CollegeAssessmentScheme)
+        .join(CollegeAssessment, CollegeAssessment.id == CollegeAssessmentScore.assessment_id)
+        .join(CollegeAssessmentScheme, CollegeAssessmentScheme.id == CollegeAssessment.scheme_id)
+        .where(
+            CollegeAssessmentScore.organization_id == organization_id,
+            CollegeAssessmentScore.student_profile_id.in_(student_ids),
+            CollegeAssessment.scheme_id.in_(scheme_ids),
+            CollegeAssessment.status == "published",
+        )
+        .order_by(CollegeAssessmentScore.updated_at.desc(), CollegeAssessmentScore.id.desc())
+    ).all()
+
+    # Keep the latest observation for each student, pattern, and mapped metric. A
+    # repeated exam cycle should update evidence, not silently multiply its weight.
+    latest: dict[tuple[str, str, str, str], tuple[float, str, str]] = {}
+    for score, assessment, scheme in score_rows:
+        for mapping in mappings_by_scheme.get(scheme.id, []):
+            evidence_scope = assessment.offering_id or "cohort"
+            key = (score.student_profile_id, scheme.id, mapping.metric_code, evidence_scope)
+            if key in latest:
+                continue
+            if mapping.metric_code == "__CALCULATED__":
+                if score.calculated_score is None or not scheme.final_score_max:
+                    continue
+                value = _clamp(float(score.calculated_score) * 100 / float(scheme.final_score_max))
+            else:
+                component = components.get((scheme.id, mapping.metric_code))
+                raw = (score.metrics or {}).get(mapping.metric_code)
+                if not component or raw is None or component.max_marks is None:
+                    continue
+                maximum = float(component.max_marks)
+                if maximum <= 0:
+                    continue
+                numeric = float(raw)
+                if component.metric_type == "rank":
+                    value = 100 if maximum <= 1 else _clamp((maximum - numeric) * 100 / (maximum - 1))
+                else:
+                    value = _clamp(numeric * 100 / maximum)
+            latest[key] = (value, score.id, mapping.factor_key)
+
+    grouped: dict[str, dict[str, dict[str, list]]] = defaultdict(
+        lambda: defaultdict(lambda: {"values": [], "source_ids": []})
+    )
+    for (student_id, _scheme_id, _metric_code, _scope), (value, score_id, factor_key) in latest.items():
+        grouped[student_id][factor_key]["values"].append(value)
+        grouped[student_id][factor_key]["source_ids"].append(score_id)
+    return {
+        student_id: {
+            factor_key: {
+                "value": sum(data["values"]) / len(data["values"]),
+                "source_ids": data["source_ids"],
+                "source": "mapped_assessment_metrics",
+            }
+            for factor_key, data in factors.items()
+        }
+        for student_id, factors in grouped.items()
+    }
+
+
+def _merge_readiness_evidence(base: dict, mapped: dict | None) -> dict:
+    if not mapped or mapped.get("value") is None:
+        return base
+    if base.get("value") is None:
+        return mapped
+    return {
+        "value": (float(base["value"]) + float(mapped["value"])) / 2,
+        "source_ids": list(base.get("source_ids") or []) + list(mapped.get("source_ids") or []),
+        "source": "combined",
+    }
+
+
 def evidence_context(db: Session, organization_id: str, student_ids: list[str]) -> dict[str, dict]:
     """Load all readiness evidence in bounded queries for a student set."""
     if not student_ids:
@@ -220,20 +316,6 @@ def evidence_context(db: Session, organization_id: str, student_ids: list[str]) 
         )
         .order_by(CollegePlacementAssessment.student_profile_id, CollegePlacementAssessment.assessed_on.desc().nullslast())
     ).scalars())
-    academic_assessment_rows = db.execute(
-        select(
-            CollegeAssessmentScore.student_profile_id,
-            func.avg(CollegeAssessmentScore.marks_awarded * 100 / CollegeAssessment.max_marks),
-        )
-        .join(CollegeAssessment, CollegeAssessment.id == CollegeAssessmentScore.assessment_id)
-        .where(
-            CollegeAssessmentScore.organization_id == organization_id,
-            CollegeAssessmentScore.student_profile_id.in_(student_ids),
-            CollegeAssessmentScore.marks_awarded.is_not(None),
-            CollegeAssessment.max_marks > 0,
-        )
-        .group_by(CollegeAssessmentScore.student_profile_id)
-    ).all()
     career_profiles = {
         row.student_profile_id: row for row in db.execute(
             select(CollegeCareerProfile).where(
@@ -269,7 +351,6 @@ def evidence_context(db: Session, organization_id: str, student_ids: list[str]) 
     assessment_groups = defaultdict(list)
     for row in placement_assessments:
         assessment_groups[row.student_profile_id].append(row)
-    academic_assessments = {student_id: _float(value) for student_id, value in academic_assessment_rows}
     evidence_groups = defaultdict(list)
     for row in evidence_rows:
         evidence_groups[row.student_profile_id].append(row)
@@ -278,6 +359,7 @@ def evidence_context(db: Session, organization_id: str, student_ids: list[str]) 
     for row in preparation_rows:
         prep_groups[row.student_profile_id].append(row)
     session_attendance = _attendance_from_sessions(db, organization_id, student_ids)
+    mapped_assessments = _mapped_assessment_evidence(db, organization_id, student_ids)
 
     context = {}
     for student_id in student_ids:
@@ -288,8 +370,6 @@ def evidence_context(db: Session, organization_id: str, student_ids: list[str]) 
             backlog_penalty = min(25, (result.active_backlogs or 0) * 5)
             academic_value = _clamp(float(result.cgpa) * 10 - backlog_penalty)
             academic_sources = [result.id]
-        elif student_id in academic_assessments:
-            academic_value = _clamp(academic_assessments[student_id])
 
         snapshot = snapshots_by_student.get(student_id)
         if snapshot and snapshot.attendance_percent is not None:
@@ -340,13 +420,18 @@ def evidence_context(db: Session, organization_id: str, student_ids: list[str]) 
             completion_score = min(100, len(preparations) * 20)
             training_value = completion_score if not outcomes else completion_score * 0.5 + (sum(outcomes) / len(outcomes)) * 0.5
 
-        context[student_id] = {
+        base_factors = {
             "academics": {"value": academic_value, "source_ids": academic_sources},
             "coding": {"value": coding_value, "source_ids": [coding.id] if coding else []},
             "assessment": {"value": assessment_value, "source_ids": [row.id for row in assessment_rows]},
             "profile": {"value": profile_value, "source_ids": [row.id for row in evidence] + ([profile.id] if profile else [])},
             "attendance": attendance,
             "training": {"value": training_value, "source_ids": [row.id for row in preparations]},
+        }
+        mapped_factors = mapped_assessments.get(student_id, {})
+        context[student_id] = {
+            key: _merge_readiness_evidence(value, mapped_factors.get(key))
+            for key, value in base_factors.items()
         }
     return context
 
@@ -629,6 +714,7 @@ def eligibility_context(
     if not student:
         return {}
     program = db.get(CollegeProgram, student.program_id)
+    cohort = db.get(CollegeCohort, student.cohort_id)
     career = db.execute(select(CollegeCareerProfile).where(
         CollegeCareerProfile.organization_id == organization_id,
         CollegeCareerProfile.student_profile_id == student_id,
@@ -668,7 +754,7 @@ def eligibility_context(
         "program_id": student.program_id,
         "cohort_id": student.cohort_id,
         "department_id": program.department_id if program else None,
-        "graduation_year": career.graduation_year if career else None,
+        "graduation_year": cohort.graduation_year if cohort else (career.graduation_year if career else None),
         "term_result": term,
         "attendance_percent": _float(attendance.attendance_percent) if attendance else None,
         "coding": coding,
@@ -686,6 +772,7 @@ def placement_dashboard(
     department_id: str | None = None,
     program_id: str | None = None,
     cohort_id: str | None = None,
+    cohort_ids: list[str] | set[str] | None = None,
     allowed_student_ids: set[str] | None = None,
 ) -> dict:
     students = list(db.execute(student_query(
@@ -695,6 +782,7 @@ def placement_dashboard(
         department_id=department_id,
         program_id=program_id,
         cohort_id=cohort_id,
+        cohort_ids=cohort_ids,
         allowed_student_ids=allowed_student_ids,
     )).scalars().unique())
     student_ids = [row.id for row in students]
@@ -711,6 +799,12 @@ def placement_dashboard(
     } if students else {}
     programs = {
         row.id: row for row in db.execute(select(CollegeProgram).where(CollegeProgram.organization_id == organization_id)).scalars()
+    }
+    cohort_rows = {
+        row.id: row for row in db.execute(select(CollegeCohort).where(
+            CollegeCohort.organization_id == organization_id,
+            CollegeCohort.id.in_({student.cohort_id for student in students}) if students else CollegeCohort.id.is_(None),
+        )).scalars()
     }
     departments = {
         row.id: row for row in db.execute(select(CollegeDepartment).where(CollegeDepartment.organization_id == organization_id)).scalars()
@@ -1023,10 +1117,10 @@ def placement_dashboard(
         })
     filters = {
         "academic_years": list(db.execute(select(CollegeTerm.academic_year).where(CollegeTerm.organization_id == organization_id).distinct().order_by(CollegeTerm.academic_year.desc())).scalars()),
-        "graduation_years": sorted({career.graduation_year for career in careers.values() if career.graduation_year}, reverse=True),
+        "graduation_years": sorted({cohort.graduation_year for cohort in cohort_rows.values()}, reverse=True),
         "departments": [{"id": row.id, "name": row.name, "code": row.code} for row in departments.values() if row.is_active and (scoped_department_ids is None or row.id in scoped_department_ids)],
         "programs": [{"id": row.id, "department_id": row.department_id, "name": row.name, "code": row.code} for row in programs.values() if row.is_active and (scoped_program_ids is None or row.id in scoped_program_ids)],
-        "cohorts": [{"id": row.id, "program_id": row.program_id, "name": row.name, "code": row.code} for row in db.execute(select(CollegeCohort).where(CollegeCohort.organization_id == organization_id, CollegeCohort.is_active.is_(True))).scalars() if scoped_cohort_ids is None or row.id in scoped_cohort_ids],
+        "cohorts": [{"id": row.id, "program_id": row.program_id, "name": row.name, "code": row.code, "section": row.section or "General", "graduation_year": row.graduation_year} for row in db.execute(select(CollegeCohort).where(CollegeCohort.organization_id == organization_id, CollegeCohort.is_active.is_(True))).scalars() if scoped_cohort_ids is None or row.id in scoped_cohort_ids],
     }
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -1118,7 +1212,12 @@ def placement_leaderboards(
     term_rows = list(db.execute(
         select(CollegeTermResult)
         .where(CollegeTermResult.organization_id == organization_id, CollegeTermResult.student_profile_id.in_(ids) if ids else CollegeTermResult.id.is_(None))
-        .order_by(CollegeTermResult.student_profile_id, CollegeTermResult.semester.desc())
+        .order_by(
+            CollegeTermResult.student_profile_id,
+            CollegeTermResult.semester.desc(),
+            CollegeTermResult.published_on.desc().nullslast(),
+            CollegeTermResult.created_at.desc(),
+        )
     ).scalars())
     latest_terms = _first_by_student(term_rows)
     coding_rows = list(db.execute(
@@ -1355,11 +1454,11 @@ def student_intelligence(db: Session, organization_id: str, student_id: str) -> 
             "status": student.status,
             "program": {"id": program.id, "name": program.name, "code": program.code},
             "department": {"id": department.id, "name": department.name, "code": department.code},
-            "cohort": {"id": cohort.id, "name": cohort.name, "code": cohort.code, "admission_year": cohort.admission_year},
+            "cohort": {"id": cohort.id, "name": cohort.name, "code": cohort.code, "admission_year": cohort.admission_year, "graduation_year": cohort.graduation_year, "section": cohort.section or "General"},
         },
         "career": {
             "participation_status": career.participation_status,
-            "graduation_year": career.graduation_year,
+            "graduation_year": cohort.graduation_year,
             "preferred_roles": career.preferred_roles,
             "preferred_locations": career.preferred_locations,
             "linkedin_url": career.linkedin_url,
@@ -1476,7 +1575,12 @@ def student_roster(
     department_id: str | None = None,
     program_id: str | None = None,
     cohort_id: str | None = None,
+    cohort_ids: set[str] | list[str] | tuple[str, ...] | None = None,
+    graduation_years: list[int] | tuple[int, ...] | set[int] | None = None,
+    section: str | None = None,
     readiness_band: str | None = None,
+    placement_status: str | None = None,
+    sort: str = "name",
     limit: int = 50,
     offset: int = 0,
     cursor_values: dict | None = None,
@@ -1503,6 +1607,19 @@ def student_roster(
         ),
         else_="insufficient_evidence",
     )
+    latest_term_rows = select(
+        CollegeTermResult.student_profile_id.label("student_profile_id"),
+        CollegeTermResult.cgpa.label("cgpa"),
+        func.row_number().over(
+            partition_by=CollegeTermResult.student_profile_id,
+            order_by=(
+                CollegeTermResult.semester.desc(),
+                CollegeTermResult.published_on.desc().nullslast(),
+                CollegeTermResult.created_at.desc(),
+            ),
+        ).label("position"),
+    ).where(CollegeTermResult.organization_id == organization_id).subquery()
+    academic_value = func.coalesce(latest_term_rows.c.cgpa, Decimal("-1"))
     query = (
         select(CollegeStudentProfile, Client, CollegeProgram, CollegeDepartment, CollegeCohort)
         .join(Client, Client.id == CollegeStudentProfile.client_id)
@@ -1513,6 +1630,14 @@ def student_roster(
             latest_readiness_rows.c.student_profile_id == CollegeStudentProfile.id,
             latest_readiness_rows.c.position == 1,
         ))
+        .outerjoin(latest_term_rows, and_(
+            latest_term_rows.c.student_profile_id == CollegeStudentProfile.id,
+            latest_term_rows.c.position == 1,
+        ))
+        .outerjoin(
+            CollegeCareerProfile,
+            CollegeCareerProfile.student_profile_id == CollegeStudentProfile.id,
+        )
         .where(
             CollegeStudentProfile.organization_id == organization_id,
             CollegeStudentProfile.status == "active",
@@ -1532,27 +1657,50 @@ def student_roster(
         query = query.where(CollegeProgram.id == program_id)
     if cohort_id:
         query = query.where(CollegeCohort.id == cohort_id)
+    if cohort_ids:
+        query = query.where(CollegeCohort.id.in_(set(cohort_ids)))
+    if graduation_years:
+        query = query.where(CollegeCohort.graduation_year.in_({int(year) for year in graduation_years}))
+    if section:
+        query = query.where(func.lower(func.trim(CollegeCohort.section)) == section.strip().casefold())
     if allowed_student_ids is not None:
         query = query.where(CollegeStudentProfile.id.in_(allowed_student_ids))
     if readiness_band:
         query = query.where(effective_band == readiness_band)
+    if placement_status == "placed":
+        query = query.where(CollegeCareerProfile.placement_status.in_(("placed", "joined")))
+    elif placement_status == "unplaced":
+        query = query.where(or_(
+            CollegeCareerProfile.id.is_(None),
+            CollegeCareerProfile.placement_status.notin_(("placed", "joined")),
+        ))
+    elif placement_status == "not_participating":
+        query = query.where(CollegeCareerProfile.participation_status == "not_participating")
+    elif placement_status and placement_status != "all":
+        query = query.where(CollegeCareerProfile.placement_status == placement_status)
     if cursor_values:
         first = str(cursor_values.get("first") or "")
         last = str(cursor_values.get("last") or "")
         student_id = str(cursor_values.get("id") or "")
-        query = query.where(or_(
+        name_after = or_(
             func.lower(Client.first_name) > first,
             and_(func.lower(Client.first_name) == first, func.lower(Client.last_name) > last),
-            and_(
-                func.lower(Client.first_name) == first,
-                func.lower(Client.last_name) == last,
-                CollegeStudentProfile.id > student_id,
-            ),
-        ))
+            and_(func.lower(Client.first_name) == first, func.lower(Client.last_name) == last, CollegeStudentProfile.id > student_id),
+        )
+        if sort == "academics_desc":
+            metric = Decimal(str(cursor_values.get("metric", "-1")))
+            query = query.where(or_(academic_value < metric, and_(academic_value == metric, name_after)))
+        else:
+            query = query.where(name_after)
     total = db.scalar(select(func.count()).select_from(query.order_by(None).subquery())) or 0
     page_size = min(max(int(limit), 1), 100)
+    order_by = (
+        (academic_value.desc(), func.lower(Client.first_name), func.lower(Client.last_name), CollegeStudentProfile.id)
+        if sort == "academics_desc"
+        else (func.lower(Client.first_name), func.lower(Client.last_name), CollegeStudentProfile.id)
+    )
     pairs = db.execute(
-        query.order_by(func.lower(Client.first_name), func.lower(Client.last_name), CollegeStudentProfile.id)
+        query.order_by(*order_by)
         .offset(offset if not cursor_values else 0)
         .limit(page_size + 1)
     ).all()
@@ -1563,7 +1711,12 @@ def student_roster(
     term_rows = list(db.execute(
         select(CollegeTermResult)
         .where(CollegeTermResult.organization_id == organization_id, CollegeTermResult.student_profile_id.in_(ids) if ids else CollegeTermResult.id.is_(None))
-        .order_by(CollegeTermResult.student_profile_id, CollegeTermResult.semester.desc())
+        .order_by(
+            CollegeTermResult.student_profile_id,
+            CollegeTermResult.semester.desc(),
+            CollegeTermResult.published_on.desc().nullslast(),
+            CollegeTermResult.created_at.desc(),
+        )
     ).scalars())
     terms = _first_by_student(term_rows)
     attendance_rows = list(db.execute(
@@ -1610,7 +1763,16 @@ def student_roster(
             "semester": student.current_semester,
             "program": {"id": program.id, "name": program.name, "code": program.code},
             "department": {"id": department.id, "name": department.name, "code": department.code},
-            "cohort": {"id": cohort.id, "name": cohort.name, "code": cohort.code},
+            "cohort": {
+                "id": cohort.id,
+                "name": cohort.name,
+                "code": cohort.code,
+                "section": cohort.section or "General",
+                "admission_year": cohort.admission_year,
+                "graduation_year": cohort.graduation_year,
+            },
+            "graduation_year": cohort.graduation_year,
+            "section": cohort.section or "General",
             "cgpa": _float(term.cgpa) if term else None,
             "active_backlogs": term.active_backlogs if term else None,
             "attendance_percent": _float(attendance_row.attendance_percent) if attendance_row else None,
@@ -1630,6 +1792,9 @@ def student_roster(
             "last": client.last_name.casefold(),
             "id": student.id,
         }
+        if sort == "academics_desc":
+            term = terms.get(student.id)
+            next_values["metric"] = str(term.cgpa if term and term.cgpa is not None else Decimal("-1"))
     return {
         "items": items,
         "total": int(total),

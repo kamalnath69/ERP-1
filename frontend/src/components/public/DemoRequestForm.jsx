@@ -31,9 +31,9 @@ const demoRequestSchema = z.object({
 export default function DemoRequestForm({ className = "", heading = true }) {
   const { site, loading: siteLoading } = usePublicSite();
   const privacyId = site?.legal_documents?.privacy?.id;
-  const { register, handleSubmit, reset, setError, formState: { errors, isSubmitting } } = useForm({
+  const { register, handleSubmit, reset, setError, formState: { errors, isSubmitting, isValid } } = useForm({
     resolver: zodResolver(demoRequestSchema),
-    mode: "onBlur",
+    mode: "onChange",
     reValidateMode: "onChange",
     defaultValues: {
       name: "",
@@ -85,7 +85,7 @@ export default function DemoRequestForm({ className = "", heading = true }) {
     <input tabIndex={-1} autoComplete="off" aria-hidden="true" className="absolute -left-[10000px]" {...register("website")} />
     <div className="mt-6 flex flex-col gap-4 border-t pt-5 sm:flex-row sm:items-center sm:justify-between">
       <p className="max-w-md text-xs leading-5 text-muted-foreground">Submitting acknowledges our <Link to="/privacy" className="font-medium text-foreground underline underline-offset-2">Privacy Policy</Link>. This is not marketing consent.</p>
-      <Button loading={isSubmitting} loadingText="Sending..." disabled={isSubmitting || !privacyId} className="w-full shrink-0 sm:w-auto">Request a demo</Button>
+      <Button type="submit" loading={isSubmitting} loadingText="Sending..." disabled={isSubmitting || !isValid || !privacyId} className="w-full shrink-0 sm:w-auto">Request a demo</Button>
     </div>
   </form>;
 }

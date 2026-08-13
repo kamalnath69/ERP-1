@@ -7,6 +7,7 @@ import {
 } from "@phosphor-icons/react";
 
 import { usePublicSite } from "@/components/public/PublicSiteLayout";
+import BrandLogo from "@/components/brand/BrandLogo";
 import DemoRequestForm from "@/components/public/DemoRequestForm";
 import PageMeta from "@/components/public/PageMeta";
 
@@ -89,7 +90,7 @@ export default function Landing() {
               <a href={!signupReady || trialEnabled ? "#pricing" : "#platform"} className="inline-flex h-12 items-center justify-center rounded-xl border bg-card px-6 text-sm font-semibold shadow-sm transition-colors hover:bg-secondary">{!signupReady || trialEnabled ? "Compare plans" : "Explore product"}</a>
             </div>
             <div className="mt-9 flex flex-wrap gap-x-6 gap-y-3 text-xs font-medium text-muted-foreground">
-              {[trialEnabled ? "30-day trial" : "Secure paid onboarding", "GST-ready pricing", "Gym, Salon, Clinic, and College"].map((item) => <span key={item} className="inline-flex items-center gap-2"><CheckCircle className="text-positive" weight="fill" />{item}</span>)}
+              {[...(trialEnabled ? ["30-day trial"] : []), "GST-ready pricing", "Gym, Salon, Clinic, and College"].map((item) => <span key={item} className="inline-flex items-center gap-2"><CheckCircle className="text-positive" weight="fill" />{item}</span>)}
             </div>
           </div>
           <ProductPreview />
@@ -139,7 +140,7 @@ export default function Landing() {
         <div className="lg:col-span-6 lg:col-start-7"><div className="surface-card overflow-hidden p-2 shadow-xl shadow-primary/5"><div className="rounded-xl bg-primary p-5 text-primary-foreground sm:p-7"><div className="flex items-center justify-between"><span className="inline-flex items-center gap-2 text-sm font-semibold"><Sparkle className="text-accent" weight="fill" />Ask Edvatiq</span><span className="rounded-full border border-primary-foreground/15 px-2.5 py-1 text-[10px] text-primary-foreground/55">Permission scoped</span></div><div className="mt-8 rounded-xl border border-primary-foreground/12 bg-primary-foreground/[0.06] p-4 text-sm text-primary-foreground/72">Who needs support before the next placement drive?</div><div className="mt-3 rounded-xl bg-card p-5 text-foreground shadow-sm"><div className="flex items-center gap-2 text-sm font-semibold"><CirclesFour className="text-accent" />Evidence-linked answer</div><div className="mt-4 space-y-3">{["Readiness and missing evidence", "Authorized student or client records", "English, Tamil, and Tanglish"].map((item) => <div key={item} className="flex items-center gap-3 rounded-lg bg-secondary px-3 py-2.5 text-xs"><CheckCircle className="text-positive" weight="fill" />{item}</div>)}</div></div></div></div></div>
       </section>
 
-      <Pricing catalog={catalog} error={error} retry={retry} signupReady={signupReady} />
+      <Pricing catalog={catalog} error={error} retry={retry} />
 
       <section id="contact" className="scroll-mt-16 px-4 pb-20 pt-12 sm:px-6 lg:px-8 lg:pb-28 lg:pt-16">
         <div className="relative mx-auto grid max-w-[1400px] items-start overflow-hidden rounded-[2rem] bg-primary text-primary-foreground shadow-[0_30px_80px_hsl(var(--shadow-color)/.16)] lg:grid-cols-12">
@@ -163,28 +164,35 @@ export default function Landing() {
   </div>;
 }
 
-function Pricing({ catalog, error, retry, signupReady }) {
+function Pricing({ catalog, error, retry }) {
   const [interval, setInterval] = useState("monthly");
   const plans = catalog?.plans || [];
   const annualSaving = Math.max(0, ...plans.map((plan) => Number(plan.annual_saving_percent || 0)));
-  const gridClass = plans.length <= 1 ? "max-w-md" : plans.length === 2 ? "max-w-4xl md:grid-cols-2" : plans.length === 3 ? "max-w-6xl md:grid-cols-2 xl:grid-cols-3" : "md:grid-cols-2 xl:grid-cols-4";
+  const gridClass = plans.length <= 1
+    ? "max-w-md"
+    : plans.length === 2
+      ? "max-w-4xl sm:grid-cols-2"
+      : plans.length === 3
+        ? "max-w-6xl sm:grid-cols-2 lg:grid-cols-3"
+        : plans.length === 4
+          ? "sm:grid-cols-2 lg:grid-cols-4"
+          : "sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5";
   return <section id="pricing" className="soft-glow relative scroll-mt-16 overflow-hidden border-y bg-card">
     <div className="paper-grid pointer-events-none absolute inset-0 opacity-[0.13] [mask-image:linear-gradient(to_bottom,black,transparent_65%)]" />
     <div className="relative mx-auto max-w-[1440px] px-4 py-20 sm:px-6 lg:px-8 lg:py-28">
       <div className="grid gap-7 lg:grid-cols-12 lg:items-end"><div className="max-w-3xl lg:col-span-7"><div className="overline">Plans and pricing</div><h2 className="mt-3 text-4xl font-semibold leading-tight sm:text-5xl">Choose a clear starting point.</h2><p className="mt-4 max-w-2xl text-base leading-7 text-muted-foreground">Compare tax-inclusive pricing, AI credits, and practical workspace limits before creating an account.</p></div><div className="lg:col-span-4 lg:col-start-9 lg:justify-self-end"><div className="inline-flex rounded-xl border bg-card p-1 shadow-sm" role="group" aria-label="Billing period">{[["monthly", "Monthly"], ["annual", "Annual"]].map(([value, label]) => <button key={value} type="button" aria-pressed={interval === value} onClick={() => setInterval(value)} className={`rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${interval === value ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}>{label}{value === "annual" && annualSaving > 0 && <span className={`ml-2 text-[10px] ${interval === value ? "text-primary-foreground/65" : "text-positive"}`}>save {annualSaving}%</span>}</button>)}</div></div></div>
-      {catalog && !catalog.trial_enabled && <div className="mt-8 flex max-w-3xl items-start gap-3 rounded-xl border bg-card/80 px-4 py-3 text-sm shadow-sm backdrop-blur"><LockKey className="mt-0.5 shrink-0 text-accent" /><div><strong>Secure paid onboarding.</strong> The workspace and owner account are created after the first plan payment is verified.</div></div>}
       {error && <div className="mt-10 flex min-h-32 flex-col items-center justify-center rounded-2xl border bg-card p-6 text-center"><WarningCircle size={28} className="text-accent" /><p className="mt-3 font-semibold">{error}</p><p className="mt-1 text-sm text-muted-foreground">We will not show stale or guessed prices.</p><button type="button" onClick={retry} className="mt-4 rounded-lg border px-4 py-2 text-sm font-semibold">Try again</button></div>}
       {!catalog && !error && <div className="mt-10 grid gap-4 md:grid-cols-2 xl:grid-cols-4">{[1, 2, 3, 4].map((item) => <div key={item} className="h-[440px] animate-pulse rounded-[1.35rem] border bg-card" />)}</div>}
-      {catalog && <div className={`mx-auto mt-10 grid items-stretch gap-4 ${gridClass}`}>{plans.map((plan, index) => <PlanCard key={plan.id} plan={plan} index={index} interval={interval} paymentAvailable={catalog.payment_available} signupReady={signupReady} />)}</div>}
+      {catalog && <div className={`mx-auto mt-10 grid items-stretch gap-4 ${gridClass}`}>{plans.map((plan, index) => <PlanCard key={plan.id} plan={plan} index={index} totalPlans={plans.length} interval={interval} paymentAvailable={catalog.payment_available} />)}</div>}
       <div className="mt-7 flex flex-col gap-2 border-t pt-5 text-xs leading-5 text-muted-foreground sm:flex-row sm:items-center sm:justify-between"><span>Paid signup covers the selected first term. Renewals are managed from Plan &amp; billing.</span><span className="inline-flex items-center gap-2 font-medium text-foreground"><CheckCircle className="text-positive" weight="fill" />Published, tax-inclusive pricing</span></div>
     </div>
   </section>;
 }
 
-function PlanCard({ plan, index, interval, paymentAvailable, signupReady }) {
+function PlanCard({ plan, index, totalPlans, interval, paymentAvailable }) {
   const quote = interval === "annual" ? plan.annual_quote : plan.monthly_quote;
   const isTrial = plan.signup_mode === "trial";
-  const isContact = plan.signup_mode === "contact" || !quote;
+  const isContact = plan.signup_mode === "contact";
   const configuredPoints = [
     plan.ai_credits != null && `${Number(plan.ai_credits).toLocaleString("en-IN")} AI credits per cycle`,
     plan.location_limit != null && `Up to ${Number(plan.location_limit).toLocaleString("en-IN")} location${Number(plan.location_limit) === 1 ? "" : "s"}`,
@@ -197,17 +205,18 @@ function PlanCard({ plan, index, interval, paymentAvailable, signupReady }) {
     "Governance and access design",
   ];
   const path = `/register?plan=${encodeURIComponent(plan.id)}&interval=${interval}`;
-  return <article className={`group relative flex min-h-[440px] flex-col overflow-hidden rounded-[1.35rem] border bg-card p-6 shadow-[0_12px_35px_hsl(var(--shadow-color)/.055)] transition-[transform,box-shadow] hover:-translate-y-1 hover:shadow-[0_20px_45px_hsl(var(--shadow-color)/.09)] ${plan.recommended ? "border-primary ring-1 ring-primary/15" : ""}`}>
+  const expandOnTwoColumns = isContact && totalPlans % 2 === 1 && index === totalPlans - 1;
+  return <article className={`group relative flex min-h-[420px] flex-col overflow-hidden rounded-[1.35rem] border bg-card p-5 shadow-[0_12px_35px_hsl(var(--shadow-color)/.055)] transition-[transform,box-shadow] hover:-translate-y-1 hover:shadow-[0_20px_45px_hsl(var(--shadow-color)/.09)] sm:p-6 ${expandOnTwoColumns ? "sm:col-span-2 lg:col-span-1" : ""} ${plan.recommended ? "border-primary ring-1 ring-primary/15" : ""}`}>
     {plan.recommended && <div className="absolute inset-x-0 top-0 h-1 bg-accent" />}
     <div className="flex items-center justify-between gap-3"><span className="overline">Plan {String(index + 1).padStart(2, "0")}</span>{plan.recommended && <span className="rounded-full bg-primary px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-primary-foreground">Recommended</span>}</div>
     <div className="mt-5"><h3 className="text-2xl font-semibold">{plan.name}</h3><p className="mt-2 min-h-10 text-xs leading-5 text-muted-foreground">{plan.description}</p></div>
-    <div className="mt-7"><div className="text-4xl font-semibold tracking-[-.04em]">{isTrial ? "Free" : isContact ? "Custom" : money(quote.total_paise)}</div><div className="mt-2 text-xs text-muted-foreground">{isTrial ? `${plan.trial_days || 30}-day access` : isContact ? "Built around your requirements" : `${interval === "annual" ? "Billed annually" : "Billed monthly"} / tax included`}</div>{!isTrial && !isContact && quote.tax_paise > 0 && <div className="mt-1 text-[11px] text-muted-foreground">Includes {money(quote.tax_paise)} GST</div>}{interval === "annual" && plan.annual_saving_percent > 0 && <span className="mt-3 inline-flex rounded-full bg-positive/10 px-2 py-1 text-[10px] font-semibold text-positive">Save {plan.annual_saving_percent}%</span>}</div>
+    <div className="mt-7"><div className="text-4xl font-semibold tracking-[-.04em]">{isTrial ? "Free" : isContact ? "Custom" : quote ? money(quote.total_paise) : "Unavailable"}</div><div className="mt-2 text-xs text-muted-foreground">{isTrial ? `${plan.trial_days || 30}-day access` : isContact ? "Built around your requirements" : quote ? `${interval === "annual" ? "Billed annually" : "Billed monthly"} / tax included` : `No ${interval} price is published`}</div>{!isTrial && !isContact && quote?.tax_paise > 0 && <div className="mt-1 text-[11px] text-muted-foreground">Includes {money(quote.tax_paise)} GST</div>}{quote && interval === "annual" && plan.annual_saving_percent > 0 && <span className="mt-3 inline-flex rounded-full bg-positive/10 px-2 py-1 text-[10px] font-semibold text-positive">Save {plan.annual_saving_percent}%</span>}</div>
     <div className="mt-7 border-t pt-5"><div className="overline">Included</div><ul className="mt-4 space-y-3 text-xs">{points.map((point) => <li key={point} className="flex gap-2.5 leading-5"><span className="mt-0.5 grid h-4 w-4 shrink-0 place-items-center rounded-full bg-positive/10"><Check size={10} className="text-positive" weight="bold" /></span>{point}</li>)}</ul></div>
-    <div className="mt-auto pt-7">{isContact || !signupReady
+    <div className="mt-auto pt-7">{isContact
       ? <DemoLink className="flex h-11 items-center justify-center rounded-xl border text-sm font-semibold hover:bg-secondary">Talk to sales</DemoLink>
-      : !isTrial && !paymentAvailable
+      : !isTrial && (!paymentAvailable || !quote)
         ? <button type="button" disabled className="h-11 w-full rounded-xl border bg-secondary text-sm font-semibold text-muted-foreground">Checkout unavailable</button>
-        : <Link to={path} className={`flex h-11 items-center justify-center gap-2 rounded-xl text-sm font-semibold ${plan.recommended ? "bg-primary text-primary-foreground" : "border hover:bg-secondary"}`}>{isTrial ? "Start free" : `Choose ${plan.name}`} <ArrowRight /></Link>}</div>
+        : <Link to={path} aria-label={isTrial ? `Start ${plan.name}` : `Pay and register with ${plan.name}`} className={`flex h-11 items-center justify-center gap-2 rounded-xl text-sm font-semibold ${plan.recommended ? "bg-primary text-primary-foreground" : "border hover:bg-secondary"}`}>{isTrial ? "Start free" : "Pay and register"} <ArrowRight /></Link>}</div>
   </article>;
 }
 
@@ -217,7 +226,7 @@ function ProductPreview() {
   return <div className="relative lg:col-span-6 lg:col-start-7 xl:col-span-7">
     <div className="absolute -inset-8 rounded-full bg-accent/8 blur-3xl" />
     <div className="relative overflow-hidden rounded-[1.6rem] border bg-card p-2 shadow-[0_32px_90px_hsl(var(--shadow-color)/.14)]">
-      <div className="flex min-h-14 flex-wrap items-center gap-2 rounded-t-[1.15rem] border-b bg-surface-subtle px-3 py-2 sm:px-4"><span className="grid h-8 w-8 place-items-center rounded-lg bg-primary text-[10px] font-bold text-primary-foreground">E</span><div className="flex rounded-lg border bg-card p-1">{[["college", "College"], ["business", "Business"]].map(([value, label]) => <button key={value} type="button" onClick={() => setMode(value)} className={`rounded-md px-3 py-1.5 text-[10px] font-semibold ${mode === value ? "bg-primary text-primary-foreground" : "text-muted-foreground"}`}>{label}</button>)}</div><span className="ml-auto hidden text-[10px] font-semibold text-muted-foreground sm:block">{college ? "Placement command center" : "Operations command center"}</span></div>
+      <div className="flex min-h-14 flex-wrap items-center gap-2 rounded-t-[1.15rem] border-b bg-surface-subtle px-3 py-2 sm:px-4"><BrandLogo showName={false} markClassName="h-8 w-8 rounded-lg" /><div className="flex rounded-lg border bg-card p-1">{[["college", "College"], ["business", "Business"]].map(([value, label]) => <button key={value} type="button" onClick={() => setMode(value)} className={`rounded-md px-3 py-1.5 text-[10px] font-semibold ${mode === value ? "bg-primary text-primary-foreground" : "text-muted-foreground"}`}>{label}</button>)}</div><span className="ml-auto hidden text-[10px] font-semibold text-muted-foreground sm:block">{college ? "Placement command center" : "Operations command center"}</span></div>
       <div className="grid min-h-[440px] sm:grid-cols-[8.5rem_1fr]">
         <aside className="hidden border-r bg-surface-subtle p-3 sm:block"><div className="space-y-1">{(college ? [[CirclesFour, "Overview"], [Student, "Students"], [Briefcase, "Placements"], [Code, "Coding"], [ChartLineUp, "Readiness"]] : [[CirclesFour, "Home"], [UsersThree, "Clients"], [CalendarCheck, "Calendar"], [ChartLineUp, "Sales"], [Briefcase, "Team"]]).map(([Icon, label], index) => <div key={label} className={`flex items-center gap-2 rounded-lg px-2.5 py-2 text-[10px] font-semibold ${index === 0 ? "bg-card text-foreground shadow-sm" : "text-muted-foreground"}`}><Icon size={14} />{label}</div>)}</div><div className="mt-32 rounded-xl bg-primary p-3 text-primary-foreground"><Sparkle className="text-accent" weight="fill" /><div className="mt-2 text-[9px] font-semibold">Ask Edvatiq</div><div className="mt-1 text-[8px] text-primary-foreground/55">Grounded in your records</div></div></aside>
         <div className="min-w-0 p-4 sm:p-5">{college ? <CollegePreview /> : <BusinessPreview />}</div>

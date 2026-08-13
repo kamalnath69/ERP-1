@@ -156,7 +156,7 @@ export default function AssistantPersonalizationSheet({ open, onOpenChange }) {
         </Button>
         <div className="flex gap-2">
           <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={saveState.isLoading || formState.isSubmitting}>Cancel</Button>
-          <Button type="button" onClick={save} loading={saveState.isLoading || formState.isSubmitting} loadingText="Saving preferences...">Save preferences</Button>
+          <Button type="button" onClick={save} disabled={!formState.isValid} loading={saveState.isLoading || formState.isSubmitting} loadingText="Saving preferences...">Save preferences</Button>
         </div>
       </SheetFooter>
     </SheetContent>

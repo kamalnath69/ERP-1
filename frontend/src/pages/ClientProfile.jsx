@@ -625,7 +625,7 @@ function ActionDrawer({ action, client, entityLabel, busy, close, submit }) {
       {action.type === "measurement" && <><Field label="Measured on" error={formState.errors.measured_on}><Input type="date" {...register("measured_on")} aria-invalid={Boolean(formState.errors.measured_on)} /></Field><div className="grid grid-cols-2 gap-4">{[["weight_kg", "Weight kg"], ["height_cm", "Height cm"], ["body_fat_percent", "Body fat %"], ["waist_cm", "Waist cm"]].map(([key, label]) => <Field key={key} label={label} error={formState.errors[key]}><Input inputMode="decimal" {...register(key)} aria-invalid={Boolean(formState.errors[key])} /></Field>)}</div><Field label="Notes" error={formState.errors.notes}><Textarea {...register("notes")} aria-invalid={Boolean(formState.errors.notes)} /></Field></>}
       {action.type === "freeze" && <><Field label="Freeze from" error={formState.errors.frozen_from}><Input type="date" min={today()} {...register("frozen_from")} aria-invalid={Boolean(formState.errors.frozen_from)} /></Field><Field label="Freeze until" error={formState.errors.frozen_until}><Input type="date" min={values.frozen_from || today()} {...register("frozen_until")} aria-invalid={Boolean(formState.errors.frozen_until)} /></Field></>}
       <FormRootError error={formState.errors.root?.server} />
-      <Button type="submit" loading={busy || formState.isSubmitting} loadingText="Saving update..." className="w-full">Save update</Button>
+      <Button type="submit" disabled={!formState.isValid} loading={busy || formState.isSubmitting} loadingText="Saving update..." className="w-full">Save update</Button>
     </form>
   </DrawerForm>;
 }
@@ -744,7 +744,7 @@ function MembershipCheckout({ checkout, onOpenChange, client, plans, locationId 
       {form.payment_option === "partial" && <Field label="Amount received now (INR)" error={formState.errors.partial_amount}><Input inputMode="decimal" {...register("partial_amount")} aria-invalid={Boolean(formState.errors.partial_amount)} /></Field>}
       {paymentNeeded && <><Field label="Payment method" error={formState.errors.payment_method}><Select value={form.payment_method || ""} onValueChange={(payment_method) => setValue("payment_method", payment_method, { shouldDirty: true, shouldValidate: true })}><SelectTrigger aria-invalid={Boolean(formState.errors.payment_method)}><SelectValue /></SelectTrigger><SelectContent>{["cash", "upi", "card", "bank"].map((method) => <SelectItem key={method} value={method}>{sentence(method)}</SelectItem>)}</SelectContent></Select></Field><Field label="Reference" error={formState.errors.payment_reference}><Input {...register("payment_reference")} placeholder="Optional transaction reference" aria-invalid={Boolean(formState.errors.payment_reference)} /></Field></>}
       <FormRootError error={formState.errors.root?.server} />
-      <Button type="submit" loading={saving} loadingText="Completing checkout..." disabled={!quote} className="w-full">{renewal ? "Create scheduled renewal" : "Activate membership"}</Button>
+      <Button type="submit" loading={saving} loadingText="Completing checkout..." disabled={!formState.isValid || !quote} className="w-full">{renewal ? "Create scheduled renewal" : "Activate membership"}</Button>
     </form>
   </DrawerForm>;
 }
@@ -806,7 +806,7 @@ function CancellationDrawer({ membership, scheduled, onOpenChange }) {
       {scheduled && <label className="flex items-start gap-2 text-sm"><input className="mt-1" type="checkbox" checked={Boolean(form.cancel_scheduled_renewal)} onChange={(event) => setValue("cancel_scheduled_renewal", event.target.checked, { shouldDirty: true })} /><span>Also cancel the scheduled renewal and void its unpaid invoice <strong>{scheduled.invoice?.invoice_number}</strong>.</span></label>}
       <Field label="Mandatory reason" error={formState.errors.reason}><Textarea rows={5} {...register("reason")} aria-invalid={Boolean(formState.errors.reason)} /></Field>
       <FormRootError error={formState.errors.root?.server} />
-      <Button type="submit" loading={busy} loadingText="Cancelling membership..." className="w-full bg-danger text-white hover:bg-danger/90">Confirm cancellation</Button>
+      <Button type="submit" disabled={!formState.isValid} loading={busy} loadingText="Cancelling membership..." className="w-full bg-danger text-white hover:bg-danger/90">Confirm cancellation</Button>
     </form>
   </DrawerForm>;
 }

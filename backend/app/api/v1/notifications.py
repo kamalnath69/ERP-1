@@ -6,8 +6,10 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.deps import get_current_user
-from app.models import Notification
+from app.models import Notification, Organization
+from app.services.access_policy import policy_v2_enabled, resolve_policy_context
 from app.services.cursor_pagination import decode_cursor, encode_cursor, page_size
+from app.services.entity_resolution import validate_entity_ref
 
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
@@ -54,6 +56,58 @@ def _serialize(row: Notification) -> dict:
     }
 
 
+def _notification_visible(db: Session, user, row: Notification) -> bool:
+    organization = db.get(Organization, user.organization_id) if user.organization_id else None
+    if (
+        not organization
+        or getattr(organization.industry, "value", organization.industry) != "college"
+        or not policy_v2_enabled(db, user.organization_id)
+    ):
+        return True
+    context = resolve_policy_context(db, user)
+    if not context.active:
+        return False
+    if context.maximum_scope.unrestricted:
+        return True
+
+    destination = _destination(row)
+    if destination and destination.get("kind"):
+        return bool(validate_entity_ref(db, user, destination["kind"], destination["id"]))
+
+    route = destination.get("route") if destination else None
+    if route in {"settings", "team"}:
+        return True
+    if route == "clients":
+        return context.level("students") != "none"
+    if route in {"sales", "billing"}:
+        return context.level("clearance") != "none" and context.has_sensitive("college.fees.view")
+
+    # Aggregate notifications can contain counts from the scope that existed
+    # when they were generated. Only show them when they carry the same policy
+    # snapshot; direct-record notifications are revalidated above.
+    snapshot = row.destination or {}
+    if route in {"home", "college", "reports", "documents"}:
+        if int(snapshot.get("policy_version") or -1) != context.policy_version:
+            return False
+        domain = {"reports": "reports", "documents": "documents"}.get(route)
+        return not domain or context.level(domain) != "none"
+
+    # Account and security notices are data-neutral. Unlinked operational
+    # notices fail closed because their underlying student scope is unknown.
+    return row.category in {"account", "security", "system"}
+
+
+def _visible_rows(db: Session, user, statement, limit: int | None) -> list[Notification]:
+    visible: list[Notification] = []
+    stream = db.execute(statement.order_by(Notification.created_at.desc(), Notification.id.desc())).scalars()
+    for row in stream:
+        if _notification_visible(db, user, row):
+            visible.append(row)
+            if limit is not None and len(visible) >= limit:
+                break
+    return visible
+
+
 @router.get("")
 def list_notifications(
     status: str = Query("all", pattern="^(all|unread|action_required|delivery_issues)$"),
@@ -72,7 +126,7 @@ def list_notifications(
         statement = statement.where(Notification.category == "action_required")
     elif status == "delivery_issues":
         statement = statement.where(Notification.category == "delivery_issue")
-    rows = db.execute(statement.order_by(Notification.created_at.desc()).limit(limit)).scalars()
+    rows = _visible_rows(db, user, statement, limit)
     return [_serialize(row) for row in rows]
 
 
@@ -107,7 +161,7 @@ def notification_page(
             and_(Notification.created_at == pivot_at, Notification.id < values["id"]),
         ))
     size = page_size(limit)
-    rows = list(db.execute(statement.order_by(Notification.created_at.desc(), Notification.id.desc()).limit(size + 1)).scalars())
+    rows = _visible_rows(db, user, statement, size + 1)
     has_more = len(rows) > size
     rows = rows[:size]
     next_cursor = encode_cursor(
@@ -121,12 +175,15 @@ def notification_page(
 
 @router.get("/summary")
 def notification_summary(user=Depends(get_current_user), db: Session = Depends(get_db)):
-    base = [Notification.organization_id == user.organization_id, Notification.user_id == user.id]
+    rows = _visible_rows(db, user, select(Notification).where(
+        Notification.organization_id == user.organization_id,
+        Notification.user_id == user.id,
+    ), None)
     return {
-        "unread": int(db.scalar(select(func.count(Notification.id)).where(*base, Notification.is_read.is_(False))) or 0),
-        "action_required": int(db.scalar(select(func.count(Notification.id)).where(*base, Notification.category == "action_required")) or 0),
-        "delivery_issues": int(db.scalar(select(func.count(Notification.id)).where(*base, Notification.category == "delivery_issue")) or 0),
-        "total": int(db.scalar(select(func.count(Notification.id)).where(*base)) or 0),
+        "unread": sum(not row.is_read for row in rows),
+        "action_required": sum(row.category == "action_required" for row in rows),
+        "delivery_issues": sum(row.category == "delivery_issue" for row in rows),
+        "total": len(rows),
     }
 
 
@@ -139,6 +196,8 @@ def read_notification(notification_id: str, user=Depends(get_current_user), db: 
     )).scalar_one_or_none()
     if not row:
         raise HTTPException(404, "Notification not found")
+    if not _notification_visible(db, user, row):
+        raise HTTPException(404, "Notification not found")
     row.is_read = True
     db.commit()
     return {"ok": True}
@@ -146,12 +205,20 @@ def read_notification(notification_id: str, user=Depends(get_current_user), db: 
 
 @router.post("/read-all")
 def read_all_notifications(user=Depends(get_current_user), db: Session = Depends(get_db)):
+    visible_ids = [row.id for row in _visible_rows(db, user, select(Notification).where(
+        Notification.organization_id == user.organization_id,
+        Notification.user_id == user.id,
+        Notification.is_read.is_(False),
+    ), None)]
+    if not visible_ids:
+        return {"ok": True, "updated": 0}
     result = db.execute(
         update(Notification)
         .where(
             Notification.organization_id == user.organization_id,
             Notification.user_id == user.id,
             Notification.is_read.is_(False),
+            Notification.id.in_(visible_ids),
         )
         .values(is_read=True)
     )

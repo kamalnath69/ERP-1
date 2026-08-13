@@ -7,9 +7,10 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.deps import require_entitlements, require_permissions
-from app.models import Permission, Role, RolePermission, User, UserRole
+from app.models import AccessPolicy, Organization, Permission, Role, RolePermission, User, UserRole
 from app.schemas import PermissionOut, RoleCreate, RoleOut, RoleUpdate
 from app.services.audit import log_action
+from app.services.access_policy import grantable_permission_codes, policy_v2_enabled, require_access_administrator
 from app.services.rbac import get_user_permissions
 
 router = APIRouter(prefix="/roles", tags=["roles"])
@@ -32,22 +33,37 @@ def _ensure_unique_name(db: Session, user: User, name: str, exclude_id: str | No
 
 def _slug(name: str) -> str:
     value = re.sub(r"[^a-z0-9]+", "-", name.casefold()).strip("-")
-    return value or "custom-role"
+    # Custom responsibilities must never collide with privileged system-role
+    # slugs such as `owner` or `access-admin`.
+    return f"custom-{value or 'role'}"
 
 
 def _validate_permission_grant(db: Session, actor: User, permission_ids: list[str]):
+    require_access_administrator(db, actor)
     rows = db.execute(select(Permission.id, Permission.code, Permission.organization_id).where(Permission.id.in_(permission_ids))).all() if permission_ids else []
     if len(rows) != len(set(permission_ids)) or any(org_id not in {None, actor.organization_id} for _, _, org_id in rows):
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "One or more permissions are invalid")
     actor_codes = get_user_permissions(db, actor)
-    excessive = [code for _, code, _ in rows if code not in actor_codes]
+    delegated_codes = grantable_permission_codes(db, actor)
+    allowed_codes = actor_codes if delegated_codes is None else delegated_codes
+    excessive = [code for _, code, _ in rows if code not in allowed_codes]
     if excessive and not actor.is_super_admin:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You cannot grant permissions you do not have")
 
 
+def _uses_college_policy(db: Session, user: User) -> bool:
+    organization = db.get(Organization, user.organization_id) if user.organization_id else None
+    return bool(
+        organization
+        and organization.industry.value == "college"
+        and policy_v2_enabled(db, user.organization_id)
+    )
+
+
 @router.get("/permissions", response_model=list[PermissionOut])
 def list_permissions(user: User = Depends(require_permissions("roles.manage")), db: Session = Depends(get_db)):
-    allowed_codes = get_user_permissions(db, user)
+    require_access_administrator(db, user)
+    allowed_codes = grantable_permission_codes(db, user) or get_user_permissions(db, user)
     stmt = select(Permission).where(
         (Permission.organization_id == user.organization_id) | (Permission.organization_id.is_(None))
     ).order_by(Permission.module, Permission.code)
@@ -60,12 +76,14 @@ def list_permissions(user: User = Depends(require_permissions("roles.manage")), 
 
 @router.get("", response_model=list[RoleOut])
 def list_roles(user: User = Depends(require_permissions("roles.manage")), db: Session = Depends(get_db)):
+    require_access_administrator(db, user)
     stmt = select(Role).where(Role.organization_id == user.organization_id).order_by(Role.created_at.asc())
     return db.execute(stmt).scalars().all()
 
 
 @router.get("/{role_id}")
 def get_role(role_id: str, user: User = Depends(require_permissions("roles.manage")), db: Session = Depends(get_db)):
+    require_access_administrator(db, user)
     role = db.get(Role, role_id)
     if not role or role.organization_id != user.organization_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Role not found")
@@ -104,6 +122,7 @@ def create_role(body: RoleCreate, user: User = Depends(require_permissions("role
 
 @router.patch("/{role_id}", response_model=RoleOut)
 def update_role(role_id: str, body: RoleUpdate, user: User = Depends(require_permissions("roles.manage")), _plan=Depends(require_entitlements("access.custom_roles")), db: Session = Depends(get_db)):
+    require_access_administrator(db, user)
     role = db.get(Role, role_id)
     if not role or role.organization_id != user.organization_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Role not found")
@@ -126,6 +145,21 @@ def update_role(role_id: str, body: RoleUpdate, user: User = Depends(require_per
         db.query(RolePermission).filter(RolePermission.role_id == role.id).delete()
         for pid in body.permission_ids:
             db.add(RolePermission(role_id=role.id, permission_id=pid))
+    assigned_user_ids = list(db.execute(select(UserRole.user_id).where(UserRole.role_id == role.id)).scalars())
+    if assigned_user_ids:
+        if _uses_college_policy(db, user) and (body.permission_ids is not None or body.is_active is not None):
+            db.query(AccessPolicy).filter(AccessPolicy.user_id.in_(assigned_user_ids)).update(
+                {
+                    AccessPolicy.status: "pending_review",
+                    AccessPolicy.version: AccessPolicy.version + 1,
+                    AccessPolicy.reviewed_by_user_id: None,
+                    AccessPolicy.reviewed_at: None,
+                },
+                synchronize_session=False,
+            )
+        db.query(User).filter(User.id.in_(assigned_user_ids)).update(
+            {User.access_version: User.access_version + 1}, synchronize_session=False,
+        )
     role.version += 1
     log_action(db, organization_id=user.organization_id, user_id=user.id, action="role.updated", resource_type="role", resource_id=role.id, permission="roles.manage", meta={"summary": f"Updated role {role.name}", "permission_count": len(body.permission_ids) if body.permission_ids is not None else None})
     db.commit()
@@ -135,6 +169,7 @@ def update_role(role_id: str, body: RoleUpdate, user: User = Depends(require_per
 
 @router.delete("/{role_id}")
 def delete_role(role_id: str, user: User = Depends(require_permissions("roles.manage")), _plan=Depends(require_entitlements("access.custom_roles")), db: Session = Depends(get_db)):
+    require_access_administrator(db, user)
     role = db.get(Role, role_id)
     if not role or role.organization_id != user.organization_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Role not found")
@@ -152,6 +187,7 @@ def delete_role(role_id: str, user: User = Depends(require_permissions("roles.ma
 
 @router.post("/{role_id}/duplicate", response_model=RoleOut, status_code=status.HTTP_201_CREATED)
 def duplicate_role(role_id: str, body: RoleCreate, user: User = Depends(require_permissions("roles.manage")), _plan=Depends(require_entitlements("access.custom_roles")), db: Session = Depends(get_db)):
+    require_access_administrator(db, user)
     source = db.get(Role, role_id)
     if not source or source.organization_id != user.organization_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Role not found")

@@ -2,6 +2,7 @@ import React, { createContext, useContext, useEffect, useMemo, useState } from "
 import { Link, Outlet, useLocation } from "react-router-dom";
 import { ArrowRight, List, Sparkle } from "@phosphor-icons/react";
 
+import BrandLogo from "@/components/brand/BrandLogo";
 import { Sheet, SheetClose, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { useAuth } from "@/contexts/AuthContext";
 import api from "@/lib/api";
@@ -20,13 +21,13 @@ function usePublicCatalog() {
   const [state, setState] = useState({ site: null, catalog: null, loading: true, error: "" });
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
-    const controller = new AbortController();
+    let active = true;
     setState((current) => ({ ...current, loading: true, error: "" }));
     Promise.allSettled([
-      api.get("/public/site", { signal: controller.signal, forceRefetch: true }),
-      api.get("/billing/public/plans", { signal: controller.signal, forceRefetch: true }),
+      api.get("/public/site", { forceRefetch: true }),
+      api.get("/billing/public/plans", { forceRefetch: true }),
     ]).then(([siteResult, catalogResult]) => {
-      if (controller.signal.aborted) return;
+      if (!active) return;
       setState({
         site: siteResult.status === "fulfilled" ? siteResult.value.data : null,
         catalog: catalogResult.status === "fulfilled" ? catalogResult.value.data : null,
@@ -34,7 +35,7 @@ function usePublicCatalog() {
         error: catalogResult.status === "rejected" ? "Pricing is temporarily unavailable." : "",
       });
     });
-    return () => controller.abort();
+    return () => { active = false };
   }, [attempt]);
   return { ...state, retry: () => setAttempt((value) => value + 1) };
 }
@@ -83,9 +84,8 @@ export default function PublicSiteLayout() {
       <a href="#public-content" className="fixed left-4 top-3 z-[70] -translate-y-20 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-lg transition-transform focus:translate-y-0">Skip to content</a>
       <header className="sticky top-0 z-50 border-b bg-background/90 backdrop-blur-xl">
         <div className="mx-auto flex h-16 max-w-[1440px] items-center gap-5 px-4 sm:px-6 lg:px-8">
-          <Link to="/" className="flex shrink-0 items-center gap-2.5" aria-label="Edvatiq home">
-            <span className="grid h-9 w-9 place-items-center rounded-xl bg-primary text-sm font-bold text-primary-foreground shadow-sm">E</span>
-            <span className="font-marketing text-xl font-semibold">Edvatiq</span>
+          <Link to="/" className="shrink-0" aria-label="Edvatiq home">
+            <BrandLogo nameClassName="font-marketing text-xl font-semibold" />
           </Link>
           <nav className="ml-auto hidden items-center gap-1 lg:flex" aria-label="Public navigation">
             {navItems.map((item) => <Link key={item.label} to={item.to} aria-current={active === item.section ? "page" : undefined} className={`rounded-lg px-3.5 py-2 text-sm font-medium transition-colors ${active === item.section ? "bg-secondary text-foreground" : "text-muted-foreground hover:bg-secondary hover:text-foreground"}`}>{item.label}</Link>)}
@@ -97,7 +97,7 @@ export default function PublicSiteLayout() {
           <Sheet>
             <SheetTrigger asChild><button type="button" className="ml-auto grid h-10 w-10 place-items-center rounded-xl border bg-card sm:ml-0 lg:hidden" aria-label="Open navigation"><List size={20} /></button></SheetTrigger>
             <SheetContent side="right" className="flex w-[88vw] max-w-sm flex-col p-0">
-              <SheetHeader className="border-b px-5 py-5 text-left"><SheetTitle className="flex items-center gap-2"><span className="grid h-8 w-8 place-items-center rounded-lg bg-primary text-xs text-primary-foreground">E</span>Edvatiq</SheetTitle></SheetHeader>
+              <SheetHeader className="border-b px-5 py-5 text-left"><SheetTitle><BrandLogo markClassName="h-8 w-8 rounded-lg" nameClassName="text-base" /></SheetTitle></SheetHeader>
               <nav className="flex flex-1 flex-col gap-1 p-4" aria-label="Mobile public navigation">
                 {navItems.map((item) => <SheetClose asChild key={item.label}><Link to={item.to} aria-current={active === item.section ? "page" : undefined} className={`rounded-xl px-4 py-3 text-sm font-semibold ${active === item.section ? "bg-secondary text-foreground" : "text-muted-foreground"}`}>{item.label}</Link></SheetClose>)}
                 <div className="my-3 h-px bg-border" />
@@ -123,7 +123,7 @@ function PublicFooter({ site }) {
   return <footer className="bg-primary text-primary-foreground">
     <div className="mx-auto max-w-[1440px] px-4 pb-8 pt-14 sm:px-6 lg:px-8 lg:pt-16">
       <div className="grid gap-10 border-b border-primary-foreground/12 pb-12 sm:grid-cols-2 lg:grid-cols-12">
-        <div className="sm:col-span-2 lg:col-span-5"><Link to="/" className="inline-flex items-center gap-2.5"><span className="grid h-10 w-10 place-items-center rounded-xl bg-primary-foreground text-sm font-bold text-primary">E</span><span className="font-marketing text-2xl font-semibold">Edvatiq</span></Link><p className="mt-5 max-w-md text-sm leading-7 text-primary-foreground/58">Placement intelligence and focused operations, backed by permission-aware records and evidence-linked AI.</p><a href={`mailto:${supportEmail}`} className="mt-5 inline-flex text-sm font-semibold text-accent hover:underline">{supportEmail}</a></div>
+        <div className="sm:col-span-2 lg:col-span-5"><Link to="/" className="inline-flex"><BrandLogo markClassName="h-10 w-10" nameClassName="font-marketing text-2xl font-semibold text-primary-foreground" /></Link><p className="mt-5 max-w-md text-sm leading-7 text-primary-foreground/58">Placement intelligence and focused operations, backed by permission-aware records and evidence-linked AI.</p><a href={`mailto:${supportEmail}`} className="mt-5 inline-flex text-sm font-semibold text-accent hover:underline">{supportEmail}</a></div>
         <FooterGroup title="Product" links={[["Platform", "/#platform"], ["Edvatiq AI", "/#ai"], ["Plans", "/#pricing"], ["Documentation", "/docs"]]} />
         <FooterGroup title="Company" links={[["About", "/#about"], ["Security", "/security"], ["Contact", "/#contact"], ["Sign in", "/login"]]} />
         <FooterGroup title="Legal" links={[["Terms", "/terms"], ["Privacy", "/privacy"], ["Refund policy", "/refund-policy"]]} />

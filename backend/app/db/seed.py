@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.core.security import hash_password
 from app.core.config import settings
 from app.models import (
-    Employee, EmployeeLocation, FeatureFlag, IndustryEnum, Location, Organization,
+    AccessPolicy, AccessPolicyScope, Employee, EmployeeLocation, FeatureFlag, IndustryEnum, Location, Organization,
     AIWallet, BillingProfile, FeatureDefinition, Job, Notification, Permission,
     PlanDefinition, PlanEntitlement, PlanVersion, PlatformPermission, PlatformRole,
     PlatformRolePermission, PlatformSetting, PlatformUserRole, RechargePack, Role,
@@ -47,17 +47,25 @@ PERMISSIONS = [
     ("clinical.view", "View clinical records", "clinic"), ("clinical.write", "Write clinical records", "clinic"),
     ("clinical.sign", "Sign clinical records", "clinic"), ("pharmacy.dispense", "Dispense medicines", "clinic"),
     ("college.view", "View college operations", "college"),
+    ("college.academics.view", "View academic structure and course offerings", "college"),
     ("college.academics.manage", "Manage academic structure and course offerings", "college"),
     ("college.students.view", "View student academic records", "college"),
+    ("college.students.update", "Update student records", "college"),
     ("college.students.manage", "Admit and update students", "college"),
     ("college.attendance.view", "View academic attendance", "college"),
     ("college.attendance.mark", "Record academic attendance", "college"),
+    ("college.attendance.correct", "Correct published attendance", "college"),
     ("college.assessments.view", "View assessments and results", "college"),
+    ("college.assessments.record", "Record assessment results", "college"),
     ("college.assessments.manage", "Create assessments and record results", "college"),
+    ("college.assessments.correct", "Correct published assessment results", "college"),
     ("college.fees.view", "View student fees", "college"),
     ("college.fees.manage", "Assign fees and create fee invoices", "college"),
     ("college.readiness.view", "View placement readiness evidence", "college placement"),
+    ("college.readiness.intervene", "Record readiness interventions", "college placement"),
     ("college.readiness.manage", "Configure and recompute placement readiness", "college placement"),
+    ("college.readiness.policy.manage", "Manage readiness policy", "college placement"),
+    ("college.eligibility.override", "Override placement eligibility", "college placement"),
     ("college.coding.view", "View student coding progress", "college placement"),
     ("college.coding.manage", "Manage coding accounts and synchronization", "college placement"),
     ("college.placements.view", "View placement companies, drives, and applications", "college placement"),
@@ -68,10 +76,20 @@ PERMISSIONS = [
     ("college.imports.manage", "Import College academic and placement data", "college placement"),
     ("college.integrations.manage", "Manage College ERP and coding integrations", "college placement"),
     ("college.placement_reports.view", "View College placement reports", "college placement"),
+    ("college.clearance.view", "View internship clearance", "college placement"),
+    ("college.clearance.manage", "Correct internship clearance", "college placement"),
+    ("college.data.view", "View data exchange history", "college"),
+    ("college.data.export", "Export College data", "college"),
+    ("college.students.contact.view", "View student contact details", "college sensitive"),
+    ("college.students.guardian.view", "View guardian details", "college sensitive"),
+    ("college.notes.private.view", "View private student notes", "college sensitive"),
+    ("college.documents.sensitive.view", "View sensitive student documents", "college sensitive"),
+    ("college.protected_fields.view", "View protected administrative fields", "college sensitive"),
     ("documents.view", "View documents", "documents"), ("documents.manage", "Manage documents", "documents"),
     ("notifications.send", "Send client messages", "notifications"), ("ai.use", "Use Edvatiq AI", "ai"),
     ("ai.actions", "Use AI actions", "ai"), ("ai.views.share", "Share AI views with the team", "ai"),
     ("roles.manage", "Manage roles and access", "access"),
+    ("access.delegations.manage", "Manage delegated access administrators", "access"),
     ("users.view", "View users", "access"), ("users.manage", "Manage users", "access"),
     ("settings.view", "View business settings", "settings"),
     ("settings.manage", "Manage all business settings", "settings"),
@@ -109,56 +127,99 @@ GYM_WRITE = {"gym.memberships.manage", "gym.attendance.mark", "gym.attendance.co
 
 COLLEGE_ROLE_GRANTS = {
     "principal": {
-        "dashboard.view", "clients.view", "employees.view", "college.view",
+        "dashboard.view", "clients.view", "college.view",
         "college.students.view", "college.attendance.view", "college.assessments.view",
         "college.readiness.view", "college.coding.view", "college.placements.view",
-        "college.placement_reports.view", "documents.view", "reports.view", "ai.use",
+        "college.placement_reports.view", "college.clearance.view", "college.data.view",
+        "documents.view", "reports.view", "ai.use",
     },
     "placement-head": {
-        "dashboard.view", "clients.view", "clients.manage", "employees.view", "college.view",
-        "college.students.view", "college.students.manage", "college.attendance.view",
-        "college.assessments.view", "college.assessments.manage", "college.readiness.view",
+        "dashboard.view", "clients.view", "clients.manage", "college.view",
+        "college.students.view", "college.attendance.view", "college.assessments.view",
+        "college.readiness.view", "college.readiness.intervene",
         "college.readiness.manage", "college.coding.view", "college.coding.manage",
         "college.placements.view", "college.companies.manage", "college.opportunities.manage",
         "college.applications.manage", "college.offers.manage", "college.imports.manage",
-        "college.integrations.manage", "college.placement_reports.view", "documents.view",
-        "documents.manage", "reports.view", "reports.exports", "ai.use", "ai.actions",
+        "college.placement_reports.view", "college.clearance.view", "college.data.view",
+        "documents.view", "documents.manage", "reports.view", "ai.use", "ai.actions",
     },
     "placement-coordinator": {
-        "dashboard.view", "clients.view", "clients.manage", "college.view",
-        "college.students.view", "college.students.manage", "college.attendance.view",
-        "college.assessments.view", "college.readiness.view", "college.readiness.manage",
-        "college.coding.view", "college.coding.manage", "college.placements.view",
-        "college.companies.manage", "college.opportunities.manage",
-        "college.applications.manage", "college.offers.manage", "college.imports.manage",
-        "college.placement_reports.view", "documents.view", "documents.manage", "ai.use",
-        "ai.actions",
+        "dashboard.view", "clients.view", "college.view", "college.students.view",
+        "college.attendance.view", "college.assessments.view", "college.readiness.view",
+        "college.readiness.intervene", "college.coding.view", "college.placements.view",
+        "college.applications.manage", "college.placement_reports.view",
+        "college.clearance.view", "college.data.view", "documents.view", "ai.use", "ai.actions",
     },
     "hod": {
-        "dashboard.view", "clients.view", "employees.view", "college.view",
+        "dashboard.view", "clients.view", "college.view",
         "college.students.view", "college.attendance.view", "college.assessments.view",
-        "college.assessments.manage", "college.readiness.view", "college.readiness.manage",
+        "college.assessments.record", "college.readiness.view", "college.readiness.intervene",
         "college.coding.view", "college.placements.view", "college.placement_reports.view",
         "documents.view", "ai.use",
     },
     "academic-admin": {
-        "dashboard.view", "clients.view", "clients.manage", "employees.view",
+        "dashboard.view", "clients.view", "clients.manage",
         "college.view", "college.academics.manage", "college.students.view",
-        "college.students.manage", "college.attendance.view", "college.attendance.mark",
-        "college.assessments.view", "college.assessments.manage", "college.fees.view",
+        "college.students.update", "college.students.manage", "college.attendance.view", "college.attendance.mark",
+        "college.attendance.correct", "college.assessments.view", "college.assessments.record",
+        "college.assessments.manage", "college.assessments.correct", "college.imports.manage",
+        "college.data.view", "college.data.export", "college.students.contact.view",
+        "college.students.guardian.view", "college.documents.sensitive.view",
         "documents.view", "documents.manage", "reports.view", "ai.use", "ai.actions",
     },
     "faculty": {
-        "dashboard.view", "clients.view", "employees.view", "college.view",
+        "dashboard.view", "clients.view", "college.view",
         "college.students.view", "college.attendance.view", "college.attendance.mark",
-        "college.assessments.view", "college.assessments.manage", "documents.view", "ai.use",
+        "college.assessments.view", "college.assessments.record", "documents.view", "ai.use",
     },
     "admissions": {
         "dashboard.view", "clients.view", "clients.manage", "college.view",
-        "college.students.view", "college.students.manage", "college.fees.view",
+        "college.students.view", "college.students.update", "college.students.manage",
+        "college.students.contact.view", "college.students.guardian.view",
         "documents.view", "documents.manage", "ai.use",
     },
+    "access-admin": {
+        "users.view", "users.manage", "roles.manage", "access.delegations.manage",
+        "settings.audit.view",
+    },
+    "college-admin": {
+        "dashboard.view", "clients.view", "clients.manage", "college.view",
+        "college.academics.view", "college.academics.manage", "college.students.view",
+        "college.students.update", "college.students.manage", "college.attendance.view",
+        "college.attendance.mark", "college.assessments.view", "college.assessments.record",
+        "college.assessments.manage", "college.readiness.view", "college.coding.view",
+        "college.placements.view", "college.data.view", "college.imports.manage",
+        "documents.view", "documents.manage", "reports.view", "ai.use", "ai.actions",
+    },
+    "college-manager": {
+        "dashboard.view", "clients.view", "college.view", "college.academics.view",
+        "college.students.view", "college.students.update", "college.attendance.view",
+        "college.attendance.mark", "college.assessments.view", "college.assessments.record",
+        "college.readiness.view", "college.readiness.intervene", "college.coding.view",
+        "college.placements.view", "college.applications.manage", "college.clearance.view",
+        "college.data.view", "documents.view", "ai.use",
+    },
+    "class-advisor": {
+        "dashboard.view", "clients.view", "college.view", "college.academics.view",
+        "college.students.view", "college.students.update", "college.attendance.view",
+        "college.attendance.mark", "college.assessments.view", "college.readiness.view",
+        "college.readiness.intervene", "college.placements.view", "college.clearance.view",
+        "documents.view", "ai.use",
+    },
+    "finance": {
+        "dashboard.view", "college.view", "college.students.view", "college.clearance.view",
+        "college.clearance.manage", "college.fees.view", "college.fees.manage", "reports.view",
+    },
+    "auditor": {
+        "dashboard.view", "college.view", "college.academics.view", "college.students.view",
+        "college.attendance.view", "college.assessments.view", "college.readiness.view",
+        "college.coding.view", "college.placements.view", "college.placement_reports.view",
+        "college.clearance.view", "college.data.view", "documents.view", "audit.view",
+    },
 }
+
+for _college_grants in COLLEGE_ROLE_GRANTS.values():
+    _college_grants.add("college.academics.view")
 
 FEATURES = [
     ("module.clients", "Clients", "Modules", "boolean"), ("module.employees", "Team", "Modules", "boolean"),
@@ -260,12 +321,12 @@ def sync_granular_role_permissions(db: Session, permissions: list[Permission]) -
         if "gym.manage" in codes: grants |= GYM_READ | GYM_WRITE
         if "clients.view" in codes: grants |= {"client_memory.view", "client_signals.view"}
         if "clients.manage" in codes: grants |= {"client_memory.manage", "clients.media.view", "clients.media.manage"}
-        if role.slug in {"owner", "manager"}: grants |= {"client_signals.manage", "clients.media.view", "salon.notes.view", "salon.notes.manage", "ai.views.share", "settings.view"}
-        if role.slug in COLLEGE_ROLE_GRANTS: grants |= COLLEGE_ROLE_GRANTS[role.slug]
+        if role.is_system and role.slug in {"owner", "manager"}: grants |= {"client_signals.manage", "clients.media.view", "salon.notes.view", "salon.notes.manage", "ai.views.share", "settings.view"}
+        if role.is_system and role.slug in COLLEGE_ROLE_GRANTS: grants |= COLLEGE_ROLE_GRANTS[role.slug]
         # The owner role is authoritative and must inherit capabilities introduced
         # after an organization was created. Entitlements still gate paid modules.
-        if role.slug == "owner": grants |= set(by_code)
-        if role.slug == "manager": grants |= {
+        if role.is_system and role.slug == "owner": grants |= set(by_code)
+        if role.is_system and role.slug == "manager": grants |= {
             "settings.identity.manage", "settings.locations.manage", "settings.operations.manage",
             "settings.communication.manage",
         }
@@ -286,9 +347,12 @@ def seed_organization_defaults(
 ) -> None:
     permissions = ensure_permissions(db)
     by_code = {p.code: p for p in permissions}
+    manager_codes = set(by_code) - MANAGER_DENY
+    if org.industry.value == "college":
+        manager_codes = COLLEGE_ROLE_GRANTS["college-manager"]
     role_specs = {
         "owner": set(by_code),
-        "manager": set(by_code) - MANAGER_DENY,
+        "manager": manager_codes,
         "accountant": ACCOUNTANT_ALLOW,
         "inventory-staff": INVENTORY_STAFF_ALLOW,
         "staff": STAFF_ALLOW,
@@ -305,6 +369,16 @@ def seed_organization_defaults(
         for code in codes:
             db.add(RolePermission(role_id=role.id, permission_id=by_code[code].id))
     db.add(UserRole(user_id=owner.id, role_id=roles["owner"].id))
+    owner_policy = AccessPolicy(
+        organization_id=org.id, user_id=owner.id, status="active",
+        created_by_user_id=owner.id, reviewed_by_user_id=owner.id,
+        reviewed_at=datetime.now(timezone.utc),
+    )
+    db.add(owner_policy); db.flush()
+    db.add(AccessPolicyScope(
+        organization_id=org.id, policy_id=owner_policy.id, domain_key="*",
+        scope_type="organization", scope_value="*",
+    ))
     vertical_roles = {}
     if org.industry.value == "clinic":
         vertical_roles = {
@@ -361,6 +435,14 @@ def seed_organization_defaults(
         db.add(FeatureFlag(
             organization_id=org.id, flag="college.placement_v1", enabled=True,
             meta={"mode": "enabled", "version": 1},
+        ))
+        db.add(FeatureFlag(
+            organization_id=org.id, flag="college.data_exchange_v1", enabled=True,
+            meta={"mode": "enabled", "version": 1},
+        ))
+        db.add(FeatureFlag(
+            organization_id=org.id, flag="authorization.policy_v2", enabled=True,
+            meta={"mode": "enabled", "version": 2},
         ))
 
 

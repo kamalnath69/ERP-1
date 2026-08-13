@@ -10,7 +10,8 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from starlette.middleware.cors import CORSMiddleware
 
-from app.api.v1 import access, ai, auth, billing, business, client_intelligence, clients, clinic, college, college_integrations, college_placement, dashboard, documents, gym, inventory, misc, notifications, public_site, reports, roles, sales, salon, settings as business_settings, super_admin, team, users
+from app.api.v1 import access, ai, auth, billing, business, client_intelligence, clients, clinic, college, college_assessments, college_integrations, college_placement, dashboard, data_exchange, documents, gym, inventory, misc, notifications, public_site, reports, roles, sales, salon, settings as business_settings, super_admin, team, users
+from app.services.policy_contracts import attach_college_policy_contracts
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.services.auth_security import valid_csrf_token
@@ -142,7 +143,7 @@ async def publish_tenant_changes(request: Request, call_next):
 
 
 api = APIRouter(prefix="/api")
-for router in [auth.router, users.router, roles.router, access.router, clients.router, client_intelligence.router, dashboard.router, inventory.router, sales.router, salon.router, business_settings.router, team.router, business.router, gym.router, clinic.router, college.router, college_placement.router, college_integrations.credential_router, college_integrations.integration_router, documents.router, notifications.router, ai.router, reports.router, billing.router, public_site.router, public_site.super_router, super_admin.router, misc.router]:
+for router in [auth.router, users.router, roles.router, access.router, clients.router, client_intelligence.router, dashboard.router, inventory.router, sales.router, salon.router, business_settings.router, team.router, business.router, gym.router, clinic.router, college.router, college_assessments.router, college_placement.router, data_exchange.router, college_integrations.credential_router, college_integrations.integration_router, documents.router, notifications.router, ai.router, reports.router, billing.router, public_site.router, public_site.super_router, super_admin.router, misc.router]:
     api.include_router(router)
 
 
@@ -226,6 +227,7 @@ async def domain_validation_error(_request: Request, exc: ValidationProblem):
 
 
 app.include_router(api)
+attach_college_policy_contracts(app)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,

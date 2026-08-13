@@ -13,6 +13,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useBusiness } from "@/contexts/BusinessContext";
+import { useAuth } from "@/contexts/AuthContext";
 import api from "@/lib/api";
 import { QUERY_POLICIES, withSkip } from "@/store/api/queryPolicies";
 import { useGetReportsQuery } from "@/store/api/workspaceApi";
@@ -191,9 +192,14 @@ function BusinessReports() {
 
 function CollegeReports() {
   const navigate = useNavigate();
+  const { can } = useAuth();
   const [windowDays, setWindowDays] = useState(30);
   const dashboard = useGetCollegePlacementDashboardQuery({});
-  const leaderboards = useGetCollegeLeaderboardsQuery({ window_days: windowDays, limit: 10 });
+  const canViewLeaderboards = can("college.readiness.view") && can("college.coding.view");
+  const leaderboards = useGetCollegeLeaderboardsQuery(
+    { window_days: windowDays, limit: 10 },
+    withSkip(QUERY_POLICIES.analytical, !canViewLeaderboards),
+  );
   const data = dashboard.data;
   const metrics = data?.metrics || {};
   const readinessRows = leaderboards.data?.readiness || [];
@@ -253,13 +259,13 @@ function CollegeReports() {
         <div className="divide-y">{(data?.department_comparison || []).map((row) => <div key={row.department_id} className="grid gap-3 px-4 py-4 sm:px-5 md:grid-cols-[minmax(180px,1fr)_repeat(4,minmax(80px,.45fr))] md:items-center"><div className="font-semibold">{row.department}</div><ReportValue label="Students" value={row.students} /><ReportValue label="Ready" value={row.ready} /><ReportValue label="Placed" value={row.placed} /><ReportValue label="Attendance" value={row.attendance == null ? "-" : `${row.attendance}%`} /></div>)}</div>
       </Surface>
 
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><h2 className="text-lg font-semibold">Evidence leaderboards</h2><p className="mt-1 text-sm text-muted-foreground">Transparent rankings based only on verified College evidence.</p></div><SegmentControl value={windowDays} onChange={setWindowDays} items={[{ value: 30, label: "30 days" }, { value: 90, label: "90 days" }]} /></div>
+      {canViewLeaderboards && <><div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><h2 className="text-lg font-semibold">Evidence leaderboards</h2><p className="mt-1 text-sm text-muted-foreground">Transparent rankings based only on verified College evidence.</p></div><SegmentControl value={windowDays} onChange={setWindowDays} items={[{ value: 30, label: "30 days" }, { value: 90, label: "90 days" }]} /></div>
       <div className="grid min-w-0 items-start gap-5 xl:grid-cols-12">
         <Surface className="overflow-hidden xl:col-span-7"><div className="border-b px-4 py-4 sm:px-5"><h3 className="flex items-center gap-2 font-semibold"><Medal />Readiness leaders</h3></div><DataTable className="rounded-none border-0 shadow-none" loading={leaderboards.isLoading} rows={readinessRows} columns={readinessColumns} onRowClick={(row) => navigate(`/app/clients/${row.client_id}`)} empty={<EmptyState variant="inline" title="No rankable readiness evidence" description="Students remain visible after they meet the minimum evidence coverage." className="m-4" />} /></Surface>
         <ChartPanel className="xl:col-span-5" title="Coding leaders" subtitle="Solved problems from consented coding profiles">
           <BusinessChart data={codingRows.slice(0, 8).map((row) => ({ name: row.name, solved: row.total_solved }))} xKey="name" type="bar" series={[{ key: "solved", label: "Solved" }]} height={320} ariaLabel="Student coding leaderboard" />
         </ChartPanel>
-      </div>
+      </div></>}
     </>}
   </PageShell>;
 }

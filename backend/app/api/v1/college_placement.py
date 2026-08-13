@@ -31,6 +31,7 @@ from app.models import (
     CollegeStudentProfile, CollegeTermResult, Document, FeatureFlag, Job, User,
 )
 from app.services.audit import log_action
+from app.ai.retrieval import ensure_college_document_entity_access
 from app.services.college import require_college, serialize, tenant_row
 from app.services.college_access import CollegeAccess, resolve_college_access, validate_college_filters
 from app.services.college_imports import RESOURCE_FIELDS, commit_run, stage_rows
@@ -42,6 +43,7 @@ from app.services.college_placement import (
 )
 from app.services.cursor_pagination import decode_cursor, encode_cursor, page_response, page_size
 from app.services.platform_security import encrypt_secret
+from app.services.rbac import get_user_permissions
 from app.services.upload_validation import safe_upload_name, validate_upload_signature
 
 
@@ -64,6 +66,14 @@ router = APIRouter(
     tags=["college-placement"],
     dependencies=[Depends(require_entitlements("module.college")), Depends(require_placement_v1)],
 )
+
+
+ERP_PULL_RESOURCES = {
+    "departments", "programs", "terms", "cohorts", "courses", "students",
+    "term_results", "attendance", "skills", "assessments", "exam_cycles",
+    "assessment_marks", "internship_clearance",
+}
+MAPPING_PATH_PATTERN = re.compile(r"^[A-Za-z0-9_.$\[\]-]{1,240}$")
 
 
 class ReadinessPolicyBody(RequestModel):
@@ -328,7 +338,11 @@ class OfferBody(RequestModel):
 
 
 class ImportPreviewBody(RequestModel):
-    resource_type: Literal["students", "term_results", "attendance", "skills", "assessments", "internship_clearance"]
+    resource_type: Literal[
+        "departments", "programs", "terms", "cohorts", "courses", "students",
+        "term_results", "attendance", "skills", "assessments", "internship_clearance",
+        "exam_cycles", "assessment_marks",
+    ]
     rows: list[dict] = Field(min_length=1, max_length=5000)
     mapping: dict = Field(default_factory=dict)
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=180)
@@ -350,12 +364,60 @@ class ConnectorBody(RequestModel):
             raise ValueError("A header name is required for header authentication")
         if self.auth_header and not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", self.auth_header):
             raise ValueError("Authentication header name is invalid")
+        if len(json.dumps(self.mapping, default=str)) > 100_000:
+            raise ValueError("ERP mapping is too large")
+        resources = self.mapping.get("resources", self.mapping)
+        if not isinstance(resources, dict):
+            raise ValueError("ERP mapping resources must be an object")
+        unknown_resources = set(resources) - ERP_PULL_RESOURCES
+        if unknown_resources:
+            raise ValueError(f"Unsupported ERP resources: {', '.join(sorted(unknown_resources))}")
+        for resource, config in resources.items():
+            if not isinstance(config, dict):
+                raise ValueError(f"{resource} mapping must be an object")
+            path = config.get("path")
+            if path is not None and (not isinstance(path, str) or len(path) > 500 or "://" in path):
+                raise ValueError(f"{resource} endpoint must be a relative path")
+            root_path = config.get("root_path")
+            if root_path is not None and (not isinstance(root_path, str) or not MAPPING_PATH_PATTERN.fullmatch(root_path)):
+                raise ValueError(f"{resource} root path is invalid")
+            for mapping_key in ("fields", "metrics"):
+                mapping = config.get(mapping_key, {})
+                if not isinstance(mapping, dict) or len(mapping) > 200:
+                    raise ValueError(f"{resource} {mapping_key} mapping must be an object with at most 200 entries")
+                for target, source in mapping.items():
+                    if not MAPPING_PATH_PATTERN.fullmatch(str(target)) or not MAPPING_PATH_PATTERN.fullmatch(str(source)):
+                        raise ValueError(f"{resource} {mapping_key} contains an invalid field path")
+            resource_pagination = config.get("pagination")
+            if resource_pagination is not None and not isinstance(resource_pagination, dict):
+                raise ValueError(f"{resource} pagination must be an object")
+        if len(json.dumps(self.pagination, default=str)) > 20_000:
+            raise ValueError("ERP pagination mapping is too large")
+        if not isinstance(self.pagination, dict):
+            raise ValueError("ERP pagination must be an object")
+        mode = self.pagination.get("mode")
+        if mode not in {None, "cursor", "updated_since"}:
+            raise ValueError("ERP pagination mode must be cursor or updated_since")
+        for key in ("cursor_param", "updated_since_param", "next_url_path", "cursor_path"):
+            value = self.pagination.get(key)
+            if value is not None and (not isinstance(value, str) or not MAPPING_PATH_PATTERN.fullmatch(value)):
+                raise ValueError(f"ERP pagination {key} is invalid")
         return self
 
 
 class SyncBody(RequestModel):
-    resource_types: list[Literal["students", "term_results", "attendance", "skills", "assessments", "internship_clearance"]] = Field(default_factory=lambda: ["students", "term_results", "attendance"])
+    resource_types: list[Literal[
+        "departments", "programs", "terms", "cohorts", "courses", "students",
+        "term_results", "attendance", "skills", "assessments", "exam_cycles",
+        "assessment_marks", "internship_clearance",
+    ]] = Field(default_factory=list, max_length=20)
     idempotency_key: str = Field(default_factory=lambda: str(uuid.uuid4()), min_length=8, max_length=120)
+
+    @model_validator(mode="after")
+    def validate_resources(self):
+        if len(self.resource_types) != len(set(self.resource_types)):
+            raise ValueError("ERP sync resources cannot contain duplicates")
+        return self
 
 
 class ResumeExtractBody(RequestModel):
@@ -387,6 +449,8 @@ def _run_payload(run: CollegeImportRun) -> dict:
 
 
 def _connector_payload(row: CollegeDataConnector) -> dict:
+    mapping = row.mapping or {}
+    resource_configs = mapping.get("resources", mapping)
     return {
         "id": row.id,
         "name": row.name,
@@ -396,6 +460,7 @@ def _connector_payload(row: CollegeDataConnector) -> dict:
         "auth_header": row.auth_header,
         "api_key_configured": bool(row.encrypted_api_key),
         "mapping": row.mapping,
+        "resource_types": sorted(resource_configs) if isinstance(resource_configs, dict) else [],
         "pagination": row.pagination,
         "sync_interval_hours": row.sync_interval_hours,
         "status": row.status,
@@ -443,12 +508,219 @@ def _queue_job(db: Session, organization_id: str, kind: str, payload: dict, idem
     return job
 
 
-def _require_student_scope(db: Session, user: User, student_id: str) -> None:
-    resolve_college_access(db, user).require_student(student_id)
+def _require_student_scope(db: Session, user: User, student_id: str, domain: str = "students") -> None:
+    resolve_college_access(db, user, domain).require_student(student_id)
+
+
+def _require_sensitive_capability(db: Session, user: User, permission: str, message: str) -> None:
+    if permission not in get_user_permissions(db, user):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, message)
+
+
+def _student_document(db: Session, user: User, document_id: str, student_id: str, label: str = "Document") -> Document:
+    _require_sensitive_capability(
+        db, user, "college.documents.sensitive.view", "Sensitive student document access is required",
+    )
+    if "documents.view" not in get_user_permissions(db, user):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Document access is required")
+    document = tenant_row(db, Document, document_id, user, label)
+    ensure_college_document_entity_access(db, user, document.entity_type, document.entity_id)
+    if document.entity_type in {"client", "patient", "student", "college_student"}:
+        linked = db.execute(select(CollegeStudentProfile).where(
+            CollegeStudentProfile.organization_id == user.organization_id,
+            or_(CollegeStudentProfile.id == document.entity_id, CollegeStudentProfile.client_id == document.entity_id),
+        )).scalar_one_or_none()
+        if not linked or linked.id != student_id:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"{label} not found")
+    return document
+
+
+def _intersect_access(*items: CollegeAccess, domain: str) -> CollegeAccess:
+    constrained = [item for item in items if not item.unrestricted]
+    if not constrained:
+        return CollegeAccess(
+            unrestricted=True,
+            policy_version=max((item.policy_version for item in items), default=0),
+            domain=domain,
+        )
+    return CollegeAccess(
+        unrestricted=False,
+        student_ids=frozenset.intersection(*(item.student_ids for item in constrained)),
+        full_student_ids=frozenset.intersection(*(item.full_student_ids for item in constrained)),
+        department_ids=frozenset.intersection(*(item.department_ids for item in constrained)),
+        program_ids=frozenset.intersection(*(item.program_ids for item in constrained)),
+        cohort_ids=frozenset.intersection(*(item.cohort_ids for item in constrained)),
+        course_offering_ids=frozenset.intersection(*(item.course_offering_ids for item in constrained)),
+        location_ids=frozenset.intersection(*(item.location_ids for item in constrained)),
+        policy_version=max((item.policy_version for item in items), default=0),
+        domain=domain,
+    )
+
+
+LEGACY_IMPORT_REQUIREMENTS = {
+    "departments": ("academics", "college.academics.manage"),
+    "programs": ("academics", "college.academics.manage"),
+    "terms": ("academics", "college.academics.manage"),
+    "cohorts": ("academics", "college.academics.manage"),
+    "courses": ("academics", "college.academics.manage"),
+    "students": ("students", "college.students.manage"),
+    "term_results": ("assessments", "college.assessments.record"),
+    "assessments": ("assessments", "college.assessments.record"),
+    "exam_cycles": ("assessments", "college.assessments.manage"),
+    "assessment_marks": ("assessments", "college.assessments.record"),
+    "attendance": ("attendance", "college.attendance.mark"),
+    "skills": ("coding", "college.coding.manage"),
+    "internship_clearance": ("clearance", "college.clearance.manage"),
+}
+
+
+def _legacy_import_access(db: Session, user: User, resource_type: str) -> CollegeAccess:
+    requirement = LEGACY_IMPORT_REQUIREMENTS.get(resource_type)
+    if not requirement:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unsupported College import resource")
+    domain, permission = requirement
+    if permission not in get_user_permissions(db, user):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "This import requires the corresponding College work area and safeguard",
+        )
+    data_access = resolve_college_access(db, user, "data")
+    domain_access = resolve_college_access(db, user, domain)
+    access = _intersect_access(data_access, domain_access, domain=domain)
+    if resource_type in {"departments", "terms"} and not access.unrestricted:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "This institution-wide structure import requires whole-institution reach",
+        )
+    return access
+
+
+def _optional_domain_access(
+    db: Session,
+    user: User,
+    permissions: set[str],
+    domain: str,
+    permission: str,
+) -> CollegeAccess | None:
+    if permission not in permissions:
+        return None
+    try:
+        return resolve_college_access(db, user, domain)
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_403_FORBIDDEN:
+            return None
+        raise
+
+
+def _sanitize_student_intelligence(db: Session, user: User, student_id: str, payload: dict) -> dict:
+    permissions = get_user_permissions(db, user)
+    domains = {
+        "assessments": _optional_domain_access(db, user, permissions, "assessments", "college.assessments.view"),
+        "attendance": _optional_domain_access(db, user, permissions, "attendance", "college.attendance.view"),
+        "coding": _optional_domain_access(db, user, permissions, "coding", "college.coding.view"),
+        "placements": _optional_domain_access(db, user, permissions, "placements", "college.placements.view"),
+        "documents": _optional_domain_access(db, user, permissions, "documents", "documents.view"),
+        "clearance": _optional_domain_access(db, user, permissions, "clearance", "college.clearance.view"),
+    }
+
+    def can(domain: str) -> bool:
+        access = domains.get(domain)
+        return bool(access and access.allows_student(student_id))
+
+    student = payload.get("student") or {}
+    if "college.students.contact.view" not in permissions:
+        student.pop("email", None)
+        student.pop("phone", None)
+    if not can("assessments"):
+        payload["academics"] = []
+        payload["assessments"] = []
+    if not can("attendance"):
+        payload["attendance"] = []
+    if not can("coding"):
+        payload["coding"] = {"account": None, "snapshots": []}
+        payload["evidence"] = {"skill": [], "project": [], "certification": []}
+    if not can("placements"):
+        payload["career"] = None
+        payload["applications"] = []
+    if not can("clearance"):
+        payload["fee_clearance"] = None
+    elif payload.get("fee_clearance"):
+        # Placement and academic staff need the gate, not financial details or
+        # invoice counts. Amounts remain in the finance-only endpoints.
+        payload["fee_clearance"] = {"status": payload["fee_clearance"].get("status")}
+    if "college.notes.private.view" not in permissions:
+        payload["interventions"] = []
+
+    allowed_activity_types = {"preparation"}
+    if can("assessments"):
+        allowed_activity_types.add("term_result")
+    if can("coding"):
+        allowed_activity_types.add("coding_snapshot")
+    if can("placements"):
+        allowed_activity_types.add("application_stage")
+    if "college.notes.private.view" in permissions:
+        allowed_activity_types.add("intervention")
+    payload["activity"] = [
+        row for row in payload.get("activity", []) if row.get("type") in allowed_activity_types
+    ]
+
+    readiness = payload.get("readiness") or {}
+    source_records = dict(readiness.get("source_records") or {})
+    if not can("assessments"):
+        for key in ("academics", "assessment", "assessments", "term_results"):
+            source_records.pop(key, None)
+    if not can("attendance"):
+        source_records.pop("attendance", None)
+    if not can("coding"):
+        source_records.pop("coding", None)
+    if not can("placements"):
+        for key in ("profile", "projects", "placement"):
+            source_records.pop(key, None)
+    if readiness:
+        readiness["source_records"] = source_records
+    return payload
+
+
+def _sanitize_roster_items(db: Session, user: User, payload: dict) -> dict:
+    permissions = get_user_permissions(db, user)
+    domain_permissions = {
+        "assessments": "college.assessments.view",
+        "attendance": "college.attendance.view",
+        "coding": "college.coding.view",
+        "placements": "college.placements.view",
+        "documents": "documents.view",
+        "clearance": "college.clearance.view",
+    }
+    domains = {
+        domain: _optional_domain_access(db, user, permissions, domain, permission)
+        for domain, permission in domain_permissions.items()
+    }
+    for item in payload.get("items", []):
+        student_id = item.get("id")
+
+        def can(domain: str) -> bool:
+            access = domains.get(domain)
+            return bool(access and access.allows_student(student_id))
+
+        if not can("assessments"):
+            item["cgpa"] = None
+            item["active_backlogs"] = None
+        if not can("attendance"):
+            item["attendance_percent"] = None
+        if not can("coding"):
+            item["coding_total"] = None
+            item["coding_fresh_at"] = None
+        if not can("documents"):
+            item["resume_status"] = None
+        if not can("placements"):
+            item["placement_status"] = None
+        if not can("clearance"):
+            item["fee_clearance_status"] = None
+    return payload
 
 
 def _require_application_scope(db: Session, user: User, application: CollegePlacementApplication) -> None:
-    _require_student_scope(db, user, application.student_profile_id)
+    _require_student_scope(db, user, application.student_profile_id, "placements")
 
 
 def _require_opportunity_scope(access: CollegeAccess, opportunity: CollegePlacementOpportunity) -> None:
@@ -482,12 +754,22 @@ def get_placement_dashboard(
     department_id: str | None = None,
     program_id: str | None = None,
     cohort_id: str | None = None,
+    cohort_ids: list[str] | None = Query(default=None),
     db: Session = Depends(get_db),
-    user: User = Depends(require_permissions("college.view", "college.readiness.view")),
+    user: User = Depends(require_permissions("college.view", "college.placement_reports.view")),
 ):
     require_college(db, user)
-    access = resolve_college_access(db, user)
-    validate_college_filters(access, department_id=department_id, program_id=program_id, cohort_id=cohort_id)
+    access = resolve_college_access(db, user, "reports")
+    selected_cohort_ids = list(dict.fromkeys(cohort_ids or []))
+    if len(selected_cohort_ids) > 50:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Compare at most 50 cohorts")
+    validate_college_filters(
+        access,
+        department_id=department_id,
+        program_id=program_id,
+        cohort_id=cohort_id,
+        cohort_ids=selected_cohort_ids,
+    )
     payload = placement_dashboard(
         db, user.organization_id,
         academic_year=academic_year,
@@ -495,6 +777,7 @@ def get_placement_dashboard(
         department_id=department_id,
         program_id=program_id,
         cohort_id=cohort_id,
+        cohort_ids=selected_cohort_ids,
         allowed_student_ids=access.constrained_student_ids,
     )
     db.commit()
@@ -512,7 +795,11 @@ def get_leaderboards(
     user: User = Depends(require_permissions("college.readiness.view", "college.coding.view")),
 ):
     require_college(db, user)
-    access = resolve_college_access(db, user)
+    access = _intersect_access(
+        resolve_college_access(db, user, "coding"),
+        resolve_college_access(db, user, "readiness"),
+        domain="leaderboards",
+    )
     validate_college_filters(access, department_id=department_id, program_id=program_id, cohort_id=cohort_id)
     payload = placement_leaderboards(
         db, user.organization_id,
@@ -534,10 +821,12 @@ def get_student_intelligence(
     user: User = Depends(require_permissions("college.students.view", "college.readiness.view")),
 ):
     require_college(db, user)
-    resolve_college_access(db, user).require_student(student_id)
+    resolve_college_access(db, user, "students").require_student(student_id)
+    resolve_college_access(db, user, "readiness").require_student(student_id)
     payload = student_intelligence(db, user.organization_id, student_id)
     if not payload:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Student not found")
+    payload = _sanitize_student_intelligence(db, user, student_id, payload)
     db.commit()
     return payload
 
@@ -545,10 +834,16 @@ def get_student_intelligence(
 @router.get("/student-intelligence")
 def list_student_intelligence(
     q: str | None = Query(default=None, max_length=120),
+    graduation_year: int | None = Query(default=None, ge=2000, le=2200),
+    graduation_years: list[int] | None = Query(default=None),
     department_id: str | None = None,
     program_id: str | None = None,
     cohort_id: str | None = None,
+    cohort_ids: list[str] | None = Query(default=None),
+    section: str | None = Query(default=None, max_length=20),
     readiness_band: Literal["ready", "developing", "needs_support", "insufficient_evidence"] | None = None,
+    placement_status: Literal["all", "placed", "unplaced", "seeking", "not_participating"] | None = None,
+    sort: Literal["name", "academics_desc"] = "name",
     limit: int = Query(default=25, ge=1, le=100),
     cursor: str | None = None,
     offset: int = Query(default=0, ge=0),
@@ -556,11 +851,30 @@ def list_student_intelligence(
     user: User = Depends(require_permissions("college.students.view", "college.readiness.view")),
 ):
     require_college(db, user)
-    access = resolve_college_access(db, user)
-    validate_college_filters(access, department_id=department_id, program_id=program_id, cohort_id=cohort_id)
+    access = _intersect_access(
+        resolve_college_access(db, user, "students"),
+        resolve_college_access(db, user, "readiness"),
+        domain="student-intelligence",
+    )
+    selected_cohort_ids = list(dict.fromkeys(cohort_ids or []))
+    if len(selected_cohort_ids) > 50:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Compare at most 50 cohorts")
+    validate_college_filters(
+        access,
+        department_id=department_id,
+        program_id=program_id,
+        cohort_id=cohort_id,
+        cohort_ids=selected_cohort_ids,
+    )
+    requested_years = [*(graduation_years or []), *([graduation_year] if graduation_year else [])]
+    if any(year < 2000 or year > 2200 for year in requested_years):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Graduation year must be between 2000 and 2200")
+    years = sorted({int(year) for year in requested_years})
     filters = {
         "q": q, "department_id": department_id, "program_id": program_id,
-        "cohort_id": cohort_id, "readiness_band": readiness_band,
+        "cohort_id": cohort_id, "cohort_ids": selected_cohort_ids,
+        "graduation_years": years, "section": section,
+        "readiness_band": readiness_band, "placement_status": placement_status, "sort": sort,
     }
     cursor_values = decode_cursor(
         cursor, scope="college.student-intelligence",
@@ -572,12 +886,18 @@ def list_student_intelligence(
         department_id=department_id,
         program_id=program_id,
         cohort_id=cohort_id,
+        cohort_ids=selected_cohort_ids,
+        graduation_years=years,
+        section=section,
         readiness_band=readiness_band,
+        placement_status=placement_status,
+        sort=sort,
         limit=limit,
         offset=offset,
         cursor_values=cursor_values,
         allowed_student_ids=access.constrained_student_ids,
     )
+    payload = _sanitize_roster_items(db, user, payload)
     next_values = payload.pop("_next_values", None)
     payload["next_cursor"] = encode_cursor(
         scope="college.student-intelligence", organization_id=user.organization_id,
@@ -593,6 +913,7 @@ def get_readiness_policy(
     user: User = Depends(require_permissions("college.readiness.view")),
 ):
     require_college(db, user)
+    resolve_college_access(db, user, "readiness")
     row = active_readiness_policy(db, user.organization_id, created_by_user_id=user.id)
     db.commit()
     return serialize(row)
@@ -602,9 +923,12 @@ def get_readiness_policy(
 def update_readiness_policy(
     body: ReadinessPolicyBody,
     db: Session = Depends(get_db),
-    user: User = Depends(require_permissions("college.readiness.manage")),
+    user: User = Depends(require_permissions("college.readiness.policy.manage")),
 ):
     require_college(db, user)
+    access = resolve_college_access(db, user, "readiness")
+    if not access.unrestricted:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Whole-institution access is required to manage readiness policy")
     current = active_readiness_policy(db, user.organization_id, created_by_user_id=user.id)
     current.is_active = False
     row = CollegeReadinessPolicy(
@@ -622,7 +946,7 @@ def update_readiness_policy(
     log_action(
         db, organization_id=user.organization_id, user_id=user.id,
         action="college.readiness_policy.updated", resource_type="college_readiness_policy",
-        resource_id=row.id, permission="college.readiness.manage",
+        resource_id=row.id, permission="college.readiness.policy.manage",
         meta={"version": row.version},
     )
     db.commit()
@@ -636,7 +960,7 @@ def recompute_college_readiness(
     user: User = Depends(require_permissions("college.readiness.manage")),
 ):
     require_college(db, user)
-    access = resolve_college_access(db, user)
+    access = resolve_college_access(db, user, "readiness")
     student_ids = access.constrained_student_ids
     if student_id:
         access.require_student(student_id)
@@ -657,10 +981,10 @@ def upsert_career_profile(
     student_id: str,
     body: CareerBody,
     db: Session = Depends(get_db),
-    user: User = Depends(require_permissions("college.students.manage")),
+    user: User = Depends(require_permissions("college.students.update")),
 ):
     require_college(db, user)
-    _require_student_scope(db, user, student_id)
+    _require_student_scope(db, user, student_id, "students")
     tenant_row(db, CollegeStudentProfile, student_id, user, "Student")
     row = db.execute(select(CollegeCareerProfile).where(
         CollegeCareerProfile.organization_id == user.organization_id,
@@ -686,13 +1010,13 @@ def add_career_evidence(
     student_id: str,
     body: EvidenceBody,
     db: Session = Depends(get_db),
-    user: User = Depends(require_permissions("college.students.manage")),
+    user: User = Depends(require_permissions("college.students.update")),
 ):
     require_college(db, user)
-    _require_student_scope(db, user, student_id)
+    _require_student_scope(db, user, student_id, "students")
     tenant_row(db, CollegeStudentProfile, student_id, user, "Student")
     if body.document_id:
-        tenant_row(db, Document, body.document_id, user, "Document")
+        _student_document(db, user, body.document_id, student_id)
     payload = body.model_dump()
     verified = payload.pop("is_verified")
     row = CollegeCareerEvidence(
@@ -715,10 +1039,10 @@ def add_term_result(
     student_id: str,
     body: TermResultBody,
     db: Session = Depends(get_db),
-    user: User = Depends(require_permissions("college.assessments.manage")),
+    user: User = Depends(require_permissions("college.assessments.record")),
 ):
     require_college(db, user)
-    _require_student_scope(db, user, student_id)
+    _require_student_scope(db, user, student_id, "assessments")
     tenant_row(db, CollegeStudentProfile, student_id, user, "Student")
     if body.term_id:
         from app.models import CollegeTerm
@@ -752,7 +1076,7 @@ def add_attendance_snapshot(
     user: User = Depends(require_permissions("college.attendance.mark")),
 ):
     require_college(db, user)
-    _require_student_scope(db, user, student_id)
+    _require_student_scope(db, user, student_id, "attendance")
     tenant_row(db, CollegeStudentProfile, student_id, user, "Student")
     percentage = body.attendance_percent
     if percentage is None and body.classes_held:
@@ -785,10 +1109,10 @@ def add_placement_assessment(
     student_id: str,
     body: PlacementAssessmentBody,
     db: Session = Depends(get_db),
-    user: User = Depends(require_permissions("college.assessments.manage")),
+    user: User = Depends(require_permissions("college.assessments.record")),
 ):
     require_college(db, user)
-    _require_student_scope(db, user, student_id)
+    _require_student_scope(db, user, student_id, "assessments")
     tenant_row(db, CollegeStudentProfile, student_id, user, "Student")
     row = CollegePlacementAssessment(
         organization_id=user.organization_id,
@@ -807,10 +1131,10 @@ def add_preparation_activity(
     student_id: str,
     body: PreparationBody,
     db: Session = Depends(get_db),
-    user: User = Depends(require_permissions("college.students.manage")),
+    user: User = Depends(require_permissions("college.readiness.intervene")),
 ):
     require_college(db, user)
-    _require_student_scope(db, user, student_id)
+    _require_student_scope(db, user, student_id, "readiness")
     tenant_row(db, CollegeStudentProfile, student_id, user, "Student")
     row = CollegePreparationActivity(
         organization_id=user.organization_id,
@@ -828,10 +1152,11 @@ def add_intervention(
     student_id: str,
     body: InterventionBody,
     db: Session = Depends(get_db),
-    user: User = Depends(require_permissions("college.readiness.manage")),
+    user: User = Depends(require_permissions("college.readiness.intervene")),
 ):
     require_college(db, user)
-    _require_student_scope(db, user, student_id)
+    _require_student_scope(db, user, student_id, "readiness")
+    _require_sensitive_capability(db, user, "college.notes.private.view", "Private student note access is required")
     tenant_row(db, CollegeStudentProfile, student_id, user, "Student")
     row = CollegeStudentIntervention(
         organization_id=user.organization_id,
@@ -850,11 +1175,12 @@ def update_intervention(
     intervention_id: str,
     body: InterventionUpdateBody,
     db: Session = Depends(get_db),
-    user: User = Depends(require_permissions("college.readiness.manage")),
+    user: User = Depends(require_permissions("college.readiness.intervene")),
 ):
     require_college(db, user)
     row = tenant_row(db, CollegeStudentIntervention, intervention_id, user, "Intervention")
-    _require_student_scope(db, user, row.student_profile_id)
+    _require_student_scope(db, user, row.student_profile_id, "readiness")
+    _require_sensitive_capability(db, user, "college.notes.private.view", "Private student note access is required")
     row.status = body.status
     row.resolution_note = body.resolution_note
     row.resolved_at = datetime.now(timezone.utc) if body.status == "resolved" else None
@@ -870,7 +1196,7 @@ def upsert_coding_account(
     user: User = Depends(require_permissions("college.coding.manage")),
 ):
     require_college(db, user)
-    _require_student_scope(db, user, student_id)
+    _require_student_scope(db, user, student_id, "coding")
     tenant_row(db, CollegeStudentProfile, student_id, user, "Student")
     row = db.execute(select(CollegeCodingAccount).where(
         CollegeCodingAccount.organization_id == user.organization_id,
@@ -906,7 +1232,7 @@ def add_coding_snapshot(
     user: User = Depends(require_permissions("college.coding.manage")),
 ):
     require_college(db, user)
-    _require_student_scope(db, user, student_id)
+    _require_student_scope(db, user, student_id, "coding")
     tenant_row(db, CollegeStudentProfile, student_id, user, "Student")
     account = db.execute(select(CollegeCodingAccount).where(
         CollegeCodingAccount.organization_id == user.organization_id,
@@ -944,7 +1270,7 @@ def queue_coding_sync(
 ):
     require_college(db, user)
     account = tenant_row(db, CollegeCodingAccount, account_id, user, "Coding account")
-    _require_student_scope(db, user, account.student_profile_id)
+    _require_student_scope(db, user, account.student_profile_id, "coding")
     if account.consent_status != "granted":
         raise HTTPException(status.HTTP_409_CONFLICT, "Student consent is required before synchronization")
     job = _queue_job(
@@ -963,6 +1289,7 @@ def list_pipeline_stages(
     user: User = Depends(require_permissions("college.placements.view")),
 ):
     require_college(db, user)
+    resolve_college_access(db, user, "placements")
     rows = ensure_default_pipeline(db, user.organization_id)
     db.commit()
     return {"items": [serialize(row) for row in rows]}
@@ -975,6 +1302,9 @@ def replace_pipeline_stages(
     user: User = Depends(require_permissions("college.opportunities.manage")),
 ):
     require_college(db, user)
+    access = resolve_college_access(db, user, "placements")
+    if not access.unrestricted:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Whole-institution access is required to configure the placement pipeline")
     existing = {row.id: row for row in ensure_default_pipeline(db, user.organization_id)}
     used_ids = set()
     for row in existing.values():
@@ -1023,6 +1353,7 @@ def list_companies(
     user: User = Depends(require_permissions("college.placements.view")),
 ):
     require_college(db, user)
+    resolve_college_access(db, user, "placements")
     filters = {"q": q}
     values = decode_cursor(cursor, scope="college.companies", organization_id=user.organization_id, filters=filters)
     query = select(CollegePlacementCompany).where(
@@ -1056,6 +1387,7 @@ def create_company(
     user: User = Depends(require_permissions("college.companies.manage")),
 ):
     require_college(db, user)
+    resolve_college_access(db, user, "placements")
     row = CollegePlacementCompany(
         organization_id=user.organization_id,
         **{**body.model_dump(), "name": body.name.strip()},
@@ -1078,6 +1410,7 @@ def update_company(
     user: User = Depends(require_permissions("college.companies.manage")),
 ):
     require_college(db, user)
+    resolve_college_access(db, user, "placements")
     row = tenant_row(db, CollegePlacementCompany, company_id, user, "Company")
     for key, value in body.model_dump().items():
         setattr(row, key, value.strip() if key == "name" else value)
@@ -1095,7 +1428,7 @@ def list_opportunities(
     user: User = Depends(require_permissions("college.placements.view")),
 ):
     require_college(db, user)
-    access = resolve_college_access(db, user)
+    access = resolve_college_access(db, user, "placements")
     filters = {"q": q, "status": opportunity_status}
     values = decode_cursor(cursor, scope="college.opportunities", organization_id=user.organization_id, filters=filters)
     query = (
@@ -1147,7 +1480,7 @@ def create_opportunity(
     user: User = Depends(require_permissions("college.opportunities.manage")),
 ):
     require_college(db, user)
-    _validate_opportunity_scope(resolve_college_access(db, user), body.eligibility_rules)
+    _validate_opportunity_scope(resolve_college_access(db, user, "placements"), body.eligibility_rules)
     tenant_row(db, CollegePlacementCompany, body.company_id, user, "Company")
     row = CollegePlacementOpportunity(
         organization_id=user.organization_id,
@@ -1168,7 +1501,7 @@ def update_opportunity(
     user: User = Depends(require_permissions("college.opportunities.manage")),
 ):
     require_college(db, user)
-    access = resolve_college_access(db, user)
+    access = resolve_college_access(db, user, "placements")
     row = tenant_row(db, CollegePlacementOpportunity, opportunity_id, user, "Opportunity")
     _require_opportunity_scope(access, row)
     _validate_opportunity_scope(access, body.eligibility_rules)
@@ -1186,7 +1519,7 @@ def evaluate_opportunity(
     user: User = Depends(require_permissions("college.applications.manage")),
 ):
     require_college(db, user)
-    access = resolve_college_access(db, user)
+    access = resolve_college_access(db, user, "placements")
     opportunity = tenant_row(db, CollegePlacementOpportunity, opportunity_id, user, "Opportunity")
     _require_opportunity_scope(access, opportunity)
     students = list(db.execute(select(CollegeStudentProfile).where(
@@ -1230,7 +1563,7 @@ def list_applications(
     user: User = Depends(require_permissions("college.placements.view")),
 ):
     require_college(db, user)
-    access = resolve_college_access(db, user)
+    access = resolve_college_access(db, user, "placements")
     filters = {
         "q": q, "opportunity_id": opportunity_id,
         "student_id": student_id, "stage_id": stage_id,
@@ -1317,7 +1650,7 @@ def create_application(
     user: User = Depends(require_permissions("college.applications.manage")),
 ):
     require_college(db, user)
-    access = resolve_college_access(db, user)
+    access = resolve_college_access(db, user, "placements")
     access.require_student(body.student_profile_id)
     opportunity = tenant_row(db, CollegePlacementOpportunity, body.opportunity_id, user, "Opportunity")
     _require_opportunity_scope(access, opportunity)
@@ -1416,7 +1749,7 @@ def override_application_eligibility(
     application_id: str,
     body: EligibilityOverrideBody,
     db: Session = Depends(get_db),
-    user: User = Depends(require_permissions("college.applications.manage")),
+    user: User = Depends(require_permissions("college.applications.manage", "college.eligibility.override")),
 ):
     require_college(db, user)
     application = tenant_row(db, CollegePlacementApplication, application_id, user, "Application")
@@ -1470,7 +1803,7 @@ def create_offer(
     application = tenant_row(db, CollegePlacementApplication, application_id, user, "Application")
     _require_application_scope(db, user, application)
     if body.document_id:
-        tenant_row(db, Document, body.document_id, user, "Offer document")
+        _student_document(db, user, body.document_id, application.student_profile_id, "Offer document")
     row = CollegePlacementOffer(
         organization_id=user.organization_id,
         application_id=application.id,
@@ -1490,7 +1823,7 @@ def preview_import(
     user: User = Depends(require_permissions("college.imports.manage")),
 ):
     require_college(db, user)
-    access = resolve_college_access(db, user)
+    access = _legacy_import_access(db, user, body.resource_type)
     run = stage_rows(
         db,
         organization_id=user.organization_id,
@@ -1510,14 +1843,17 @@ def preview_import(
 
 @router.post("/imports/csv/preview", status_code=status.HTTP_201_CREATED)
 async def preview_csv_import(
-    resource_type: Literal["students", "term_results", "attendance", "skills", "assessments", "internship_clearance"] = Form(...),
+    resource_type: Literal[
+        "departments", "programs", "terms", "cohorts", "courses", "students",
+        "term_results", "attendance", "skills", "assessments", "internship_clearance",
+    ] = Form(...),
     mapping_json: str = Form("{}"),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     user: User = Depends(require_permissions("college.imports.manage")),
 ):
     require_college(db, user)
-    access = resolve_college_access(db, user)
+    access = _legacy_import_access(db, user, resource_type)
     content_type = (file.content_type or "text/csv").lower()
     if content_type not in {"text/csv", "application/vnd.ms-excel", "application/csv"}:
         raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "Upload a CSV file")
@@ -1570,8 +1906,8 @@ def commit_import(
     user: User = Depends(require_permissions("college.imports.manage")),
 ):
     require_college(db, user)
-    access = resolve_college_access(db, user)
     run = tenant_row(db, CollegeImportRun, run_id, user, "Import run")
+    access = _legacy_import_access(db, user, run.resource_type)
     if not access.unrestricted and run.started_by_user_id != user.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Import run not found")
     try:
@@ -1603,7 +1939,7 @@ def list_imports(
     user: User = Depends(require_permissions("college.imports.manage")),
 ):
     require_college(db, user)
-    access = resolve_college_access(db, user)
+    access = resolve_college_access(db, user, "data")
     query = select(CollegeImportRun).where(CollegeImportRun.organization_id == user.organization_id)
     if not access.unrestricted:
         query = query.where(CollegeImportRun.started_by_user_id == user.id)
@@ -1632,6 +1968,9 @@ def list_integrations(
     user: User = Depends(require_permissions("college.integrations.manage")),
 ):
     require_college(db, user)
+    access = resolve_college_access(db, user, "data")
+    if not access.unrestricted:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Whole-institution access is required to manage ERP credentials")
     rows = db.execute(
         select(CollegeDataConnector)
         .where(CollegeDataConnector.organization_id == user.organization_id)
@@ -1647,6 +1986,9 @@ def create_integration(
     user: User = Depends(require_permissions("college.integrations.manage")),
 ):
     require_college(db, user)
+    access = resolve_college_access(db, user, "data")
+    if not access.unrestricted:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Whole-institution access is required to manage ERP credentials")
     row = CollegeDataConnector(
         organization_id=user.organization_id,
         name=body.name.strip(),
@@ -1685,6 +2027,9 @@ def update_integration(
     user: User = Depends(require_permissions("college.integrations.manage")),
 ):
     require_college(db, user)
+    access = resolve_college_access(db, user, "data")
+    if not access.unrestricted:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Whole-institution access is required to manage ERP credentials")
     row = tenant_row(db, CollegeDataConnector, connector_id, user, "Integration")
     row.name = body.name.strip()
     row.base_url = _validate_connector_url(body.base_url)
@@ -1708,12 +2053,24 @@ def queue_integration_sync(
     user: User = Depends(require_permissions("college.integrations.manage")),
 ):
     require_college(db, user)
+    access = resolve_college_access(db, user, "data")
+    if not access.unrestricted:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Whole-institution access is required to synchronize ERP data")
     row = tenant_row(db, CollegeDataConnector, connector_id, user, "Integration")
     if not row.encrypted_api_key:
         raise HTTPException(status.HTTP_409_CONFLICT, "Add an API key before synchronizing")
+    mapping = row.mapping or {}
+    configured = set((mapping.get("resources", mapping) or {}).keys())
+    requested = body.resource_types or sorted(configured)
+    if configured and not set(requested).issubset(configured):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "This sync contains resources not configured for the connector")
+    if not requested:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Configure at least one ERP resource before synchronizing")
+    for resource_type in requested:
+        _legacy_import_access(db, user, resource_type)
     job = _queue_job(
         db, user.organization_id, "college_erp_sync",
-        {"connector_id": row.id, "resource_types": body.resource_types, "requested_by_user_id": user.id},
+        {"connector_id": row.id, "resource_types": requested, "requested_by_user_id": user.id},
         f"college-erp:{row.id}:{body.idempotency_key}"[:120],
     )
     row.status = "queued"
@@ -1726,12 +2083,12 @@ def queue_resume_extraction(
     student_id: str,
     body: ResumeExtractBody,
     db: Session = Depends(get_db),
-    user: User = Depends(require_permissions("college.students.manage", "documents.view")),
+    user: User = Depends(require_permissions("college.students.update", "documents.view", "college.documents.sensitive.view")),
 ):
     require_college(db, user)
-    _require_student_scope(db, user, student_id)
+    _require_student_scope(db, user, student_id, "documents")
     tenant_row(db, CollegeStudentProfile, student_id, user, "Student")
-    document = tenant_row(db, Document, body.document_id, user, "Resume document")
+    document = _student_document(db, user, body.document_id, student_id, "Resume document")
     if document.status != "ready":
         raise HTTPException(status.HTTP_409_CONFLICT, "The resume must finish processing before extraction")
     draft = CollegeResumeDraft(
@@ -1757,11 +2114,11 @@ def review_resume_draft(
     draft_id: str,
     body: ResumeReviewBody,
     db: Session = Depends(get_db),
-    user: User = Depends(require_permissions("college.students.manage")),
+    user: User = Depends(require_permissions("college.students.update", "college.documents.sensitive.view")),
 ):
     require_college(db, user)
     draft = tenant_row(db, CollegeResumeDraft, draft_id, user, "Resume draft")
-    _require_student_scope(db, user, draft.student_profile_id)
+    _require_student_scope(db, user, draft.student_profile_id, "documents")
     if draft.status not in {"pending_review", "approved", "rejected"}:
         raise HTTPException(status.HTTP_409_CONFLICT, "Resume extraction is not ready for review")
     if body.decision == "approve":

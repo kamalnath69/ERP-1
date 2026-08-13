@@ -319,19 +319,58 @@ export const collegeApplicationSchema = z.object({
   notes: optionalText({ max: 5000 }),
 });
 
+const collegePullResources = [
+  "departments", "programs", "terms", "cohorts", "courses", "students",
+  "term_results", "attendance", "skills", "exam_cycles", "assessment_marks",
+  "internship_clearance",
+];
+
 export const collegeConnectorSchema = z.object({
   name: requiredText("Connection name", { min: 2, max: 120 }),
   base_url: webUrl({ optional: false }).refine((value) => value.startsWith("https://"), "Use a secure HTTPS URL"),
   auth_mode: z.enum(["bearer", "header"]),
   auth_header: optionalText({ max: 100 }),
-  api_key: z.string().min(1, "API key is required").max(2000, "API key is too long"),
+  api_key: z.string().max(2000, "API key is too long"),
+  has_existing_key: z.boolean().default(false),
   sync_interval_hours: numberInput({ label: "Sync interval", min: 1, max: 168, integer: true }),
+  resources: z.array(z.enum(collegePullResources))
+    .min(1, "Choose at least one ERP resource")
+    .max(collegePullResources.length)
+    .refine((values) => new Set(values).size === values.length, "ERP resources contain duplicates"),
+  mapping_json: z.string().trim().max(50000, "Field mapping is too large").refine((value) => {
+    if (!value) return true;
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed);
+    } catch {
+      return false;
+    }
+  }, "Enter a valid JSON mapping object"),
+  pagination_mode: z.enum(["none", "cursor", "updated_since"]),
+  cursor_param: optionalText({ max: 100 }),
+  updated_since_param: optionalText({ max: 100 }),
+  next_url_path: optionalText({ max: 240 }),
+  cursor_path: optionalText({ max: 240 }),
 }).superRefine((value, context) => {
+  if (!value.api_key && !value.has_existing_key) context.addIssue({ code: "custom", path: ["api_key"], message: "API key is required" });
   if (value.auth_mode === "header" && !value.auth_header) context.addIssue({ code: "custom", path: ["auth_header"], message: "Header name is required" });
   if (value.auth_header && !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(value.auth_header)) context.addIssue({ code: "custom", path: ["auth_header"], message: "Header name is invalid" });
+  if (value.pagination_mode === "cursor" && !value.cursor_path && !value.next_url_path) {
+    context.addIssue({ code: "custom", path: ["cursor_path"], message: "Provide a cursor path or next-page URL path" });
+  }
+  if (value.mapping_json) {
+    try {
+      const parsed = JSON.parse(value.mapping_json);
+      const mappings = parsed.resources || parsed;
+      const unknown = Object.keys(mappings).filter((key) => !collegePullResources.includes(key));
+      if (unknown.length) context.addIssue({ code: "custom", path: ["mapping_json"], message: `Unsupported resources: ${unknown.join(", ")}` });
+    } catch {
+      // The field-level parser reports malformed JSON.
+    }
+  }
 });
 
-const collegePushResources = ["students", "term_results", "attendance", "skills", "assessments", "internship_clearance"];
+const collegePushResources = ["departments", "programs", "terms", "cohorts", "courses", "students", "term_results", "attendance", "skills", "exam_cycles", "assessment_marks", "internship_clearance"];
 
 export const collegePushCredentialSchema = z.object({
   name: requiredText("Credential name", { min: 2, max: 120 }),
