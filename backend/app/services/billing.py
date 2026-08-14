@@ -65,6 +65,8 @@ def provider_error(exc: Exception, operation: str, provider: str = "payment_prov
         return "provider_busy", "The payment provider is busy right now. Please wait a moment and retry"
     if status_code >= 500 or code.upper() in {"SERVER_ERROR", "GATEWAY_ERROR", "PROVIDER_CONNECTION_ERROR"}:
         return "provider_unavailable", "The payment provider is temporarily unavailable. Please retry in a moment"
+    if operation == "order_terminate":
+        return code, "The payment provider could not cancel this checkout. Please try again"
     if "active" in lowered or "state" in lowered:
         return "invalid_subscription_state", "This subscription is still being updated. Please refresh shortly"
     return code, "The payment provider could not start this checkout. Please try again"
@@ -168,6 +170,8 @@ def create_provider_order(
     customer: dict,
     notes: dict,
     idempotency_key: str,
+    expires_at: datetime | None = None,
+    return_url: str | None = None,
 ) -> dict:
     if config.mode == "mock":
         return {
@@ -188,12 +192,7 @@ def create_provider_order(
         if not phone:
             raise HTTPException(422, "A billing phone number is required for Cashfree checkout")
         cashfree_order_id = f"edv_{reference_id.replace('-', '')}"[:45]
-        order = cashfree_provider(
-            config.client_id,
-            config.secret,
-            config.mode,
-            settings.CASHFREE_API_VERSION,
-        ).create_order({
+        cashfree_payload = {
             "order_id": cashfree_order_id,
             "order_amount": paise_to_rupees(amount_paise),
             "order_currency": currency,
@@ -205,7 +204,23 @@ def create_provider_order(
             },
             "order_note": str(notes.get("description") or "Edvatiq checkout")[:200],
             "order_tags": {key: str(value)[:100] for key, value in notes.items() if value is not None},
-        }, idempotency_key=idempotency_key)
+        }
+        if expires_at:
+            normalized_expiry = (
+                expires_at.replace(tzinfo=timezone.utc)
+                if expires_at.tzinfo is None
+                else expires_at.astimezone(timezone.utc)
+            )
+            cashfree_payload["order_expiry_time"] = normalized_expiry.isoformat(timespec="seconds")
+        if return_url:
+            cashfree_payload["order_meta"] = {"return_url": return_url}
+
+        order = cashfree_provider(
+            config.client_id,
+            config.secret,
+            config.mode,
+            settings.CASHFREE_API_VERSION,
+        ).create_order(cashfree_payload, idempotency_key=idempotency_key)
         payment_session_id = str(order.get("payment_session_id") or "").strip()
         if not payment_session_id:
             raise HTTPException(502, "Cashfree did not return a checkout session")
@@ -218,6 +233,38 @@ def create_provider_order(
     except Exception as exc:
         code, message = provider_error(exc, "order", config.provider)
         raise HTTPException(502, message, headers={"X-Edvatiq-Error-Code": code}) from exc
+
+
+def terminate_provider_order(*, provider: str, mode: str, order_id: str | None) -> dict:
+    config = gateway_config(provider, mode)
+    if not order_id:
+        return {"status": "cancelled", "provider_status": "LOCAL_ONLY"}
+    if config.mode == "mock":
+        return {"status": "cancelled", "provider_status": "TERMINATED"}
+    if config.provider == "razorpay":
+        # Razorpay orders cannot be terminated. Local cancellation and late-payment
+        # quarantine keep the abandoned signup from being provisioned.
+        return {"status": "cancelled", "provider_status": "LOCAL_ONLY"}
+    client = cashfree_provider(
+        config.client_id,
+        config.secret,
+        config.mode,
+        settings.CASHFREE_API_VERSION,
+    )
+    try:
+        order = client.terminate_order(order_id)
+    except Exception as exc:
+        try:
+            order = client.fetch_order(order_id)
+        except Exception:
+            code, message = provider_error(exc, "order_terminate", config.provider)
+            raise HTTPException(502, message, headers={"X-Edvatiq-Error-Code": code}) from exc
+    provider_status = str(order.get("order_status") or "").upper()
+    if provider_status == "PAID":
+        return {"status": "paid", "provider_status": provider_status}
+    if provider_status in {"TERMINATED", "TERMINATION_REQUESTED", "EXPIRED"}:
+        return {"status": "cancelled", "provider_status": provider_status}
+    return {"status": "pending", "provider_status": provider_status or "ACTIVE"}
 
 
 def provider_order(
@@ -437,7 +484,12 @@ def verify_provider_payment(
     if order.get("order_status") != "PAID":
         provider_status = str(order.get("order_status") or "ACTIVE").upper()
         status = "failed" if provider_status in {"EXPIRED", "TERMINATED", "TERMINATION_REQUESTED"} else "pending"
-        return {"status": status, "payment_id": None, "method": None}
+        return {
+            "status": status,
+            "payment_id": None,
+            "method": None,
+            "payment_session_id": str(order.get("payment_session_id") or "").strip() or None,
+        }
     try:
         payments = provider_client.fetch_payments(order_id)
     except Exception as exc:

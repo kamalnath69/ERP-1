@@ -173,7 +173,7 @@ class Settings:
     ).strip().lower()
     if CASHFREE_MODE not in {"mock", "test", "live"}:
         raise ValueError("CASHFREE_MODE must be mock, test, or live")
-    CASHFREE_API_VERSION: str = os.environ.get("CASHFREE_API_VERSION", "2025-01-01").strip()
+    CASHFREE_API_VERSION: str = os.environ.get("CASHFREE_API_VERSION", "2026-01-01").strip()
     CASHFREE_APP_ID: str = os.environ.get("CASHFREE_APP_ID", "").strip()
     CASHFREE_SECRET_KEY: str = os.environ.get("CASHFREE_SECRET_KEY", "").strip()
     CASHFREE_WEBHOOK_SECRET: str = os.environ.get("CASHFREE_WEBHOOK_SECRET", "").strip()

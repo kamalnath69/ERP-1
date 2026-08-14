@@ -178,11 +178,25 @@ def valid_checkout_token(checkout: SignupCheckout, value: str) -> bool:
 
 
 def checkout_response(checkout: SignupCheckout, access_token: str | None = None, key_id: str | None = None) -> dict:
+    next_action = {
+        "completed": "verify_email",
+        "manual_review": "support",
+        "cancelled": "restart",
+        "expired": "restart",
+        "failed": "restart",
+        "creating": "wait",
+        "paid": "wait",
+    }.get(checkout.status, "pay")
+    safe_failure_codes = {
+        "provider_order_failed", "provider_order_inactive", "payment_failed",
+        "cancelled_by_user", "late_payment_inactive_checkout",
+    }
     response = {
         "checkout_id": checkout.id,
         "status": checkout.status,
+        "next_action": next_action,
         "order_id": checkout.provider_order_id,
-        "payment_session_id": checkout.provider_session_id,
+        "payment_session_id": checkout.provider_session_id if next_action == "pay" else None,
         "amount_paise": int(checkout.total_paise),
         "subtotal_paise": int(checkout.subtotal_paise),
         "tax_paise": int(checkout.tax_paise),
@@ -194,9 +208,12 @@ def checkout_response(checkout: SignupCheckout, access_token: str | None = None,
         "mock_mode": checkout.provider_mode == "mock",
         "expires_at": checkout.expires_at,
         "plan": checkout.plan_snapshot,
+        "billing_interval": checkout.billing_interval,
+        "organization_name": checkout.organization_name,
         "organization_slug": checkout.organization_slug,
         "email": checkout.admin_email if checkout.status == "completed" else None,
         "requires_verification": checkout.status == "completed",
+        "failure_code": checkout.last_error if checkout.last_error in safe_failure_codes else None,
     }
     if access_token:
         response["checkout_token"] = access_token

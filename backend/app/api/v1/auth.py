@@ -26,7 +26,9 @@ from app.services.auth_security import (
     new_csrf_token, set_auth_cookies, token_hash,
 )
 from app.services.email import send_auth_code_email
-from app.services.billing import create_provider_order, plan_price, verify_provider_payment
+from app.services.billing import (
+    create_provider_order, plan_price, terminate_provider_order, verify_provider_payment,
+)
 from app.services.payment_gateways import active_gateway, gateway_config
 from app.services.public_site import create_legal_acceptance, validate_legal_acceptance
 from app.services.signup import (
@@ -38,6 +40,7 @@ from app.services.signup import (
 router = APIRouter(prefix="/auth", tags=["auth"])
 DUMMY_PASSWORD_HASH = hash_password("NotARealPassword123")
 PUBLIC_MESSAGE = "If the account exists, a code has been sent"
+INACTIVE_CHECKOUT_STATUSES = {"cancelled", "expired", "failed"}
 
 
 class PlatformInviteAccept(RequestModel):
@@ -254,6 +257,124 @@ def _send_signup_verification(
     return sent, test_code
 
 
+def _checkout_status_payload(checkout: SignupCheckout, access_token: str | None = None) -> dict:
+    config = gateway_config(checkout.provider, checkout.provider_mode, require_configured=False)
+    key_id = config.client_id if (
+        checkout.provider == "razorpay" and checkout.status == "ready" and config.configured
+    ) else None
+    return checkout_response(checkout, access_token, key_id)
+
+
+def _completed_signup_payload(
+    checkout: SignupCheckout,
+    organization: Organization,
+    owner: User,
+    *,
+    email_sent: bool | None = None,
+    test_code: str | None = None,
+) -> dict:
+    payload = {
+        **_checkout_status_payload(checkout),
+        "ok": True,
+        "status": "completed",
+        "next_action": "verify_email",
+        "requires_verification": True,
+        "email": owner.email,
+        "organization_slug": organization.slug,
+        **({"test_code": test_code} if test_code else {}),
+    }
+    if email_sent is not None:
+        payload["email_sent"] = email_sent
+    return payload
+
+
+def _idempotent_checkout_payload(checkout: SignupCheckout, checkout_token: str | None) -> dict:
+    if not checkout_token or not valid_checkout_token(checkout, checkout_token):
+        raise HTTPException(409, "This checkout request cannot be reused. Start a new checkout")
+    config = gateway_config(checkout.provider, checkout.provider_mode, require_configured=False)
+    key_id = config.client_id if (
+        config.provider == "razorpay" and checkout.status == "ready" and config.configured
+    ) else None
+    return checkout_response(checkout, checkout_token, key_id)
+
+
+def _reconcile_signup_checkout(
+    db: Session,
+    checkout: SignupCheckout,
+    request: Request,
+    *,
+    razorpay_order_id: str | None = None,
+    razorpay_payment_id: str | None = None,
+    razorpay_signature: str | None = None,
+) -> dict:
+    if checkout.status == "completed" and checkout.organization_id:
+        organization = db.get(Organization, checkout.organization_id)
+        owner = db.execute(select(User).where(
+            User.organization_id == checkout.organization_id,
+            User.email == checkout.admin_email,
+        )).scalar_one_or_none()
+        if organization and owner:
+            return _completed_signup_payload(checkout, organization, owner)
+
+    if checkout.provider == "razorpay" and not razorpay_payment_id:
+        return _checkout_status_payload(checkout)
+    if checkout.provider == "razorpay" and checkout.provider_order_id != razorpay_order_id:
+        raise HTTPException(409, "Payment does not match this signup checkout")
+
+    verification = verify_provider_payment(
+        provider=checkout.provider,
+        mode=checkout.provider_mode,
+        order_id=checkout.provider_order_id,
+        amount_paise=int(checkout.total_paise),
+        currency=checkout.currency,
+        payment_id=razorpay_payment_id,
+        signature=razorpay_signature,
+    )
+    provider_session_id = verification.get("payment_session_id")
+    if provider_session_id and provider_session_id != checkout.provider_session_id:
+        checkout.provider_session_id = provider_session_id
+
+    if verification["status"] != "paid":
+        if verification["status"] == "failed" and checkout.status not in {"completed", "manual_review"}:
+            checkout.status = "failed"
+            checkout.last_error = "provider_order_inactive"
+            checkout.admin_password_hash = None
+        db.commit()
+        return _checkout_status_payload(checkout)
+
+    payment_id = verification["payment_id"]
+    if checkout.status in INACTIVE_CHECKOUT_STATUSES or checkout.status == "manual_review":
+        checkout.status = "manual_review"
+        checkout.provider_payment_id = payment_id
+        checkout.last_error = "late_payment_inactive_checkout"
+        checkout.admin_password_hash = None
+        db.commit()
+        return _checkout_status_payload(checkout)
+
+    if checkout.status != "completed":
+        checkout.status = "paid"
+    try:
+        organization, owner, created = finalize_signup(
+            db,
+            checkout,
+            payment_id,
+            ip_address=client_ip(request),
+        )
+    except HTTPException:
+        if checkout.status == "manual_review":
+            return _checkout_status_payload(checkout)
+        raise
+    db.commit()
+    sent, test_code = _send_signup_verification(db, checkout, owner, request) if created else (True, None)
+    return _completed_signup_payload(
+        checkout,
+        organization,
+        owner,
+        email_sent=sent,
+        test_code=test_code,
+    )
+
+
 @router.post("/registration/checkout", status_code=201)
 def create_registration_checkout(
     body: PaidSignupCheckoutRequest,
@@ -265,19 +386,24 @@ def create_registration_checkout(
         SignupCheckout.idempotency_key == body.idempotency_key,
     )).scalar_one_or_none()
     if existing:
-        if body.checkout_token and valid_checkout_token(existing, body.checkout_token) and existing.status in {"ready", "completed"}:
-            config = gateway_config(existing.provider, existing.provider_mode)
-            key_id = config.client_id if config.provider == "razorpay" and existing.status == "ready" else None
-            db.commit()
-            return checkout_response(existing, body.checkout_token, key_id)
+        payload = _idempotent_checkout_payload(existing, body.checkout_token)
         db.commit()
-        raise HTTPException(409, "This checkout request cannot be reused. Start a new checkout")
+        return payload
 
     legal_documents = validate_legal_acceptance(db, body.legal_acceptance)
 
     slug = body.organization_slug.strip().lower()
     lock_organization_slug(db, slug)
     now = datetime.now(timezone.utc)
+    # A concurrent retry can miss the uncommitted row before waiting on the
+    # organization advisory lock. Recheck after acquiring it.
+    existing = db.execute(select(SignupCheckout).where(
+        SignupCheckout.idempotency_key == body.idempotency_key,
+    )).scalar_one_or_none()
+    if existing:
+        payload = _idempotent_checkout_payload(existing, body.checkout_token)
+        db.commit()
+        return payload
     if db.execute(select(Organization.id).where(Organization.slug == slug)).first():
         raise HTTPException(409, "Organization slug already exists")
     if db.execute(select(SignupCheckout.id).where(
@@ -307,7 +433,9 @@ def create_registration_checkout(
     config = active_gateway(db)
     if config.provider == "cashfree" and not body.admin_phone:
         raise HTTPException(422, "A phone number is required for Cashfree checkout")
-    access_token = secrets.token_urlsafe(36)
+    # A caller-provided high-entropy token lets the same browser safely recover
+    # an idempotent checkout when the create response is lost in transit.
+    access_token = body.checkout_token or secrets.token_urlsafe(36)
     checkout = SignupCheckout(
         status="creating",
         idempotency_key=body.idempotency_key,
@@ -379,6 +507,8 @@ def create_registration_checkout(
                 "description": f"Edvatiq {definition.name} signup",
             },
             idempotency_key=checkout.idempotency_key,
+            expires_at=checkout.expires_at,
+            return_url=f"{settings.APP_URL.rstrip('/')}/register/payment/{checkout.id}?returned=1",
         )
         checkout.provider_order_id = order["order_id"]
         checkout.provider_session_id = order.get("session_id")
@@ -407,9 +537,48 @@ def registration_checkout_status(
     if checkout.status in ACTIVE_CHECKOUT_STATUSES and checkout.expires_at <= datetime.now(timezone.utc):
         checkout.status = "expired"
         db.commit()
-    config = gateway_config(checkout.provider, checkout.provider_mode)
-    key_id = config.client_id if config.provider == "razorpay" and checkout.status == "ready" else None
-    return checkout_response(checkout, key_id=key_id)
+    return _checkout_status_payload(checkout)
+
+
+@router.post("/registration/checkouts/{checkout_id}/reconcile")
+def reconcile_registration_checkout(
+    checkout_id: str,
+    request: Request,
+    checkout_token: str = Header(alias="X-Signup-Token", min_length=20, max_length=200),
+    db: Session = Depends(get_db),
+):
+    checkout = _authorized_checkout(db, checkout_id, checkout_token, lock=True)
+    return _reconcile_signup_checkout(db, checkout, request)
+
+
+@router.post("/registration/checkouts/{checkout_id}/cancel")
+def cancel_registration_checkout(
+    checkout_id: str,
+    checkout_token: str = Header(alias="X-Signup-Token", min_length=20, max_length=200),
+    db: Session = Depends(get_db),
+):
+    checkout = _authorized_checkout(db, checkout_id, checkout_token, lock=True)
+    if checkout.status in {"completed", "paid", "manual_review"}:
+        raise HTTPException(409, "This checkout can no longer be cancelled")
+    if checkout.status in INACTIVE_CHECKOUT_STATUSES:
+        checkout.admin_password_hash = None
+        db.commit()
+        return _checkout_status_payload(checkout)
+
+    cancellation = terminate_provider_order(
+        provider=checkout.provider,
+        mode=checkout.provider_mode,
+        order_id=checkout.provider_order_id,
+    )
+    if cancellation["status"] == "paid":
+        raise HTTPException(409, "Payment has already been received. Check payment status")
+    if cancellation["status"] != "cancelled":
+        raise HTTPException(409, "The payment provider is still processing this checkout. Try again shortly")
+    checkout.status = "cancelled"
+    checkout.last_error = "cancelled_by_user"
+    checkout.admin_password_hash = None
+    db.commit()
+    return _checkout_status_payload(checkout)
 
 
 @router.post("/registration/checkouts/{checkout_id}/mock-pay")
@@ -426,25 +595,31 @@ def mock_registration_payment(
         checkout.status = "expired"
         db.commit()
         raise HTTPException(409, "This signup checkout has expired")
+    payment_id = f"mock-payment-{checkout.id}"
+    if checkout.status in INACTIVE_CHECKOUT_STATUSES or checkout.status == "manual_review":
+        checkout.status = "manual_review"
+        checkout.provider_payment_id = payment_id
+        checkout.last_error = "late_payment_inactive_checkout"
+        checkout.admin_password_hash = None
+        db.commit()
+        return _checkout_status_payload(checkout)
     if checkout.status != "completed":
         checkout.status = "paid"
     organization, owner, created = finalize_signup(
         db,
         checkout,
-        f"mock-payment-{checkout.id}",
+        payment_id,
         ip_address=client_ip(request),
     )
     db.commit()
     sent, test_code = _send_signup_verification(db, checkout, owner, request) if created else (True, None)
-    return {
-        "ok": True,
-        "status": "completed",
-        "requires_verification": True,
-        "email": owner.email,
-        "organization_slug": organization.slug,
-        "email_sent": sent,
-        **({"test_code": test_code} if test_code else {}),
-    }
+    return _completed_signup_payload(
+        checkout,
+        organization,
+        owner,
+        email_sent=sent,
+        test_code=test_code,
+    )
 
 
 @router.post("/registration/payment/verify")
@@ -454,40 +629,14 @@ def verify_registration_payment(
     db: Session = Depends(get_db),
 ):
     checkout = _authorized_checkout(db, body.checkout_id, body.checkout_token, lock=True)
-    if checkout.provider == "razorpay" and checkout.provider_order_id != body.razorpay_order_id:
-        raise HTTPException(409, "Payment does not match this signup checkout")
-    verification = verify_provider_payment(
-        provider=checkout.provider,
-        mode=checkout.provider_mode,
-        order_id=checkout.provider_order_id,
-        amount_paise=int(checkout.total_paise),
-        currency=checkout.currency,
-        payment_id=body.razorpay_payment_id,
-        signature=body.razorpay_signature,
-    )
-    if verification["status"] != "paid":
-        return {"ok": True, "status": verification["status"]}
-
-    if checkout.status != "completed":
-        checkout.status = "paid"
-    payment_id = verification["payment_id"]
-    organization, owner, created = finalize_signup(
+    return _reconcile_signup_checkout(
         db,
         checkout,
-        payment_id,
-        ip_address=client_ip(request),
+        request,
+        razorpay_order_id=body.razorpay_order_id,
+        razorpay_payment_id=body.razorpay_payment_id,
+        razorpay_signature=body.razorpay_signature,
     )
-    db.commit()
-    sent, test_code = _send_signup_verification(db, checkout, owner, request) if created else (True, None)
-    return {
-        "ok": True,
-        "status": "completed",
-        "requires_verification": True,
-        "email": owner.email,
-        "organization_slug": organization.slug,
-        "email_sent": sent,
-        **({"test_code": test_code} if test_code else {}),
-    }
 
 
 @router.post("/email/request-code")

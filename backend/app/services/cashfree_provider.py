@@ -123,6 +123,14 @@ class CashfreeProvider:
         result = self._request("GET", f"/orders/{order_id}")
         return result if isinstance(result, dict) else {}
 
+    def terminate_order(self, order_id: str) -> dict:
+        result = self._request(
+            "PATCH",
+            f"/orders/{order_id}",
+            payload={"order_status": "TERMINATED"},
+        )
+        return result if isinstance(result, dict) else {}
+
     def fetch_payments(self, order_id: str) -> list[dict]:
         result = self._request("GET", f"/orders/{order_id}/payments")
         return [item for item in result if isinstance(item, dict)] if isinstance(result, list) else []

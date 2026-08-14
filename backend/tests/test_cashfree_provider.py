@@ -1,9 +1,11 @@
 """Cashfree adapter and payment verification contracts."""
+from datetime import datetime, timezone
+
 import pytest
 from fastapi import HTTPException
 
 from app.core.config import settings
-from app.services.billing import create_provider_order, verify_provider_payment
+from app.services.billing import create_provider_order, terminate_provider_order, verify_provider_payment
 from app.services.cashfree_provider import (
     CashfreeProvider, CashfreeProviderError, cashfree_refund_state, cashfree_webhook_signature,
     valid_cashfree_webhook_signature,
@@ -47,6 +49,46 @@ def test_cashfree_create_order_uses_sandbox_headers_and_idempotency():
     assert kwargs["headers"]["x-api-version"] == "2025-01-01"
     assert kwargs["headers"]["x-idempotency-key"] == "checkout-key"
     assert kwargs["timeout"] == (5, 20)
+
+
+def test_cashfree_terminate_order_uses_the_provider_termination_contract():
+    session = FakeSession([FakeResponse(body={"order_id": "edv_order", "order_status": "TERMINATED"})])
+    provider = CashfreeProvider("test-app", "test-secret", "test", "2026-01-01", session=session)
+
+    result = provider.terminate_order("edv_order")
+
+    assert result["order_status"] == "TERMINATED"
+    method, url, kwargs = session.calls[0]
+    assert method == "PATCH"
+    assert url == "https://sandbox.cashfree.com/pg/orders/edv_order"
+    assert kwargs["json"] == {"order_status": "TERMINATED"}
+
+
+@pytest.mark.parametrize(
+    ("provider_status", "expected"),
+    [("PAID", "paid"), ("TERMINATED", "cancelled"), ("TERMINATION_REQUESTED", "cancelled"), ("ACTIVE", "pending")],
+)
+def test_cashfree_termination_maps_provider_states(monkeypatch, provider_status, expected):
+    config = GatewayConfig(
+        provider="cashfree",
+        mode="test",
+        client_id="test-app",
+        secret="test-secret",
+        webhook_secret="test-secret",
+        configured=True,
+        webhook_configured=True,
+        recurring_supported=False,
+    )
+
+    class Provider:
+        def terminate_order(self, order_id):
+            assert order_id == "edv_order"
+            return {"order_id": order_id, "order_status": provider_status}
+
+    monkeypatch.setattr("app.services.billing.gateway_config", lambda *_args, **_kwargs: config)
+    monkeypatch.setattr("app.services.billing.cashfree_provider", lambda *_args: Provider())
+
+    assert terminate_provider_order(provider="cashfree", mode="test", order_id="edv_order")["status"] == expected
 
 
 def test_cashfree_provider_surfaces_sanitized_api_error():
@@ -118,6 +160,45 @@ def test_cashfree_order_requires_a_checkout_session(monkeypatch):
 
     assert error.value.status_code == 502
     assert error.value.detail == "Cashfree did not return a checkout session"
+
+
+def test_cashfree_order_uses_the_signup_checkout_expiry(monkeypatch):
+    captured = {}
+
+    class Provider:
+        def create_order(self, payload, *, idempotency_key):
+            captured.update(payload)
+            assert idempotency_key == "checkout-key"
+            return {"order_id": "edv_order", "payment_session_id": "session-1"}
+
+    monkeypatch.setattr("app.services.billing.cashfree_provider", lambda *_args: Provider())
+    config = GatewayConfig(
+        provider="cashfree",
+        mode="test",
+        client_id="test-app",
+        secret="test-secret",
+        webhook_secret="test-secret",
+        configured=True,
+        webhook_configured=True,
+        recurring_supported=False,
+    )
+    result = create_provider_order(
+        config,
+        reference_id="checkout-id",
+        amount_paise=49900,
+        currency="INR",
+        customer={"id": "customer", "phone": "9876543210"},
+        notes={"description": "Test checkout"},
+        idempotency_key="checkout-key",
+        expires_at=datetime(2026, 8, 15, tzinfo=timezone.utc),
+        return_url="https://edvatiq.app/register/payment/checkout-id?returned=1",
+    )
+
+    assert result["session_id"] == "session-1"
+    assert captured["order_expiry_time"] == "2026-08-15T00:00:00+00:00"
+    assert captured["order_meta"] == {
+        "return_url": "https://edvatiq.app/register/payment/checkout-id?returned=1",
+    }
 
 
 def test_cashfree_verification_requires_paid_order_and_successful_payment(monkeypatch):

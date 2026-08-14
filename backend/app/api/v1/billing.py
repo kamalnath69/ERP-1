@@ -650,19 +650,26 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
         received = int(payment.get("amount") or order.get("amount_paid") or 0)
         currency = payment.get("currency") or order.get("currency")
         if received == int(signup_checkout.total_paise) and currency == signup_checkout.currency:
-            if signup_checkout.status != "completed":
+            if signup_checkout.status in {"cancelled", "expired", "failed", "manual_review"}:
+                signup_checkout.status = "manual_review"
+                signup_checkout.provider_payment_id = payment_id
+                signup_checkout.admin_password_hash = None
+                signup_checkout.last_error = "late_payment_inactive_checkout"
+                signup_review_error = "Payment was received for an inactive signup checkout"
+            elif signup_checkout.status != "completed":
                 signup_checkout.status = "paid"
-            try:
-                _organization, signup_owner, signup_created = finalize_signup(
-                    db,
-                    signup_checkout,
-                    payment_id,
-                    ip_address=client_ip(request),
-                )
-            except HTTPException as exc:
-                if signup_checkout.status != "manual_review":
-                    raise
-                signup_review_error = str(exc.detail)
+            if not signup_review_error:
+                try:
+                    _organization, signup_owner, signup_created = finalize_signup(
+                        db,
+                        signup_checkout,
+                        payment_id,
+                        ip_address=client_ip(request),
+                    )
+                except HTTPException as exc:
+                    if signup_checkout.status != "manual_review":
+                        raise
+                    signup_review_error = str(exc.detail)
     elif invoice and event_type == "payment.failed" and invoice.status != "paid":
         invoice.status = "failed"
     elif signup_checkout and event_type == "payment.failed" and signup_checkout.status == "ready":
@@ -769,16 +776,23 @@ async def cashfree_webhook(request: Request, db: Session = Depends(get_db)):
     elif payment_success and signup_checkout:
         if received_paise != int(signup_checkout.total_paise) or received_currency != signup_checkout.currency:
             raise HTTPException(409, "Payment details do not match this signup checkout")
-        if signup_checkout.status != "completed":
+        if signup_checkout.status in {"cancelled", "expired", "failed", "manual_review"}:
+            signup_checkout.status = "manual_review"
+            signup_checkout.provider_payment_id = payment_id
+            signup_checkout.admin_password_hash = None
+            signup_checkout.last_error = "late_payment_inactive_checkout"
+            signup_review_error = "Payment was received for an inactive signup checkout"
+        elif signup_checkout.status != "completed":
             signup_checkout.status = "paid"
-        try:
-            _organization, signup_owner, signup_created = finalize_signup(
-                db, signup_checkout, payment_id, ip_address=client_ip(request),
-            )
-        except HTTPException as exc:
-            if signup_checkout.status != "manual_review":
-                raise
-            signup_review_error = str(exc.detail)
+        if not signup_review_error:
+            try:
+                _organization, signup_owner, signup_created = finalize_signup(
+                    db, signup_checkout, payment_id, ip_address=client_ip(request),
+                )
+            except HTTPException as exc:
+                if signup_checkout.status != "manual_review":
+                    raise
+                signup_review_error = str(exc.detail)
     elif signup_checkout and event_type == "PAYMENT_FAILED_WEBHOOK" and signup_checkout.status == "ready":
         signup_checkout.last_error = "payment_failed"
     elif event_type == "REFUND_STATUS_WEBHOOK" and platform_refund:

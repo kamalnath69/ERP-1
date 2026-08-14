@@ -15,6 +15,7 @@ const SecurityPage = lazy(() => import("@/pages/PublicPages").then((module) => (
 const LegalPage = lazy(() => import("@/pages/PublicPages").then((module) => ({ default: module.LegalPage })));
 const Login = lazy(() => import("@/pages/Login"));
 const Register = lazy(() => import("@/pages/Register"));
+const RegisterPayment = lazy(() => import("@/pages/RegisterPayment"));
 const VerifyEmail = lazy(() => import("@/pages/VerifyEmail"));
 const ForgotPassword = lazy(() => import("@/pages/ForgotPassword"));
 const PlatformInvite = lazy(() => import("@/pages/PlatformInvite"));
@@ -91,6 +92,7 @@ export default function App() {
     </Route>
     <Route path="/login" element={<Login />} />
     <Route path="/register" element={<Register />} />
+    <Route path="/register/payment/:checkoutId" element={<RegisterPayment />} />
     <Route path="/verify-email" element={<VerifyEmail />} />
     <Route path="/forgot-password" element={<ForgotPassword />} />
     <Route path="/platform-invite" element={<PlatformInvite />} />
