@@ -1,11 +1,15 @@
 """Permission-scoped hybrid document retrieval."""
+import hashlib
 import logging
+import re
 from collections import defaultdict
 
 from sqlalchemy import false, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.ai.provider import provider
+from app.ai.v3_cache import QUERY_EMBEDDING_CACHE
+from app.core.config import settings
 from app.models import CollegeStudentProfile, Document, DocumentChunk, Organization, User
 from app.services.access_policy import resolve_policy_context
 from app.services.business_access import allowed_client_ids, allowed_location_ids
@@ -90,6 +94,7 @@ def retrieve(db: Session, user: User, query: str, limit: int = 8, document_id: s
     )
     if document_id: base = base.where(Document.id == document_id)
     ranked: dict[str, float] = defaultdict(float)
+    semantic_ids: set[str] = set()
     rows_by_id = {}
     provider_usage = {"embedding_tokens": 0, "provider_requests": 0}
 
@@ -103,23 +108,37 @@ def retrieve(db: Session, user: User, query: str, limit: int = 8, document_id: s
         rows_by_id[pair[0].id] = pair
 
     client = provider()
+    embedding_cache_status = "disabled"
     if client:
         try:
-            embedding = client.embed([query])
-            vector = embedding.vectors[0]
-            provider_usage = {
-                "embedding_tokens": embedding.input_tokens,
-                "provider_requests": embedding.provider_requests,
-            }
+            normalized_query = " ".join(query.casefold().split())
+            cache_key = (
+                "retrieval-v3", settings.AI_EMBEDDING_MODEL, str(user.organization_id), str(user.id),
+                int(user.access_version), hashlib.sha256(normalized_query.encode("utf-8")).hexdigest(),
+            )
+            cached_vector = QUERY_EMBEDDING_CACHE.get(cache_key)
+            if cached_vector is None:
+                embedding = client.embed([query])
+                vector = embedding.vectors[0]
+                QUERY_EMBEDDING_CACHE.set(cache_key, vector)
+                embedding_cache_status = "miss"
+                provider_usage = {
+                    "embedding_tokens": embedding.input_tokens,
+                    "provider_requests": embedding.provider_requests,
+                }
+            else:
+                vector = cached_vector
+                embedding_cache_status = "hit"
             distance = DocumentChunk.embedding_vector.cosine_distance(vector)
             with db.begin_nested():
                 vector_rows = db.execute(
                     base.add_columns(distance.label("distance"))
-                    .where(DocumentChunk.embedding_vector.is_not(None), distance <= 0.45)
+                    .where(DocumentChunk.embedding_vector.is_not(None), distance <= 0.42)
                     .order_by(distance).limit(30)
                 ).all()
             for rank, pair in enumerate(vector_rows, 1):
                 ranked[pair[0].id] += 1 / (60 + rank)
+                semantic_ids.add(pair[0].id)
                 rows_by_id[pair[0].id] = pair[:2]
         except Exception as exc:
             logger.warning("embedding_search_unavailable error_type=%s", type(exc).__name__)
@@ -129,9 +148,21 @@ def retrieve(db: Session, user: User, query: str, limit: int = 8, document_id: s
         for rank, pair in enumerate(fallback, 1):
             ranked[pair[0].id] = 1 / (60 + rank); rows_by_id[pair[0].id] = pair
 
+    query_terms = set(re.findall(r"[\w]+", query.casefold()))
+
+    def relevance(chunk_id: str) -> float:
+        chunk, document = rows_by_id[chunk_id]
+        candidate_terms = set(re.findall(r"[\w]+", f"{document.name} {chunk.section or ''} {chunk.content}".casefold()))
+        overlap = len(query_terms & candidate_terms) / max(1, len(query_terms))
+        phrase_bonus = 0.08 if query.casefold() in chunk.content.casefold() else 0
+        semantic_bonus = 0.04 if chunk_id in semantic_ids else 0
+        return ranked[chunk_id] + (overlap * 0.12) + phrase_bonus + semantic_bonus
+
     selected = []
     per_document = defaultdict(int)
-    for chunk_id in sorted(ranked, key=ranked.get, reverse=True):
+    for chunk_id in sorted(ranked, key=relevance, reverse=True):
+        if relevance(chunk_id) < 0.045:
+            continue
         document_key = rows_by_id[chunk_id][1].id
         if per_document[document_key] >= 2:
             continue
@@ -140,8 +171,10 @@ def retrieve(db: Session, user: User, query: str, limit: int = 8, document_id: s
         if len(selected) >= max(1, min(limit, 12)):
             break
     citations = []
+    partial_index = False
     for chunk_id in selected:
         chunk, document = rows_by_id[chunk_id]
+        partial_index = partial_index or bool((chunk.meta or {}).get("partial_index"))
         citations.append({
             "document_id": document.id, "document": document.name, "excerpt": chunk.content[:500],
             "page": chunk.page_number, "section": chunk.section,
@@ -151,5 +184,9 @@ def retrieve(db: Session, user: User, query: str, limit: int = 8, document_id: s
         "query": query,
         "items": [{"content": item["excerpt"], **item} for item in citations],
         "citations": citations,
+        "insufficient_evidence": not bool(citations),
+        "missing_evidence": ["No document passage met the relevance threshold."] if not citations else [],
+        "warnings": ["This document was only partially indexed because it exceeded the safe chunk limit."] if partial_index else [],
+        "embedding_cache_status": embedding_cache_status,
         "_provider_usage": provider_usage,
     }

@@ -358,7 +358,7 @@ class TestSharedPlatform:
 
         monkeypatch.setattr("app.api.v1.ai._local_intent_mode", lambda *_args: "disabled")
         monkeypatch.setattr("app.api.v1.ai.deterministic_query_plan", lambda *_args: None)
-        monkeypatch.setattr("app.api.v1.ai.run_ai_turn", cancel_response)
+        monkeypatch.setattr("app.api.v1.ai.run_ai_turn_v3", cancel_response)
 
         with SessionLocal() as db:
             owner = db.execute(select(User).where(User.organization_id == organization_id)).scalar_one()

@@ -54,7 +54,7 @@ def delete_signup_challenge(challenge_id: str) -> None:
 
 @pytest.fixture(autouse=True)
 def prevent_external_email(monkeypatch):
-    """Tests must never consume configured email or AI provider quotas."""
+    """Tests must never consume external email, AI, or realtime resources."""
     delivered = lambda *_args, **_kwargs: True
     monkeypatch.setattr(settings, "AUTH_EXPOSE_TEST_CODES", True)
     # Parallel TestClient instances all report the same synthetic source IP.
@@ -64,3 +64,8 @@ def prevent_external_email(monkeypatch):
     monkeypatch.setattr("app.api.v1.auth.send_auth_code_email", delivered)
     monkeypatch.setattr("app.api.v1.users.send_auth_code_email", delivered)
     monkeypatch.setattr("app.ai.orchestrator.provider", lambda: None)
+    # API mutation middleware publishes through a separate PostgreSQL
+    # connection. Unit/integration tests do not exercise cross-worker fan-out,
+    # and a real NOTIFY can wait behind the test transaction on pooled CI DBs.
+    monkeypatch.setattr("server.publish_change", delivered)
+    monkeypatch.setattr("app.api.v1.ai.publish_change", delivered)

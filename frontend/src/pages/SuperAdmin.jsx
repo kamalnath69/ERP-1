@@ -440,7 +440,15 @@ function Settings() {
   const { data, loading, error, reload } = useLoad("/super-admin/settings", []);
   if (loading) return <PageSkeleton />; if (error) return <LoadError retry={reload} />;
   const labels = { financial_approvals: ["Financial approvals", "Controls when a second person must approve a money-related action."], retention: ["Record retention", "Controls how long required financial and care records are sealed before removal."] };
-  return <div className="space-y-6"><PageIntro eyebrow="Settings" title="Platform policies in one place" text="Sensitive provider keys stay on the server. This page contains only safe operating policies." /><div className="grid lg:grid-cols-3 gap-5">{data.filter((row) => row.key !== "payment_gateway").map((row) => row.key === "ai_credit_policy" ? <AICreditPolicyCard key={row.id} row={row} reload={reload} /> : <PolicyCard key={row.id} row={row} label={labels[row.key]} reload={reload} />)}</div></div>;
+  return <div className="space-y-6"><PageIntro eyebrow="Settings" title="Platform policies in one place" text="Sensitive provider keys stay on the server. This page contains only safe operating policies." /><div className="grid lg:grid-cols-3 gap-5">{data.filter((row) => row.key !== "payment_gateway").map((row) => row.key === "ai_credit_policy" ? <AICreditPolicyCard key={row.id} row={row} reload={reload} /> : row.key === "ai_models" ? <AIModelsCard key={row.id} row={row} reload={reload} /> : <PolicyCard key={row.id} row={row} label={labels[row.key]} reload={reload} />)}</div></div>;
+}
+
+function AIModelsCard({ row, reload }) {
+  const [values, setValues] = useState(row.value || {}); const [saving, setSaving] = useState(false);
+  const stages = [["planner", "Planner"], ["synthesis", "Answer"], ["repair", "Grounding repair"]];
+  const valid = stages.every(([key]) => /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$/.test(String(values[key] || "").trim()));
+  const save = async () => { if (!valid || saving) return; setSaving(true); try { await api.put(`/super-admin/settings/${row.key}`, { value: Object.fromEntries(stages.map(([key]) => [key, values[key].trim()])), version: row.version }); toast.success("AI execution models saved"); reload(); } catch (error) { toast.error(message(error)); } finally { setSaving(false); } };
+  return <div className="rounded-2xl border bg-card p-5"><Robot className="text-accent" size={24} /><h2 className="mt-3 font-display text-xl font-bold">AI execution models</h2><p className="mt-2 text-sm text-muted-foreground">Use a small planner and a capable answer model. Repair runs only after high-risk verification fails.</p><div className="mt-4 space-y-3">{stages.map(([key, label]) => <FieldLabel key={key} text={label}><Input value={values[key] || ""} onChange={(event) => setValues((current) => ({ ...current, [key]: event.target.value }))} /></FieldLabel>)}</div><Button variant="outline" className="mt-4 w-full" disabled={!valid} loading={saving} loadingText="Saving..." onClick={save}>Save models</Button></div>;
 }
 
 function AICreditPolicyCard({ row, reload }) {

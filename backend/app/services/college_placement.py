@@ -1112,7 +1112,7 @@ def placement_dashboard(
             "detail": f"They remain visible but are excluded from ranking below {minimum_coverage:g}% coverage.",
             "evidence_count": insufficient_evidence,
             "action_label": "Review evidence",
-            "action_url": "/app/college?section=evidence",
+            "action_url": "/app/academics?section=results",
             "tone": "neutral",
         })
     filters = {

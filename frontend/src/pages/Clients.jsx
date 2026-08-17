@@ -124,7 +124,7 @@ function ClientDirectory() {
     }
     if (isCollege && !hasAcademicAdmissionStructure(academicHierarchy.data)) {
       toast.info("Create a department, program, and batch before admitting students");
-      navigate("/app/college?section=structure");
+      navigate("/app/academics?section=structure");
       return;
     }
     setDrawerOpen(true);

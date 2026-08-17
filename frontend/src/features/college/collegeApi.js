@@ -52,6 +52,21 @@ export const collegeApi = baseApi.injectEndpoints({
       providesTags: resourceTags("college"),
       keepUnusedDataFor: 120,
     }),
+    getCollegeAcademicSummary: builder.query({
+      queryFn: ({ academicYearId, termId, departmentId, programId, cohortId } = {}, api) => domainRequest({
+        url: "/college/academics/summary",
+        method: "GET",
+        params: {
+          academic_year_id: academicYearId || undefined,
+          term_id: termId || undefined,
+          department_id: departmentId || undefined,
+          program_id: programId || undefined,
+          cohort_id: cohortId || undefined,
+        },
+      }, api),
+      providesTags: resourceTags("college"),
+      keepUnusedDataFor: 45,
+    }),
     getCollegeStudentHierarchy: builder.query({
       queryFn: (_arg, api) => domainRequest({ url: "/college/students/hierarchy", method: "GET" }, api),
       providesTags: resourceTags("college"),
@@ -80,16 +95,34 @@ export const collegeApi = baseApi.injectEndpoints({
     getCollegeCoursesPage: builder.query(academicPage("/college/courses/page")),
     getCollegeOfferingsPage: builder.query(academicPage("/college/offerings/page")),
     getCollegeAcademicEvidencePage: builder.query({
-      queryFn: ({ kind = "term_results", q, cohortId, cursor, limit = 25 } = {}, api) => domainRequest({
+      queryFn: ({ kind = "term_results", q, academicYearId, termId, departmentId, programId, cohortId, cursor, limit = 25 } = {}, api) => domainRequest({
         url: "/college/academic-evidence/page", method: "GET",
-        params: { kind, q: q || undefined, cohort_id: cohortId || undefined, cursor: cursor || undefined, limit },
+        params: {
+          kind,
+          q: q || undefined,
+          academic_year_id: academicYearId || undefined,
+          term_id: termId || undefined,
+          department_id: departmentId || undefined,
+          program_id: programId || undefined,
+          cohort_id: cohortId || undefined,
+          cursor: cursor || undefined,
+          limit,
+        },
       }, api),
       providesTags: resourceTags("college"),
     }),
     getCollegeAttendanceSessionsPage: builder.query({
-      queryFn: ({ cohortId, cursor, limit = 25 } = {}, api) => domainRequest({
+      queryFn: ({ academicYearId, termId, departmentId, programId, cohortId, cursor, limit = 25 } = {}, api) => domainRequest({
         url: "/college/attendance/sessions/page", method: "GET",
-        params: { cohort_id: cohortId || undefined, cursor: cursor || undefined, limit },
+        params: {
+          academic_year_id: academicYearId || undefined,
+          term_id: termId || undefined,
+          department_id: departmentId || undefined,
+          program_id: programId || undefined,
+          cohort_id: cohortId || undefined,
+          cursor: cursor || undefined,
+          limit,
+        },
       }, api),
       providesTags: resourceTags("college"),
     }),
@@ -101,9 +134,17 @@ export const collegeApi = baseApi.injectEndpoints({
       providesTags: resourceTags("college"),
     }),
     getCollegeAssessmentsPage: builder.query({
-      queryFn: ({ cohortId, cursor, limit = 25 } = {}, api) => domainRequest({
+      queryFn: ({ academicYearId, termId, departmentId, programId, cohortId, cursor, limit = 25 } = {}, api) => domainRequest({
         url: "/college/assessments/page", method: "GET",
-        params: { cohort_id: cohortId || undefined, cursor: cursor || undefined, limit },
+        params: {
+          academic_year_id: academicYearId || undefined,
+          term_id: termId || undefined,
+          department_id: departmentId || undefined,
+          program_id: programId || undefined,
+          cohort_id: cohortId || undefined,
+          cursor: cursor || undefined,
+          limit,
+        },
       }, api),
       providesTags: resourceTags("college"),
     }),
@@ -466,6 +507,7 @@ export const {
   useGetCollegeWorkspaceQuery,
   useGetCollegeReferencesQuery,
   useGetCollegeAcademicHierarchyQuery,
+  useGetCollegeAcademicSummaryQuery,
   useGetCollegeStudentHierarchyQuery,
   useGetCollegeCohortsPageQuery,
   useGetCollegeDepartmentsPageQuery,

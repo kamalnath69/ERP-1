@@ -1,8 +1,8 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import React, { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   ArrowClockwise, ArrowDown, ArrowRight, CheckCircle, CloudArrowDown, CloudArrowUp,
-  Code, Database, FileCsv, FileXls, PencilSimple, WarningCircle,
+  Code, Database, FileCsv, FileXls, MagnifyingGlass, PencilSimple, WarningCircle,
 } from "@phosphor-icons/react";
 import { toast } from "sonner";
 
@@ -32,29 +32,76 @@ const METHOD_META = {
   api_push: { label: "API push", icon: CloudArrowUp },
 };
 
+const CATEGORY_ORDER = ["Structure", "Students", "Attendance & results", "Assessments", "Placement data", "Exports"];
+const ACADEMIC_SCOPE_KEYS = ["academic_year_id", "term_id", "department_id", "program_id", "cohort_id"];
+
+function displayCategory(category) {
+  if (category === "Academic structure") return "Structure";
+  if (category === "Academic evidence") return "Attendance & results";
+  if (["Student enrichment", "Placements", "Restricted"].includes(category)) return "Placement data";
+  return category;
+}
+
 export default function DataExchangePanel() {
   const navigate = useNavigate();
+  const [params, setParams] = useSearchParams();
   const resourcesQuery = useGetDataExchangeResourcesQuery();
   const resources = resourcesQuery.data?.items || [];
-  const [resourceKey, setResourceKey] = useState("");
+  const view = params.get("exchange_view") === "history" ? "history" : "exchange";
+  const resourceKey = params.get("resource") || "";
   const selected = resources.find((item) => item.key === resourceKey) || resources[0] || null;
+  const [resourceSearch, setResourceSearch] = useState("");
+  const deferredSearch = useDeferredValue(resourceSearch.trim().toLowerCase());
   const [cycleId, setCycleId] = useState("");
   const [activeRun, setActiveRun] = useState(null);
+  const academicScope = Object.fromEntries(ACADEMIC_SCOPE_KEYS.flatMap((key) => {
+    const value = params.get(key);
+    return value ? [[key, value]] : [];
+  }));
   const [historyMode, setHistoryMode] = useState("all");
   const historyKey = `data-exchange:${historyMode}`;
   const paging = useCursorPagination(historyKey);
-  const runsQuery = useGetDataExchangeRunsQuery({ operation: historyMode, cursor: paging.cursor || undefined, limit: 25 }, { skip: !resources.length });
+  const runsQuery = useGetDataExchangeRunsQuery({ operation: historyMode, cursor: paging.cursor || undefined, limit: 25 }, { skip: !resources.length || view !== "history" });
   const { accept } = paging;
   useEffect(() => { accept(runsQuery.data); }, [accept, runsQuery.data]);
   useEffect(() => {
-    if (!resourceKey && resources.length) setResourceKey(resources[0].key);
-  }, [resourceKey, resources]);
+    if (resourceKey || !resources.length) return;
+    const next = new URLSearchParams(params);
+    next.set("resource", resources[0].key);
+    setParams(next, { replace: true });
+  }, [params, resourceKey, resources, setParams]);
   useEffect(() => { setCycleId(""); setActiveRun(null); }, [resourceKey]);
 
-  const grouped = useMemo(() => resources.reduce((result, item) => {
-    (result[item.category] ||= []).push(item);
-    return result;
-  }, {}), [resources]);
+  const categories = useMemo(() => CATEGORY_ORDER.filter((category) => resources.some((item) => displayCategory(item.category) === category)), [resources]);
+  const requestedCategory = params.get("category");
+  const category = categories.includes(requestedCategory)
+    ? requestedCategory
+    : selected ? displayCategory(selected.category) : categories[0];
+  const visibleResources = useMemo(() => resources.filter((item) => (
+    displayCategory(item.category) === category
+      && (!deferredSearch || `${item.label} ${item.description || ""}`.toLowerCase().includes(deferredSearch))
+  )), [category, deferredSearch, resources]);
+
+  const updateParams = (changes) => {
+    const next = new URLSearchParams(params);
+    Object.entries(changes).forEach(([key, value]) => {
+      if (value) next.set(key, value); else next.delete(key);
+    });
+    setParams(next, { replace: true });
+  };
+  const chooseCategory = (nextCategory) => {
+    const first = resources.find((item) => displayCategory(item.category) === nextCategory);
+    setResourceSearch("");
+    updateParams({ category: nextCategory, resource: first?.key || "" });
+  };
+  const chooseResource = (key) => {
+    const resource = resources.find((item) => item.key === key);
+    updateParams({ resource: key, category: resource ? displayCategory(resource.category) : category });
+  };
+  const chooseView = (nextView) => {
+    updateParams({ exchange_view: nextView === "history" ? "history" : "" });
+    setActiveRun(null);
+  };
 
   if (resourcesQuery.isLoading && !resources.length) return <DataExchangeSkeleton />;
   if (resourcesQuery.isError && !resources.length) {
@@ -66,57 +113,44 @@ export default function DataExchangePanel() {
     />;
   }
 
-  return <div className="space-y-5">
-    <Surface className="overflow-hidden">
-      <div className="border-b p-4 sm:p-5">
-        <div className="overline">Schema driven</div>
-        <div className="mt-1 flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-          <div>
-            <h2 className="font-display text-2xl font-semibold">Data Exchange</h2>
-            <p className="mt-1 max-w-3xl text-sm leading-6 text-muted-foreground">Download a live college-aware template, review every change, and commit only validated rows. Excel, CSV, ERP, and API schemas all use the same definitions.</p>
-          </div>
-          <StatusBadge status="active" label="Preview before commit" />
-        </div>
-      </div>
-      <div className="grid min-h-[32rem] lg:grid-cols-[15rem_minmax(0,1fr)]">
-        <aside className="hidden border-r bg-surface-subtle/30 p-3 lg:block" aria-label="Data resources">
-          {Object.entries(grouped).map(([category, items]) => <div key={category} className="mb-5 last:mb-0">
-            <div className="px-2 pb-2 text-[10px] font-semibold uppercase tracking-[.16em] text-muted-foreground">{category}</div>
-            <div className="space-y-1">{items.map((item) => <button key={item.key} type="button" onClick={() => setResourceKey(item.key)} className={`w-full rounded-lg px-2.5 py-2 text-left text-sm transition-colors ${selected?.key === item.key ? "bg-primary text-primary-foreground" : "hover:bg-surface-hover"}`}>{item.label}</button>)}</div>
-          </div>)}
-        </aside>
-        <div className="min-w-0 p-4 sm:p-5">
-          <div className="mb-5 lg:hidden"><Label htmlFor="exchange-resource">Data resource</Label><Select value={selected?.key || ""} onValueChange={setResourceKey}><SelectTrigger id="exchange-resource" className="mt-2"><SelectValue /></SelectTrigger><SelectContent>{resources.map((item) => <SelectItem key={item.key} value={item.key}>{item.label}</SelectItem>)}</SelectContent></Select></div>
-          {selected && <ResourceWorkspace
-            resource={selected}
-            cycleId={cycleId}
-            onCycleChange={setCycleId}
-            activeRun={activeRun}
-            onRunChange={setActiveRun}
-            onOpenManual={() => openManual(selected.key, navigate)}
-            onOpenErp={() => navigate("/app/college?section=integrations")}
-          />}
-        </div>
-      </div>
-    </Surface>
+  const selectedVisible = selected && displayCategory(selected.category) === category
+    && (!deferredSearch || visibleResources.some((item) => item.key === selected.key));
 
-    <Surface className="overflow-hidden">
-      <div className="flex flex-col gap-3 border-b p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
-        <div><h3 className="font-semibold">Exchange history</h3><p className="mt-1 text-xs text-muted-foreground">Templates, previews, commits, and exports remain auditable.</p></div>
-        <SegmentControl value={historyMode} onChange={setHistoryMode} items={[{ value: "all", label: "All" }, { value: "import", label: "Imports" }, { value: "export", label: "Exports" }]} />
+  return <Surface className="overflow-hidden">
+    <div className="flex flex-col gap-4 border-b p-4 sm:p-5 lg:flex-row lg:items-end lg:justify-between">
+      <div><div className="overline">Schema driven</div><h2 className="mt-1 font-display text-2xl font-semibold">Data Exchange</h2><p className="mt-1 max-w-3xl text-sm leading-6 text-muted-foreground">Use institution-aware templates and schemas, preview every change, and commit only validated rows.</p></div>
+      <SegmentControl value={view} onChange={chooseView} items={[{ value: "exchange", label: "Exchange" }, { value: "history", label: "Run history" }]} />
+    </div>
+    {view === "exchange" ? <>
+      <div className="premium-scrollbar overflow-x-auto border-b p-2"><SegmentControl className="w-max min-w-full border-0 shadow-none" value={category} onChange={chooseCategory} items={categories.map((value) => ({ value, label: value }))} /></div>
+      <div className="border-b bg-surface-subtle/25 p-4 sm:p-5">
+        <div className="grid gap-3 lg:grid-cols-[minmax(16rem,.8fr)_minmax(18rem,1.2fr)]">
+          <div className="relative"><MagnifyingGlass className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" /><Input value={resourceSearch} onChange={(event) => setResourceSearch(event.target.value)} className="pl-10" placeholder={`Search ${String(category || "resources").toLowerCase()}`} aria-label="Search Data Exchange resources" /></div>
+          <Select value={visibleResources.some((item) => item.key === selected?.key) ? selected.key : ""} onValueChange={chooseResource}><SelectTrigger aria-label="Data resource"><SelectValue placeholder={visibleResources.length ? "Choose a data resource" : "No matching resources"} /></SelectTrigger><SelectContent>{visibleResources.map((item) => <SelectItem key={item.key} value={item.key}>{item.label}</SelectItem>)}</SelectContent></Select>
+        </div>
+        <p className="mt-2 text-xs text-muted-foreground">Only resources and methods permitted by your College access policy are shown.</p>
       </div>
-      <div className="divide-y">{paging.items.map((run) => <RunRow key={run.id} run={run} onOpen={() => setActiveRun(run)} />)}
-        {!runsQuery.isLoading && !paging.items.length && <EmptyState className="m-4" variant="inline" alignment="left" icon={Database} title="No exchange runs yet" description="Downloaded templates and reviewed uploads will appear here." />}
+      <div className="min-w-0 p-4 sm:p-5 lg:p-6">
+        {selectedVisible ? <ResourceWorkspace resource={selected} academicScope={academicScope} cycleId={cycleId} onCycleChange={setCycleId} activeRun={activeRun} onRunChange={setActiveRun} onOpenManual={() => openManual(selected.key, navigate, academicScope)} onOpenErp={() => navigate(withAcademicScope("integrations", academicScope))} /> : <EmptyState variant="section" alignment="left" icon={Database} title="Choose a data resource" description="Select a permitted resource to open its live schema, templates, imports, and exports." />}
       </div>
+    </> : <div className="min-w-0">
+      <div className="flex flex-col gap-3 border-b p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5"><div><h3 className="font-semibold">Run history</h3><p className="mt-1 text-xs text-muted-foreground">Templates, previews, commits, and exports remain auditable.</p></div><SegmentControl value={historyMode} onChange={setHistoryMode} items={[{ value: "all", label: "All" }, { value: "import", label: "Imports" }, { value: "export", label: "Exports" }]} /></div>
+      {activeRun && <div className="border-b p-4 sm:p-5"><RunPreview key={activeRun.id} run={activeRun} onRunChange={setActiveRun} /></div>}
+      <div className="divide-y">{paging.items.map((run) => <RunRow key={run.id} run={run} onOpen={() => setActiveRun(run)} />)}{!runsQuery.isLoading && !paging.items.length && <EmptyState className="m-4" variant="inline" alignment="left" icon={Database} title="No exchange runs yet" description="Downloaded templates and reviewed uploads will appear here." />}</div>
       <CursorListFooter count={paging.items.length} noun="runs" hasMore={Boolean(runsQuery.data?.next_cursor)} loading={runsQuery.isFetching} error={runsQuery.isError && paging.items.length > 0} onLoadMore={() => paging.loadMore(runsQuery.data?.next_cursor)} onRetry={runsQuery.refetch} />
-    </Surface>
-  </div>;
+    </div>}
+  </Surface>;
 }
 
-function ResourceWorkspace({ resource, cycleId, onCycleChange, activeRun, onRunChange, onOpenManual, onOpenErp }) {
+function ResourceWorkspace({ resource, academicScope, cycleId, onCycleChange, activeRun, onRunChange, onOpenManual, onOpenErp }) {
   const needsCycle = resource.key === "assessment_marks";
   const [cohortIds, setCohortIds] = useState([]);
-  const cycles = useGetCollegeExamCyclesPageQuery({ limit: 100 }, { skip: !needsCycle });
+  const scopedCohortIds = cohortIds.length
+    ? cohortIds
+    : academicScope.cohort_id
+      ? [academicScope.cohort_id]
+      : [];
+  const cycles = useGetCollegeExamCyclesPageQuery({ termId: academicScope.term_id, limit: 100 }, { skip: !needsCycle });
   const scopeReady = !needsCycle || Boolean(cycleId);
   const schema = useGetDataExchangeResourceSchemaQuery({ resourceKey: resource.key, cycleId }, { skip: !scopeReady });
   useEffect(() => { setCohortIds([]); }, [cycleId, resource.key]);
@@ -141,7 +175,7 @@ function ResourceWorkspace({ resource, cycleId, onCycleChange, activeRun, onRunC
     {!scopeReady ? <EmptyState variant="section" alignment="left" icon={FileXls} title="Select a cycle to continue" description="Marks templates cannot be guessed. Choose the cycle whose frozen assessment pattern should define the columns." />
       : schema.isError ? <ErrorState title="The live schema could not be generated" description={schema.error?.data?.detail || "Check the selected scope and try again."} retry={schema.refetch} />
         : <>
-          <ExchangeActions resource={resource} scope={{ ...(cycleId ? { cycle_id: cycleId } : {}), ...(cohortIds.length ? { cohort_ids: cohortIds } : {}) }} schema={schema.data} onRunChange={onRunChange} onOpenManual={onOpenManual} onOpenErp={onOpenErp} />
+          <ExchangeActions resource={resource} scope={{ ...academicScope, ...(cycleId ? { cycle_id: cycleId } : {}), ...(scopedCohortIds.length ? { cohort_ids: scopedCohortIds } : {}) }} schema={schema.data} onRunChange={onRunChange} onOpenManual={onOpenManual} onOpenErp={onOpenErp} />
           {schema.data && <SchemaSummary schema={schema.data} />}
         </>}
 
@@ -321,12 +355,21 @@ function RunRow({ run, onOpen }) {
 }
 
 function DataExchangeSkeleton() {
-  return <Surface className="overflow-hidden"><div className="h-32 animate-pulse border-b bg-surface-subtle" /><div className="grid min-h-[32rem] lg:grid-cols-[15rem_minmax(0,1fr)]"><div className="hidden animate-pulse border-r bg-surface-subtle/60 lg:block" /><div className="space-y-4 p-5"><div className="h-8 w-64 animate-pulse rounded bg-secondary" /><div className="h-48 animate-pulse rounded-2xl bg-secondary" /></div></div></Surface>;
+  return <Surface className="overflow-hidden"><div className="h-28 animate-pulse border-b bg-surface-subtle" /><div className="h-14 animate-pulse border-b bg-surface-subtle/60" /><div className="space-y-4 p-5"><div className="h-11 animate-pulse rounded-xl bg-secondary" /><div className="h-64 animate-pulse rounded-2xl bg-secondary" /></div></Surface>;
 }
 
-function openManual(resourceKey, navigate) {
-  if (["academic_structure", "departments", "programs", "cohorts", "terms", "courses", "offerings", "assessment_schemes"].includes(resourceKey)) navigate(resourceKey === "assessment_schemes" ? "/app/college?section=structure&tab=assessment-patterns" : "/app/college?section=structure");
-  else if (["assessment_marks", "exam_cycles"].includes(resourceKey)) navigate("/app/college?section=assessments");
+function withAcademicScope(section, scope, extra = {}) {
+  const params = new URLSearchParams({ ...scope, ...extra });
+  if (section !== "overview") params.set("section", section);
+  return `/app/academics${params.toString() ? `?${params}` : ""}`;
+}
+
+function openManual(resourceKey, navigate, scope) {
+  if (["academic_structure", "departments", "programs", "cohorts", "terms", "courses", "offerings"].includes(resourceKey)) navigate(withAcademicScope("structure", scope));
+  else if (resourceKey === "assessment_schemes") navigate(withAcademicScope("assessments", scope, { view: "patterns" }));
+  else if (["assessment_marks", "exam_cycles"].includes(resourceKey)) navigate(withAcademicScope("assessments", scope));
+  else if (resourceKey === "term_results") navigate(withAcademicScope("results", scope));
+  else if (resourceKey === "attendance") navigate(withAcademicScope("attendance", scope));
   else if (resourceKey === "students") navigate("/app/clients?new=1");
   else if (["companies", "drives", "applications"].includes(resourceKey)) navigate(`/app/college?section=${resourceKey === "drives" ? "drives" : resourceKey}`);
 }

@@ -58,7 +58,7 @@ export function resolvePrimarySidebarState({ wide, pinned, hovered, focused }) {
 export default function AppLayout({ children }) {
   const dispatch = useDispatch();
   const sidebarPinned = useSelector(selectSidebarPinned);
-  const { user, organization: authOrg, can, logout } = useAuth();
+  const { user, organization: authOrg, can, accessContext, logout } = useAuth();
   const { organization, locations, locationId, setLocationId, hasModule, wallet, entitlements } = useBusiness();
   const {
     streaming: aiStreaming,
@@ -79,7 +79,7 @@ export default function AppLayout({ children }) {
   const [lastSeenAssistantMessageId, setLastSeenAssistantMessageId] = useState(null);
   const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
 
-  const routes = useMemo(() => visibleRoutes({ industry: org?.industry, can, hasModule }), [can, hasModule, org?.industry]);
+  const routes = useMemo(() => visibleRoutes({ industry: org?.industry, can, hasModule, accessContext }), [accessContext, can, hasModule, org?.industry]);
   const sidebarGroups = useMemo(() => groupSidebarRoutes(routes), [routes]);
   const primary = sidebarGroups.workspace.filter((route) => route.group === "primary");
   const { expanded: sidebarExpanded, compact: rail, widthClass: sidebarWidthClass } = resolvePrimarySidebarState({
@@ -101,12 +101,17 @@ export default function AppLayout({ children }) {
   const secondaryWorkspace = currentRoute?.layout?.startsWith("secondary");
   const fixedSecondaryWorkspace = currentRoute?.layout === "secondary-fixed";
   const industryRoute = primary.find((route) => route.industries?.includes(org?.industry));
-  const mobileRoutes = [
+  const mobileRoutes = (org?.industry === "college" ? [
+    primary.find((route) => route.key === "home"),
+    primary.find((route) => route.key === "clients"),
+    primary.find((route) => route.key === "academics"),
+    primary.find((route) => route.key === "college"),
+  ] : [
     primary.find((route) => route.key === "home"),
     primary.find((route) => route.key === "clients"),
     primary.find((route) => route.key === "calendar"),
     industryRoute || primary.find((route) => route.key === "sales"),
-  ].filter(Boolean);
+  ]).filter(Boolean);
 
   useEffect(() => {
     const timer = setTimeout(() => setDebouncedSearch(search.trim()), 180);
@@ -233,7 +238,7 @@ export default function AppLayout({ children }) {
           <span className="command-key ml-auto"><Command size={11} />K</span>
         </button>
         {locations.length > 1 && <Select value={locationId || ""} onValueChange={setLocationId}><SelectTrigger aria-label="Current location" className="hidden h-10 w-40 rounded-xl xl:flex"><Storefront size={16} /><SelectValue /></SelectTrigger><SelectContent>{locations.map((location) => <SelectItem value={location.id} key={location.id}>{location.name}</SelectItem>)}</SelectContent></Select>}
-        <QuickCreate can={can} industry={org?.industry} navigate={navigate} />
+        <QuickCreate can={can} industry={org?.industry} accessContext={accessContext} navigate={navigate} />
         <button onClick={() => navigate("/app/notifications")} aria-label="Notifications" aria-current={notificationsActive ? "page" : undefined} className={cn("relative grid h-10 w-10 shrink-0 place-items-center rounded-xl border shadow-sm transition-colors hover:bg-secondary hover:text-foreground", notificationsActive ? "border-primary/25 bg-primary/10 text-primary" : "bg-card text-muted-foreground")}><Bell size={18} weight={notificationsActive ? "fill" : "regular"} />{unread > 0 && <span className="absolute -right-1 -top-1 grid h-5 min-w-5 place-items-center rounded-full bg-accent px-1 text-[10px] font-bold text-accent-foreground">{unread > 99 ? "99+" : unread}</span>}</button>
         {aiAvailable && <Button
           onClick={() => setAiOpen(true)}
@@ -339,8 +344,8 @@ function NavItem({ route, compact, industry, onClick }) {
   return <NavLink to={route.path} end={route.end} title={compact ? label : undefined} aria-label={compact ? label : undefined} onClick={onClick} className={({ isActive }) => cn("nav-item", compact ? "justify-center px-0" : "gap-3", isActive ? "nav-item-active" : "nav-item-idle")}><Icon size={19} weight="duotone" className="shrink-0" />{!compact && <span className="truncate">{label}</span>}</NavLink>;
 }
 
-function QuickCreate({ can, industry, navigate }) {
-  const actions = creationActions(can, industry);
+function QuickCreate({ can, industry, accessContext, navigate }) {
+  const actions = creationActions(can, industry, accessContext);
   if (!actions.length) return null;
   return <DropdownMenu>
     <DropdownMenuTrigger asChild>
@@ -369,12 +374,15 @@ function QuickCreate({ can, industry, navigate }) {
 }
 
 function createActionMeta(path, industry) {
+  if (path.startsWith("/app/academics")) {
+    if (path.includes("section=exchange")) return { icon: Books, description: "Validate and exchange authorized College data" };
+    if (path.includes("section=assessments")) return { icon: Books, description: "Create an assessment cycle or register" };
+    return { icon: Books, description: "Manage the institution's academic structure" };
+  }
   if (path.startsWith("/app/college")) {
-    if (path.includes("section=students")) return { icon: UserPlus, description: "Create a complete academic admission" };
-    if (path.includes("section=placements") && path.includes("new=company")) return { icon: Briefcase, description: "Add a placement partner" };
-    if (path.includes("section=placements")) return { icon: Briefcase, description: "Create an opportunity and eligibility rules" };
-    if (path.includes("section=imports")) return { icon: Books, description: "Validate and import student evidence" };
-    return { icon: Books, description: "Add academic structure or a course" };
+    if (path.includes("section=companies")) return { icon: Briefcase, description: "Add a recruiting company" };
+    if (path.includes("section=drives")) return { icon: Briefcase, description: "Create an opportunity and eligibility rules" };
+    return { icon: Briefcase, description: "Manage the placement workflow" };
   }
   if (path.startsWith("/app/clients")) return { icon: UserPlus, description: industry === "clinic" ? "Register a patient profile" : industry === "college" ? "Admit a student profile" : "Add a client profile" };
   if (path.startsWith("/app/calendar")) return { icon: CalendarBlank, description: industry === "clinic" ? "Schedule a patient visit" : industry === "college" ? "Schedule student support" : "Schedule time with a client" };
@@ -382,12 +390,13 @@ function createActionMeta(path, industry) {
   return { icon: Package, description: "Add a product or service" };
 }
 
-function creationActions(can, industry) {
+function creationActions(can, industry, accessContext) {
+  const domainEnabled = (domain) => !accessContext?.domain_levels || Boolean(accessContext.domain_levels[domain] && accessContext.domain_levels[domain] !== "none");
   if (industry === "college") return [
-    can("college.students.manage") && ["Admit student", "/app/college?section=students&new=1"],
-    can("college.opportunities.manage") && ["Placement drive", "/app/college?section=placements&new=drive"],
-    can("college.companies.manage") && ["Placement company", "/app/college?section=placements&new=company"],
-    can("college.imports.manage") && ["Import student data", "/app/college?section=imports"],
+    domainEnabled("students") && can("college.students.manage") && ["Admit student", "/app/clients?new=1"],
+    domainEnabled("placements") && can("college.opportunities.manage") && ["Placement drive", "/app/college?section=drives&new=1"],
+    domainEnabled("placements") && can("college.companies.manage") && ["Placement company", "/app/college?section=companies&new=1"],
+    domainEnabled("data") && can("college.imports.manage") && ["Import student data", "/app/academics?section=exchange"],
   ].filter(Boolean);
   return [
     can("clients.manage") && [clientLabel(industry, false), "/app/clients?new=1"],

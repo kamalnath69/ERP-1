@@ -343,6 +343,28 @@ def test_enterprise_policy_scopes_hod_data_fields_dashboard_and_finance(college_
     assert student_summary.json()["capabilities"]["readiness"] is True
     assert student_summary.json()["capabilities"]["placements"] is True
 
+    academic_summary = client.get("/api/college/academics/summary", headers=hod_headers)
+    assert academic_summary.status_code == 200, academic_summary.text
+    assert academic_summary.json()["metrics"]["students_in_scope"] == 1
+    assert academic_summary.json()["structure"]["departments"] == 1
+    assert academic_summary.json()["structure"]["cohorts"] == 2
+
+    # The HOD's academic reach includes ECE B, while the Students domain is
+    # narrowed to ECE A. Academic metrics remain available without leaking a
+    # misleading student count from the narrower domain.
+    academic_b = client.get("/api/college/academics/summary", headers=hod_headers, params={
+        "cohort_id": ece_b["id"],
+    })
+    assert academic_b.status_code == 200, academic_b.text
+    assert academic_b.json()["metrics"]["students_in_scope"] is None
+    assert academic_b.json()["capabilities"]["students"] is False
+    assert academic_b.json()["structure"]["cohorts"] == 1
+
+    outside_academics = client.get("/api/college/academics/summary", headers=hod_headers, params={
+        "cohort_id": cse_a["id"],
+    })
+    assert outside_academics.status_code == 404
+
     student_page = client.get("/api/college/students/page", headers=hod_headers, params={
         "graduation_year": 2027,
         "limit": 25,
@@ -647,6 +669,20 @@ def test_college_workspace_connects_academics_students_attendance_results_and_fe
     sessions_page = client.get("/api/college/attendance/sessions/page", headers=headers, params={"limit": 1})
     assert sessions_page.status_code == 200, sessions_page.text
     assert sessions_page.json()["items"][0]["id"] == attendance["id"]
+    scoped_sessions = client.get("/api/college/attendance/sessions/page", headers=headers, params={
+        "academic_year_id": "2026-27",
+        "term_id": term["id"],
+        "department_id": department["id"],
+        "program_id": program["id"],
+        "cohort_id": cohort["id"],
+    })
+    assert scoped_sessions.status_code == 200, scoped_sessions.text
+    assert [row["id"] for row in scoped_sessions.json()["items"]] == [attendance["id"]]
+    mismatched_period = client.get("/api/college/attendance/sessions/page", headers=headers, params={
+        "academic_year_id": "2027-28",
+        "term_id": term["id"],
+    })
+    assert mismatched_period.status_code == 422
     attendance_register = client.get(f"/api/college/attendance/{attendance['id']}/register", headers=headers, params={"limit": 1})
     assert attendance_register.status_code == 200, attendance_register.text
     assert attendance_register.json()["items"][0]["student_name"] == "Asha Raman"
@@ -655,6 +691,15 @@ def test_college_workspace_connects_academics_students_attendance_results_and_fe
     assessments_page = client.get("/api/college/assessments/page", headers=headers, params={"limit": 1})
     assert assessments_page.status_code == 200, assessments_page.text
     assert assessments_page.json()["items"][0]["id"] == assessment["id"]
+    scoped_assessments = client.get("/api/college/assessments/page", headers=headers, params={
+        "academic_year_id": "2026-27",
+        "term_id": term["id"],
+        "department_id": department["id"],
+        "program_id": program["id"],
+        "cohort_id": cohort["id"],
+    })
+    assert scoped_assessments.status_code == 200, scoped_assessments.text
+    assert [row["id"] for row in scoped_assessments.json()["items"]] == [assessment["id"]]
     assessment_register = client.get(f"/api/college/assessments/{assessment['id']}/register", headers=headers, params={"limit": 1})
     assert assessment_register.status_code == 200, assessment_register.text
     assert assessment_register.json()["items"][0]["marks_awarded"] == 43.0
@@ -711,12 +756,8 @@ def test_college_workspace_connects_academics_students_attendance_results_and_fe
         "location_id": location_id,
         "range": 30,
     })
-    assert dashboard.status_code == 200, dashboard.text
-    metrics = {row["id"]: row["value"] for row in dashboard.json()["metrics"]}
-    assert metrics["active_students"] == 1
-    assert metrics["outstanding"] == 450000
-    assert "appointments_today" not in metrics
-    assert "stock_risk" not in metrics
+    assert dashboard.status_code == 409, dashboard.text
+    assert "placement intelligence dashboard" in dashboard.json()["detail"]
 
     profile = client.get(f"/api/clients/{student['client_id']}/workspace", headers=headers)
     assert profile.status_code == 200, profile.text

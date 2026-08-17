@@ -4,15 +4,17 @@ import re
 from difflib import SequenceMatcher
 from uuid import UUID
 from datetime import date, datetime, time, timedelta, timezone
+from types import SimpleNamespace
 from typing import Callable
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.ai.actions import ACTION_REGISTRY, prepare_action
 from app.ai.record_serializers import sale_invoice_context, serialize_sale_invoice
 from app.ai.retrieval import retrieve
+from app.ai.v3_cache import ACADEMIC_REFERENCE_CACHE
 from app.models import (
     AIResultSession, Appointment, CatalogItem, Category, Client, Employee, EmployeeLocation,
     ClientMedia, CollegeCohort, CollegeCourse, CollegeCourseOffering, CollegeDepartment,
@@ -88,6 +90,13 @@ def _scoped_clients(statement, db, user, location_id=None, status=None):
 def tool_business_summary(db: Session, user: User, location_id: str | None = None) -> dict:
     if denied := _denied(db, user, "dashboard.view"): return denied
     org = db.get(Organization, user.organization_id)
+    permissions = set(get_user_permissions(db, user))
+    can_students = "college.students.view" in permissions
+    can_clients = "clients.view" in permissions
+    can_sales = "sales.view" in permissions
+    can_appointments = "appointments.view" in permissions
+    can_inventory = "inventory.view" in permissions
+    can_employees = "employees.view" in permissions
     now = datetime.now(timezone.utc)
     try: local_now = now.astimezone(ZoneInfo(org.timezone))
     except Exception: local_now = now
@@ -129,14 +138,15 @@ def tool_business_summary(db: Session, user: User, location_id: str | None = Non
     locations = allowed_location_ids(db, user)
     if locations is not None:
         employee_stmt = employee_stmt.join(EmployeeLocation, EmployeeLocation.employee_id == Employee.id).where(EmployeeLocation.location_id.in_(locations))
-    active_identities = int(db.scalar(client_stmt) or 0)
+    can_identities = can_students if org.industry.value == "college" else can_clients
+    active_identities = int(db.scalar(client_stmt) or 0) if can_identities else None
     if org.industry.value == "college":
         # College is a placement-intelligence workspace, not a financial
         # business dashboard. Rich metrics come from the College tool.
         return {
             "industry": "college",
             "active_students": active_identities,
-            "employees": db.scalar(employee_stmt) if user_has_permissions(db, user, ["employees.view"]) else None,
+            "employees": db.scalar(employee_stmt) if can_employees else None,
             "today_revenue_paise": None,
             "month_revenue_paise": None,
             "appointments_today": None,
@@ -147,15 +157,15 @@ def tool_business_summary(db: Session, user: User, location_id: str | None = Non
         "currency": org.currency,
         "today_revenue_paise": db.scalar(select(func.coalesce(func.sum(SalePayment.amount_paise), 0))
             .join(SaleInvoice, SaleInvoice.id == SalePayment.invoice_id)
-            .where(*payments, SalePayment.created_at >= start)) or 0,
+            .where(*payments, SalePayment.created_at >= start)) or 0 if can_sales else None,
         "month_revenue_paise": db.scalar(select(func.coalesce(func.sum(SalePayment.amount_paise), 0))
             .join(SaleInvoice, SaleInvoice.id == SalePayment.invoice_id)
-            .where(*payments, SalePayment.created_at >= month)) or 0,
+            .where(*payments, SalePayment.created_at >= month)) or 0 if can_sales else None,
         "active_clients": active_identities,
         "active_students": active_identities if org.industry.value == "college" else None,
-        "appointments_today": db.scalar(select(func.count(Appointment.id)).where(*appointments)) or 0,
-        "low_stock_items": db.scalar(select(func.count(StockLevel.id)).where(*stocks)) or 0,
-        "employees": db.scalar(employee_stmt) or 0,
+        "appointments_today": db.scalar(select(func.count(Appointment.id)).where(*appointments)) or 0 if can_appointments else None,
+        "low_stock_items": db.scalar(select(func.count(StockLevel.id)).where(*stocks)) or 0 if can_inventory else None,
+        "employees": db.scalar(employee_stmt) or 0 if can_employees else None,
     }
 
 
@@ -332,7 +342,10 @@ def _profile_ref(kind, row_id):
 
 
 def _record_context(db, user, subject, rows):
-    context = {"clients": {}, "plans": {}, "items": {}, "avatars": {}, "programs": {}, "cohorts": {}}
+    context = {
+        "clients": {}, "plans": {}, "items": {}, "avatars": {}, "programs": {},
+        "cohorts": {}, "invoices": {},
+    }
     if subject == "sales":
         context.update(sale_invoice_context(db, user, rows))
         return context
@@ -341,6 +354,14 @@ def _record_context(db, user, subject, rows):
     elif subject == "students": client_ids = {row.client_id for row in rows}
     elif subject in {"memberships", "checkins"}: client_ids = {row.client_id for row in rows}
     elif subject == "patients": client_ids = {row.client_id for row in rows}
+    elif subject == "purchases":
+        invoice_ids = {row.invoice_id for row in rows if row.invoice_id}
+        invoices = list(db.execute(select(SaleInvoice).where(
+            SaleInvoice.organization_id == user.organization_id,
+            SaleInvoice.id.in_(invoice_ids),
+        )).scalars()) if invoice_ids else []
+        context["invoices"] = {row.id: row for row in invoices}
+        client_ids = {row.client_id for row in invoices if row.client_id}
     if client_ids:
         clients = db.execute(select(Client).where(
             Client.organization_id == user.organization_id, Client.id.in_(client_ids),
@@ -389,7 +410,10 @@ def _avatar_url(context, client_id):
 
 
 def _serialize_record(db, user, subject, row, context=None):
-    context = context or {"clients": {}, "plans": {}, "items": {}, "avatars": {}, "programs": {}, "cohorts": {}}
+    context = context or {
+        "clients": {}, "plans": {}, "items": {}, "avatars": {}, "programs": {},
+        "cohorts": {}, "invoices": {},
+    }
     if subject == "clients":
         name = f"{row.first_name} {row.last_name}".strip()
         return {"id": row.id, "name": name, "display_name": name,
@@ -423,8 +447,8 @@ def _serialize_record(db, user, subject, row, context=None):
     if subject == "sales":
         return serialize_sale_invoice(row, context)
     if subject == "purchases":
-        invoice = db.get(SaleInvoice, row.invoice_id)
-        client = db.get(Client, invoice.client_id) if invoice and invoice.client_id else None
+        invoice = context["invoices"].get(row.invoice_id)
+        client = context["clients"].get(invoice.client_id) if invoice and invoice.client_id else None
         return {"id": row.id, "item": row.item_name, "sku": row.sku, "quantity_milli": row.quantity_milli,
                 "total_paise": row.total_paise, "invoice_number": invoice.invoice_number if invoice else None,
                 "client_id": client.id if client else None,
@@ -466,21 +490,101 @@ def _serialize_record(db, user, subject, row, context=None):
             "avatar_url": _avatar_url(context, row.client_id)}
 
 
-def run_result_page(db, user, spec, offset=0, limit=25):
+def _record_pagination_columns(subject: str):
+    if subject == "clients": return Client.created_at, Client.id, "datetime"
+    if subject == "students": return CollegeStudentProfile.created_at, CollegeStudentProfile.id, "datetime"
+    if subject == "employees": return Employee.created_at, Employee.id, "datetime"
+    if subject in {"appointments", "clinic_queue"}: return Appointment.starts_at, Appointment.id, "datetime"
+    if subject == "sales": return SaleInvoice.created_at, SaleInvoice.id, "datetime"
+    if subject == "purchases": return SaleInvoice.created_at, SaleLine.id, "datetime"
+    if subject == "patients": return PatientProfile.created_at, PatientProfile.id, "datetime"
+    if subject == "catalog": return CatalogItem.created_at, CatalogItem.id, "datetime"
+    if subject == "inventory": return StockLevel.updated_at, StockLevel.id, "datetime"
+    if subject == "memberships": return Membership.ends_on, Membership.id, "date"
+    return GymCheckIn.checked_in_at, GymCheckIn.id, "datetime"
+
+
+def _parse_result_sort_value(value, value_type: str):
+    if value in (None, ""):
+        return None
+    try:
+        if value_type == "date":
+            return date.fromisoformat(str(value))
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _row_result_sort_value(db, subject: str, row):
+    if subject == "clients": return row.created_at
+    if subject == "students": return row.created_at
+    if subject == "employees": return row.created_at
+    if subject in {"appointments", "clinic_queue"}: return row.starts_at
+    if subject == "sales": return row.created_at
+    if subject == "purchases":
+        invoice = db.get(SaleInvoice, row.invoice_id)
+        return invoice.created_at if invoice else None
+    if subject == "patients": return row.created_at
+    if subject == "catalog": return row.created_at
+    if subject == "inventory": return row.updated_at
+    if subject == "memberships": return row.ends_on
+    return row.checked_in_at
+
+
+def run_result_page(db, user, spec, offset=0, limit=25, *, cursor_values=None, exact_count=True):
     subject = spec["subject"]
-    stmt, order, permission = _records_statement(
+    stmt, _legacy_order, permission = _records_statement(
         db, user, subject, spec.get("query"), spec.get("location_id"), spec.get("days"),
         spec.get("status"), spec.get("created_within_days"),
     )
     if denied := _denied(db, user, permission): return denied
-    count = db.scalar(select(func.count()).select_from(stmt.order_by(None).subquery())) or 0
-    rows = db.execute(stmt.order_by(order).offset(offset).limit(min(limit, 100))).scalars().all()
+    sort_column, id_column, sort_type = _record_pagination_columns(subject)
+    if cursor_values and not cursor_values.get("legacy"):
+        cursor_sort = _parse_result_sort_value(cursor_values.get("sort"), sort_type)
+        cursor_id = cursor_values.get("id")
+        if cursor_sort is None or not cursor_id:
+            return {"error": "The result cursor is invalid."}
+        stmt = stmt.where(or_(
+            sort_column < cursor_sort,
+            and_(sort_column == cursor_sort, id_column < cursor_id),
+        ))
+        offset = 0
+    page_limit = min(max(int(limit or 25), 1), 100)
+    count = (
+        int(db.scalar(select(func.count()).select_from(stmt.order_by(None).subquery())) or 0)
+        if exact_count and not cursor_values else None
+    )
+    rows = db.execute(
+        stmt.order_by(sort_column.desc(), id_column.desc()).offset(max(0, int(offset or 0))).limit(page_limit + 1)
+    ).scalars().all()
+    has_more = len(rows) > page_limit
+    rows = rows[:page_limit]
+    if count is None and not has_more and not cursor_values and not offset:
+        count = len(rows)
     context = _record_context(db, user, subject, rows)
-    return {"count": count, "items": [_serialize_record(db, user, subject, row, context) for row in rows], "next_offset": offset + len(rows) if offset + len(rows) < count else None}
+    next_values = None
+    if has_more and rows:
+        sort_value = _row_result_sort_value(db, subject, rows[-1])
+        if sort_value is None:
+            return {"error": "This result cannot be continued safely."}
+        next_values = {
+            "sort": sort_value.isoformat(),
+            "id": str(rows[-1].id),
+        }
+    result = {
+        "count": count,
+        "count_is_exact": count is not None,
+        "items": [_serialize_record(db, user, subject, row, context) for row in rows],
+        "has_more": has_more,
+        "next_values": next_values,
+    }
+    if offset:
+        result["next_offset"] = offset + len(rows) if has_more else None
+    return result
 
 
 def tool_business_records(db, user, subject, query=None, location_id=None, days=None, status=None,
-                          created_within_days=None, conversation_id=None):
+                          created_within_days=None, conversation_id=None, exact_count=True):
     spec = _normalize_record_spec(subject, query, location_id, days, status, created_within_days)
     subject = spec["subject"]
     organization = db.get(Organization, user.organization_id)
@@ -491,12 +595,12 @@ def tool_business_records(db, user, subject, query=None, location_id=None, days=
         and not user_has_permissions(db, user, ["college.fees.view"])
     ):
         return {"access_denied": True, "message": "Fee amounts are not included in your College access."}
-    result = run_result_page(db, user, spec, 0, 5)
+    result = run_result_page(db, user, spec, 0, 5, exact_count=bool(exact_count))
     if result.get("access_denied"): return result
-    if result["count"] > 5:
+    if result.get("has_more"):
         session = AIResultSession(organization_id=user.organization_id, user_id=user.id, conversation_id=conversation_id,
                                   tool_name="business_records", query_spec=spec, result_type=subject,
-                                  total_count=result["count"], expires_at=datetime.now(timezone.utc) + timedelta(minutes=15))
+                                  total_count=int(result.get("count") or 0), expires_at=datetime.now(timezone.utc) + timedelta(minutes=15))
         db.add(session); db.flush(); result["result_session_id"] = session.id
     profile_kind = {"clients": "client", "students": "client", "employees": "employee", "memberships": "client",
                     "checkins": "client", "patients": "client", "catalog": "catalog",
@@ -804,6 +908,106 @@ def _section_key(value: str | None) -> str:
     return tokens[-1] if tokens else ""
 
 
+def _academic_reference_rows(db: Session, user: User, access):
+    """Return permission-scoped, detached academic references from a bounded cache."""
+    source_fingerprint = db.execute(select(
+        select(func.count(CollegeDepartment.id)).where(
+            CollegeDepartment.organization_id == user.organization_id,
+        ).scalar_subquery(),
+        select(func.max(CollegeDepartment.updated_at)).where(
+            CollegeDepartment.organization_id == user.organization_id,
+        ).scalar_subquery(),
+        select(func.count(CollegeProgram.id)).where(
+            CollegeProgram.organization_id == user.organization_id,
+        ).scalar_subquery(),
+        select(func.max(CollegeProgram.updated_at)).where(
+            CollegeProgram.organization_id == user.organization_id,
+        ).scalar_subquery(),
+        select(func.count(CollegeCohort.id)).where(
+            CollegeCohort.organization_id == user.organization_id,
+        ).scalar_subquery(),
+        select(func.max(CollegeCohort.updated_at)).where(
+            CollegeCohort.organization_id == user.organization_id,
+        ).scalar_subquery(),
+    )).one()
+    key = (
+        str(user.organization_id), str(user.id), int(user.access_version), int(access.policy_version),
+        bool(access.unrestricted), tuple(sorted(access.department_ids)),
+        tuple(sorted(access.program_ids)), tuple(sorted(access.cohort_ids)),
+        tuple(str(value) for value in source_fingerprint),
+    )
+    snapshot = ACADEMIC_REFERENCE_CACHE.get(key)
+    if snapshot is None:
+        departments_query = select(CollegeDepartment).where(
+            CollegeDepartment.organization_id == user.organization_id,
+            CollegeDepartment.is_active.is_(True),
+        )
+        programs_query = select(CollegeProgram).where(
+            CollegeProgram.organization_id == user.organization_id,
+            CollegeProgram.is_active.is_(True),
+        )
+        cohorts_query = (
+            select(CollegeCohort, CollegeProgram, CollegeDepartment)
+            .join(CollegeProgram, CollegeProgram.id == CollegeCohort.program_id)
+            .join(CollegeDepartment, CollegeDepartment.id == CollegeProgram.department_id)
+            .where(
+                CollegeCohort.organization_id == user.organization_id,
+                CollegeCohort.is_active.is_(True),
+            )
+        )
+        if not access.unrestricted:
+            departments_query = departments_query.where(CollegeDepartment.id.in_(access.department_ids))
+            programs_query = programs_query.where(CollegeProgram.id.in_(access.program_ids))
+            cohorts_query = cohorts_query.where(CollegeCohort.id.in_(access.cohort_ids))
+        departments = list(db.execute(departments_query.order_by(CollegeDepartment.name)).scalars())
+        programs = list(db.execute(programs_query.order_by(CollegeProgram.name)).scalars())
+        cohorts = list(db.execute(cohorts_query.order_by(
+            CollegeCohort.graduation_year,
+            CollegeDepartment.name,
+            CollegeProgram.name,
+            CollegeCohort.section,
+        )).all())
+        snapshot = {
+            "departments": [
+                {"id": row.id, "name": row.name, "code": row.code}
+                for row in departments
+            ],
+            "programs": [
+                {"id": row.id, "name": row.name, "code": row.code, "department_id": row.department_id}
+                for row in programs
+            ],
+            "cohorts": [
+                {
+                    "cohort": {
+                        "id": cohort.id, "name": cohort.name, "code": cohort.code,
+                        "program_id": cohort.program_id, "graduation_year": cohort.graduation_year,
+                        "section": cohort.section,
+                    },
+                    "program": {
+                        "id": program.id, "name": program.name, "code": program.code,
+                        "department_id": program.department_id,
+                    },
+                    "department": {
+                        "id": department.id, "name": department.name, "code": department.code,
+                    },
+                }
+                for cohort, program, department in cohorts
+            ],
+        }
+        ACADEMIC_REFERENCE_CACHE.set(key, snapshot)
+    departments = [SimpleNamespace(**row) for row in snapshot["departments"]]
+    programs = [SimpleNamespace(**row) for row in snapshot["programs"]]
+    cohorts = [
+        (
+            SimpleNamespace(**row["cohort"]),
+            SimpleNamespace(**row["program"]),
+            SimpleNamespace(**row["department"]),
+        )
+        for row in snapshot["cohorts"]
+    ]
+    return departments, programs, cohorts
+
+
 def _resolve_college_student_scope(
     db: Session,
     user: User,
@@ -818,33 +1022,13 @@ def _resolve_college_student_scope(
     cohort_id: str | None = None,
     cohort_ids: list[str] | set[str] | tuple[str, ...] | None = None,
 ):
-    departments_query = select(CollegeDepartment).where(
-        CollegeDepartment.organization_id == user.organization_id,
-        CollegeDepartment.is_active.is_(True),
-    )
-    programs_query = select(CollegeProgram).where(
-        CollegeProgram.organization_id == user.organization_id,
-        CollegeProgram.is_active.is_(True),
-    )
-    cohorts_query = (
-        select(CollegeCohort, CollegeProgram, CollegeDepartment)
-        .join(CollegeProgram, CollegeProgram.id == CollegeCohort.program_id)
-        .join(CollegeDepartment, CollegeDepartment.id == CollegeProgram.department_id)
-        .where(
-            CollegeCohort.organization_id == user.organization_id,
-            CollegeCohort.is_active.is_(True),
-        )
-    )
-    if not access.unrestricted:
-        departments_query = departments_query.where(CollegeDepartment.id.in_(access.department_ids))
-        programs_query = programs_query.where(CollegeProgram.id.in_(access.program_ids))
-        cohorts_query = cohorts_query.where(CollegeCohort.id.in_(access.cohort_ids))
+    departments, programs, cohort_rows = _academic_reference_rows(db, user, access)
 
     resolved_department = None
     resolved_program = None
     if department:
         resolved_department, error = _match_academic_row(
-            list(db.execute(departments_query.order_by(CollegeDepartment.name)).scalars()),
+            departments,
             department,
             "department",
         )
@@ -854,7 +1038,7 @@ def _resolve_college_student_scope(
             return None, {"error": "The department name and identifier refer to different records."}
         department_id = resolved_department.id
     if program:
-        available_programs = list(db.execute(programs_query.order_by(CollegeProgram.name)).scalars())
+        available_programs = list(programs)
         if department_id:
             available_programs = [row for row in available_programs if row.department_id == department_id]
         resolved_program, error = _match_academic_row(available_programs, program, "program")
@@ -866,12 +1050,6 @@ def _resolve_college_student_scope(
 
     years = sorted({int(year) for year in (graduation_years or [])})
     selected_cohort_ids = set(cohort_ids or [])
-    cohort_rows = list(db.execute(cohorts_query.order_by(
-        CollegeCohort.graduation_year,
-        CollegeDepartment.name,
-        CollegeProgram.name,
-        CollegeCohort.section,
-    )).all())
     candidates = []
     for cohort, cohort_program, cohort_department in cohort_rows:
         if department_id and cohort_department.id != department_id:
@@ -1024,7 +1202,7 @@ def _academic_tool_item(resource: str, row, *, related: dict | None = None) -> d
         "profile_ref": {
             "kind": "college_academic_structure",
             "id": row.id,
-            "href": f"/app/college?section=structure&tab={resource}",
+            "href": f"/app/academics?section=structure&tab={resource}",
         },
         **related,
     }
@@ -1204,7 +1382,7 @@ def tool_college_academic_structure(
         "count": len(items[:limit]),
         "setup_gaps": gaps,
         "read_only": True,
-        "management_href": "/app/college?section=structure",
+        "management_href": "/app/academics?section=structure",
         "presentation": {
             "display": "cards",
             "title": "Academic structure",

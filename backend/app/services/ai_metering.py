@@ -61,15 +61,34 @@ def calculate_charge(db: Session, model: str, usage: dict) -> AICharge:
         return AICharge(credits=0, provider_cost_paise=0, rate_version="no-provider")
 
     policy = credit_policy(db)
-    rate = _model_rate(policy, model)
     embedding_rate = _model_rate(policy, "text-embedding-3-small")
     million = Decimal(1_000_000)
-    raw_credits = (
-        Decimal(input_tokens - cached_tokens) * Decimal(rate["input"])
-        + Decimal(cached_tokens) * Decimal(rate.get("cached_input", rate["input"]))
-        + Decimal(output_tokens) * Decimal(rate["output"])
-        + Decimal(embedding_tokens) * Decimal(embedding_rate["input"])
-    ) / million
+    model_usage = usage.get("model_usage") if isinstance(usage.get("model_usage"), dict) else {}
+    if model_usage:
+        raw_units = Decimal(0)
+        for model_name, values in model_usage.items():
+            if not isinstance(values, dict):
+                continue
+            stage_input = max(int(values.get("input_tokens", 0)), 0)
+            stage_cached = min(max(int(values.get("cached_input_tokens", 0)), 0), stage_input)
+            stage_output = max(int(values.get("output_tokens", 0)), 0)
+            rate = _model_rate(policy, str(model_name))
+            raw_units += (
+                Decimal(stage_input - stage_cached) * Decimal(rate["input"])
+                + Decimal(stage_cached) * Decimal(rate.get("cached_input", rate["input"]))
+                + Decimal(stage_output) * Decimal(rate["output"])
+            )
+        raw_credits = (
+            raw_units + Decimal(embedding_tokens) * Decimal(embedding_rate["input"])
+        ) / million
+    else:
+        rate = _model_rate(policy, model)
+        raw_credits = (
+            Decimal(input_tokens - cached_tokens) * Decimal(rate["input"])
+            + Decimal(cached_tokens) * Decimal(rate.get("cached_input", rate["input"]))
+            + Decimal(output_tokens) * Decimal(rate["output"])
+            + Decimal(embedding_tokens) * Decimal(embedding_rate["input"])
+        ) / million
     credits = max(int(policy.get("minimum_credits", 1)), int(raw_credits.to_integral_value(rounding=ROUND_CEILING)))
     provider_cost = int((raw_credits * Decimal(policy.get("paise_per_credit", 25))).to_integral_value(rounding=ROUND_CEILING))
     return AICharge(credits=credits, provider_cost_paise=provider_cost, rate_version=str(policy["version"]))

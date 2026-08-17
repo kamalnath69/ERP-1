@@ -147,17 +147,14 @@ def resolve_entities(db: Session, user: User, reference: str, kinds=None, limit=
         ]
         if can_view_student_contact:
             client_fields.extend([Client.phone, Client.email])
-        stmt = filter_clients(select(Client).outerjoin(
+        stmt = filter_clients(select(Client, CollegeStudentProfile).outerjoin(
             CollegeStudentProfile, CollegeStudentProfile.client_id == Client.id,
         ).where(Client.organization_id == user.organization_id), db, user)
         if is_college:
             stmt = stmt.where(CollegeStudentProfile.organization_id == user.organization_id)
         stmt = stmt.where(or_(Client.id == row_id, _text_filter(reference, client_fields)) if row_id else _text_filter(reference, client_fields))
-        for row in db.execute(stmt.limit(30)).scalars():
+        for row, student in db.execute(stmt.limit(30)).all():
             name = f"{row.first_name} {row.last_name}".strip()
-            student = db.execute(select(CollegeStudentProfile).where(
-                CollegeStudentProfile.client_id == row.id,
-            )).scalar_one_or_none()
             add("client", row, name, student.admission_number if student else row.phone or row.client_number, student.status if student else row.status,
                 [
                     ("name", name), ("number", row.client_number),

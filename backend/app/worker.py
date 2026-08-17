@@ -403,25 +403,22 @@ def _process_document(db, document_id):
                 "provider_requests": extracted.provider_requests,
             })
         if not text.strip(): raise ValueError("No readable text was found in this document")
-        row.extracted_text = text[:2_000_000]; chunks = []
-        for page_number, page_text in pages:
-            for start in range(0, len(page_text), 1000):
-                chunk = page_text[start:start + 1200].strip()
-                if chunk: chunks.append((page_number, chunk))
-                if len(chunks) >= 200: break
-            if len(chunks) >= 200: break
-        embedding = _embed([item[1] for item in chunks])
+        from app.ai.document_chunking import chunk_document_pages
+        row.extracted_text = text[:2_000_000]
+        chunks = chunk_document_pages(pages)
+        embedding = _embed([item.content for item in chunks])
         vectors = embedding.vectors if embedding else None
         if embedding:
             provider_usage["embedding_tokens"] = embedding.input_tokens
             provider_usage["provider_requests"] += embedding.provider_requests
         db.execute(delete(DocumentChunk).where(DocumentChunk.document_id == row.id))
-        for index, (page_number, chunk) in enumerate(chunks):
+        for index, chunk in enumerate(chunks):
             vector = vectors[index] if vectors else None
             db.add(DocumentChunk(organization_id=row.organization_id, document_id=row.id, chunk_index=index,
-                content=chunk, embedding=vector, embedding_vector=vector,
-                search_vector=func.to_tsvector("simple", chunk), page_number=page_number,
-                token_count=max(1, len(chunk) // 4), meta={"name": row.name}))
+                content=chunk.content, embedding=vector, embedding_vector=vector,
+                search_vector=func.to_tsvector("simple", chunk.content), page_number=chunk.page_number,
+                section=chunk.section, token_count=chunk.token_count,
+                meta={"name": row.name, "partial_index": chunk.partial_index}))
         row.embedding_model = settings.AI_EMBEDDING_MODEL if vectors else None
         row.embedding_version = (row.embedding_version or 0) + 1; row.status = "ready"; row.error = None
         if reservation:
@@ -491,8 +488,16 @@ def _refresh_client_signals(db, organization_id):
 
 def _embed(chunks):
     if not chunks or not settings.AI_API_KEY: return None
-    from app.ai.provider import provider
-    return provider().embed(chunks)
+    from app.ai.provider import EmbeddingResponse, provider
+    vectors = []
+    input_tokens = 0
+    provider_requests = 0
+    for start in range(0, len(chunks), 64):
+        response = provider().embed(chunks[start:start + 64])
+        vectors.extend(response.vectors)
+        input_tokens += response.input_tokens
+        provider_requests += response.provider_requests
+    return EmbeddingResponse(vectors=vectors, input_tokens=input_tokens, provider_requests=provider_requests)
 
 
 if __name__ == "__main__":

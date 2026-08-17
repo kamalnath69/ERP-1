@@ -32,6 +32,7 @@ const Gym = lazy(() => import("@/pages/Gym"));
 const Salon = lazy(() => import("@/pages/Salon"));
 const Clinic = lazy(() => import("@/pages/Clinic"));
 const College = lazy(() => import("@/pages/CollegeWorkspace"));
+const Academics = lazy(() => import("@/pages/CollegeWorkspace"));
 const AIChat = lazy(() => import("@/pages/AIChat"));
 const Team = lazy(() => import("@/pages/Team"));
 const EmployeeProfile = lazy(() => import("@/pages/EmployeeProfile"));
@@ -111,7 +112,8 @@ export default function App() {
       <Route path="/app/gym/*" element={gated("gym", <Gym />)} />
       <Route path="/app/salon/*" element={gated("salon", <Salon />)} />
       <Route path="/app/clinic/*" element={gated("clinic", <Clinic />)} />
-      <Route path="/app/college/*" element={gated("college", <College />)} />
+      <Route path="/app/academics/*" element={gated("academics", <Academics workspace="academics" />)} />
+      <Route path="/app/college/*" element={gated("college", <College workspace="placement" />)} />
       <Route path="/app/ai" element={gated("ai", <AIChat />)} />
       <Route path="/app/team" element={gated("team", <Team />)} />
       <Route path="/app/team/:employeeId" element={gated("team", <EmployeeProfile />)} />

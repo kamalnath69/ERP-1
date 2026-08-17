@@ -22,6 +22,10 @@ class ChatConversation(TimestampMixin, Base):
     pinned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     context_state: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    memory_state: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    memory_summary: Mapped[str | None] = mapped_column(Text)
+    memory_summary_through_message_id: Mapped[str | None] = mapped_column(UUID_STR)
+    memory_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
 
 class ChatTurn(TimestampMixin, Base):
@@ -107,6 +111,41 @@ class AIUsage(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(30), default="completed", nullable=False)
     credits_used: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     tool_latency_ms: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class AIExecutionTrace(TimestampMixin, Base):
+    """Sanitized execution telemetry for both free and provider-backed turns."""
+
+    __tablename__ = "ai_execution_traces"
+
+    id: Mapped[str] = uuid_pk()
+    organization_id: Mapped[str] = tenant_fk()
+    user_id: Mapped[str] = mapped_column(UUID_STR, ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    conversation_id: Mapped[str | None] = mapped_column(
+        UUID_STR, ForeignKey("chat_conversations.id", ondelete="SET NULL"), index=True
+    )
+    turn_id: Mapped[str | None] = mapped_column(
+        UUID_STR, ForeignKey("chat_turns.id", ondelete="SET NULL"), index=True
+    )
+    trace_version: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    route: Mapped[str] = mapped_column(String(60), default="business", nullable=False, index=True)
+    planner_kind: Mapped[str] = mapped_column(String(40), default="unknown", nullable=False, index=True)
+    planner_confidence: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    cache_status: Mapped[str] = mapped_column(String(30), default="miss", nullable=False, index=True)
+    stage_durations_ms: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    model_rounds: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    provider_requests: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    cached_input_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    embedding_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    first_event_latency_ms: Mapped[int | None] = mapped_column(Integer)
+    total_latency_ms: Mapped[int | None] = mapped_column(Integer)
+    verification_outcome: Mapped[str] = mapped_column(String(40), default="not_required", nullable=False, index=True)
+    policy_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    error_category: Mapped[str | None] = mapped_column(String(80), index=True)
+    zero_credit: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    fallback_used: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
 
 class AIIntentResolution(TimestampMixin, Base):

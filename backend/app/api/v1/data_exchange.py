@@ -208,8 +208,11 @@ def get_resource_schema(
 ):
     require_college(db, user)
     _require_feature(db, user.organization_id)
-    _resource_access(db, user, resource_key, write=False)
-    return resource_schema(db, user.organization_id, resource_key, {"cycle_id": cycle_id} if cycle_id else {})
+    _permissions, access = _resource_access(db, user, resource_key, write=False)
+    scope = _access_mapping(access)
+    if cycle_id:
+        scope["cycle_id"] = cycle_id
+    return resource_schema(db, user.organization_id, resource_key, scope)
 
 
 @router.post("/templates", status_code=201)

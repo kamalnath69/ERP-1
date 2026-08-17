@@ -172,7 +172,7 @@ function EntityCards({ block, onViewAll, onPin, onSelectEntity, compact = false 
   );
   const previewCount = canOpenOverflow ? visibleCount : items.length;
   const hasHiddenOverflow = canOpenOverflow && (
-    previewCount < items.length || total > rawItems.length
+    previewCount < items.length || total > rawItems.length || data.has_more
   );
   return (
     <section className="space-y-3">
@@ -236,6 +236,9 @@ function EntityCards({ block, onViewAll, onPin, onSelectEntity, compact = false 
 function RecordsHeader({ block, onViewAll, onPin, visibleCount, hasHiddenOverflow = false, embedded = false, compact = false }) {
   const data = block.data || {};
   const count = visibleCount ?? data.total ?? data.items?.length ?? 0;
+  const countLabel = data.count_is_exact === false && data.has_more
+    ? `Showing ${Number(count).toLocaleString("en-IN")}`
+    : `${Number(count).toLocaleString("en-IN")} found`;
   const canPin = Boolean(data.result_session_id && onPin);
   const canViewAll = Boolean(
     onViewAll && (
@@ -246,7 +249,7 @@ function RecordsHeader({ block, onViewAll, onPin, visibleCount, hasHiddenOverflo
     <header className={`${embedded ? "border-b bg-secondary/30" : "rounded-2xl border bg-card/85 shadow-[0_8px_26px_hsl(var(--primary)/.04)]"} ${compact ? "p-3" : "p-4"} flex flex-wrap justify-between gap-3 items-center`}>
       <div>
         <div className="overline">Current records</div>
-        <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2"><h3 className={`font-display font-semibold ${compact ? "text-lg" : "text-xl"}`}>{block.title}</h3><p className="text-xs text-muted-foreground">{Number(count).toLocaleString("en-IN")} found</p></div>
+        <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2"><h3 className={`font-display font-semibold ${compact ? "text-lg" : "text-xl"}`}>{block.title}</h3><p className="text-xs text-muted-foreground">{countLabel}</p></div>
       </div>
       {(canPin || canViewAll) && (
         <div className="flex gap-2">
@@ -368,7 +371,7 @@ function Records({ block, onViewAll, onPin, compact = false }) {
           onPin={onPin}
           embedded
           compact
-          hasHiddenOverflow={items.length > preview.length || Number(data.total || 0) > items.length}
+          hasHiddenOverflow={items.length > preview.length || Number(data.total || 0) > items.length || data.has_more}
         />
         {preview.length ? <div className="divide-y">
           {preview.map((item, index) => {

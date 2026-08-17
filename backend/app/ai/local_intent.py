@@ -15,6 +15,7 @@ from app.services.entity_resolution import resolve_entities
 
 
 ENGINE_VERSION = "local-intent-v2"
+LANGUAGE_CLASSIFIER_VERSION = "turn-language-v2"
 LOCAL_THRESHOLD = 0.94
 MAX_LOCAL_TOKENS = 16
 
@@ -114,12 +115,25 @@ def normalize_language(message: str) -> tuple[str, str]:
     normalized = unicodedata.normalize("NFKC", message).casefold()
     normalized = re.sub(r"[^\w@+.-]+", " ", normalized, flags=re.UNICODE)
     normalized = re.sub(r"\s+", " ", normalized).strip()
-    if any("\u0b80" <= char <= "\u0bff" for char in message):
-        language = "ta"
-    elif any(_is_tanglish_token(token) for token in normalized.split()):
-        language = "tanglish"
-    else:
+    explicit_english = bool(re.search(r"\b(?:reply|respond|speak|answer|continue)\s+(?:only\s+)?in\s+english\b", normalized))
+    explicit_tanglish = bool(re.search(r"\b(?:tanglish|tamil\s+in\s+english|tamil\s+using\s+english)\b", normalized))
+    explicit_tamil = bool(re.search(r"\b(?:reply|respond|speak|answer)\s+(?:only\s+)?in\s+tamil\b", normalized))
+    if explicit_english:
         language = "en"
+    elif explicit_tanglish:
+        language = "tanglish"
+    elif explicit_tamil or any("\u0b80" <= char <= "\u0bff" for char in message):
+        language = "ta"
+    else:
+        tokens = normalized.split()
+        signals = [token for token in tokens if _is_tanglish_token(token)]
+        strong = {
+            "antha", "andha", "intha", "indha", "yaaru", "evlo", "irukku", "irukaanga",
+            "innaiku", "nethu", "venum", "venuma", "pesu", "sollu", "kaatu", "vanakkam",
+        }
+        language = "tanglish" if len(signals) >= 2 or (
+            len(signals) == 1 and (signals[0] in strong or len(tokens) <= 4)
+        ) else "en"
     return normalized, language
 
 

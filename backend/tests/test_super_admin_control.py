@@ -54,3 +54,20 @@ def test_control_center_sections_are_available_to_platform_owner():
     for section in ("me", "overview", "organizations", "plans", "billing", "wallets", "platform-team", "support-sessions", "operations", "audit", "settings"):
         response = client.get(f"/api/super-admin/{section}", headers=headers)
         assert response.status_code == 200, (section, response.text)
+
+
+def test_ai_performance_exposes_only_sanitized_aggregates():
+    response = client.get(
+        "/api/super-admin/ai/performance?days=7", headers=platform_headers(),
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert {
+        "period_days", "turns", "provider_call_ratio", "zero_credit_ratio",
+        "cache_hit_ratio", "verification_failure_ratio", "fallback_ratio",
+        "provider_requests", "tokens", "latency_ms", "routes",
+    } <= payload.keys()
+    assert set(payload["tokens"]) == {"input", "output", "embedding"}
+    assert "prompts" not in payload
+    assert "tool_payloads" not in payload

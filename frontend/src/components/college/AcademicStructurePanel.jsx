@@ -10,7 +10,6 @@ import { toast } from "sonner";
 
 import { ValidatedActionDialog } from "@/components/forms/ValidatedActionDialog";
 import AcademicResourceCombobox from "@/components/college/AcademicResourceCombobox";
-import AssessmentPatternsPanel from "@/components/college/AssessmentPatternsPanel";
 import {
   CursorListFooter, DataTable, DrawerForm, EmptyState, ErrorState, FilterBar,
   SegmentControl, StatusBadge, Surface,
@@ -49,7 +48,6 @@ const TABS = [
   ["cohorts", "Batches & sections"],
   ["terms", "Academic years & terms"],
   ["courses", "Courses & offerings"],
-  ["assessment-patterns", "Assessment patterns"],
 ];
 
 const RESOURCE_META = {
@@ -115,7 +113,6 @@ export default function AcademicStructurePanel() {
 
     {tab === "overview" ? <StructureOverview onOpen={chooseTab} />
       : tab === "courses" ? <CourseAndOfferingPanel />
-        : tab === "assessment-patterns" ? <AssessmentPatternsPanel />
         : <ResourcePanel resource={tab} />}
   </div>;
 }

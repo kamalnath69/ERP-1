@@ -1,7 +1,7 @@
 import {
-  Bell, Books, CalendarBlank, ChartBar, CreditCard, Gear, House, Package,
-  Receipt, ShieldCheck, Sparkle, Storefront, Users, UsersThree, Barbell,
-  GraduationCap, Stethoscope, Scissors, Warehouse,
+  Bell, Books, Briefcase, CalendarBlank, ChartBar, CreditCard, Gear, House, Package,
+  Receipt, ShieldCheck, Sparkle, Users, UsersThree, Barbell,
+  Stethoscope, Scissors, Warehouse,
 } from "@phosphor-icons/react";
 
 const clientLabel = (industry, plural = true) => (
@@ -17,7 +17,8 @@ export const ROUTES = [
   { key: "gym", path: "/app/gym", label: "Gym", icon: Barbell, permission: "gym.dashboard.view", module: "gym", industries: ["gym"], group: "primary", mobile: 4 },
   { key: "salon", path: "/app/salon", label: "Salon", icon: Scissors, permission: "appointments.view", module: "salon", industries: ["salon"], group: "primary", mobile: 4 },
   { key: "clinic", path: "/app/clinic", label: "Clinic", icon: Stethoscope, permission: "clinic.view", module: "clinic", industries: ["clinic"], group: "primary", mobile: 4 },
-  { key: "college", path: "/app/college", label: "Placement", icon: GraduationCap, permission: "college.view", module: "college", industries: ["college"], group: "primary", mobile: 4, layout: "secondary" },
+  { key: "academics", path: "/app/academics", label: "Academics", icon: Books, permission: null, anyPermissions: ["college.academics.view", "college.academics.manage", "college.attendance.view", "college.attendance.mark", "college.assessments.view", "college.assessments.record", "college.assessments.manage", "college.data.view", "college.imports.manage", "college.integrations.manage"], policyDomains: ["academics", "attendance", "assessments", "data"], module: "college", industries: ["college"], group: "primary", mobile: 4, layout: "secondary" },
+  { key: "college", path: "/app/college", label: "Placement", icon: Briefcase, permission: null, anyPermissions: ["college.placements.view", "college.opportunities.manage", "college.companies.manage", "college.applications.manage", "college.readiness.view", "college.readiness.policy.manage", "college.coding.view", "college.clearance.view", "college.clearance.manage"], policyDomains: ["placements", "readiness", "coding", "clearance"], module: "college", industries: ["college"], group: "primary", mobile: 5, layout: "secondary" },
   { key: "sales", path: "/app/sales", label: ({ industry }) => industry === "college" ? "Fee records" : "Sales", icon: Receipt, permission: "sales.view", module: "sales", group: "primary", mobile: 5, createPermission: "sales.manage", hideFromNavigationIndustries: ["college"] },
   { key: "catalog", path: "/app/catalog", label: "Catalog", icon: Package, permission: "catalog.view", module: "catalog", group: "more", search: true, createPermission: "catalog.manage", excludedIndustries: ["college"] },
   { key: "inventory", path: "/app/inventory", label: "Inventory", icon: Warehouse, permission: "inventory.view", module: "inventory", group: "more", excludedIndustries: ["college"] },
@@ -36,10 +37,18 @@ export function routeLabel(route, industry) {
   return typeof route.label === "function" ? route.label({ industry }) : route.label;
 }
 
-export function routeAvailable(route, { industry, can, hasModule }) {
+export function routeAvailable(route, { industry, can, hasModule, accessContext }) {
   if (route.industries && !route.industries.includes(industry)) return false;
   if (route.excludedIndustries?.includes(industry)) return false;
   if (route.module && !hasModule(route.module)) return false;
+  if (industry === "college" && route.policyDomains?.length && accessContext?.domain_levels) {
+    const hasPolicyDomain = route.policyDomains.some((domain) => {
+      const level = accessContext.domain_levels[domain];
+      return Boolean(level && level !== "none");
+    });
+    if (!hasPolicyDomain) return false;
+  }
+  if (route.anyPermissions?.length && !route.anyPermissions.some((permission) => can(permission))) return false;
   const permission = route.industryPermissions?.[industry] || route.permission;
   if (permission && !can(permission) && !(route.fallbackPermission && can(route.fallbackPermission))) return false;
   return true;

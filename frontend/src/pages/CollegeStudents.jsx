@@ -203,7 +203,7 @@ export default function CollegeStudents() {
     if (hierarchyQuery.isLoading && !hierarchy) return toast.info("Academic structure is still loading");
     if (!(hierarchy?.items || []).length) {
       toast.info("Create a department, program, and batch before admitting students");
-      navigate("/app/college?section=structure");
+      navigate("/app/academics?section=structure");
       return;
     }
     updateParams(setSearchParams, searchParams, (next) => next.set("new", "1"), true);
@@ -257,7 +257,7 @@ export default function CollegeStudents() {
     </section> : <EmptyState
       variant="page" alignment="left" icon={Buildings} title="Set up the academic structure first"
       description="Create a department, program, and graduation batch before admitting students."
-      primaryAction={can("college.academics.manage") ? <Button onClick={() => navigate("/app/college?section=structure")}><Plus className="mr-2" />Open academic structure</Button> : null}
+      primaryAction={can("college.academics.manage") ? <Button onClick={() => navigate("/app/academics?section=structure")}><Plus className="mr-2" />Open academic structure</Button> : null}
       steps={[{ title: "Create department" }, { title: "Add program" }, { title: "Create batch and sections" }]}
     />}
     <AdmissionDrawer open={drawerOpen} onOpenChange={closeCreate} hierarchy={hierarchy} selectedBatch={null} locations={locations} locationId={locationId} canViewContact={can("college.students.contact.view")} onCreated={(created) => navigate(`/app/clients/${created.client_id}`)} />

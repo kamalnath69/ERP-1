@@ -1,12 +1,13 @@
 """Edvatiq platform control-plane APIs."""
 import hashlib
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import EmailStr, Field, model_validator
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.api.v1.business import serialize
@@ -16,7 +17,7 @@ from app.core.validation_errors import validation_problem
 from app.schemas.validation import RequestModel
 from app.core.security import hash_password
 from app.models import (
-    AIUsage, AIWallet, ApprovalRequest, AuditLog, BillingProfile, Client, Document,
+    AIExecutionTrace, AIUsage, AIWallet, ApprovalRequest, AuditLog, BillingProfile, Client, Document,
     Employee, FeatureDefinition, Invoice, Job, Location, Organization,
     OrganizationDeletionRequest, OrganizationEntitlementOverride, OrganizationStatusEnum,
     OutboundMessage, PaymentEvent, PlanDefinition, PlanEntitlement, PlanVersion,
@@ -298,6 +299,85 @@ def overview(actor=Depends(require_platform_permission("overview.view")), db: Se
         "metrics": {"mrr_paise": mrr, "arr_paise": mrr * 12, "failed_payments": failed, "outstanding_paise": outstanding, "ai_tokens": ai_tokens, "ai_cost_paise": ai_cost_paise, "ai_credits_used": wallet_consumed, "queued_jobs": queued, "incidents": incidents},
         "organizations": {"total": db.scalar(select(func.count(Organization.id))) or 0, "trials": db.scalar(select(func.count(Organization.id)).where(Organization.status == OrganizationStatusEnum.trial)) or 0, "new_this_month": db.scalar(select(func.count(Organization.id)).where(Organization.created_at >= month)) or 0, "suspended": db.scalar(select(func.count(Organization.id)).where(Organization.status == OrganizationStatusEnum.suspended)) or 0, "churned_this_month": db.scalar(select(func.count(Subscription.id)).where(Subscription.status == "cancelled", Subscription.updated_at >= month)) or 0},
         "approvals": db.scalar(select(func.count(ApprovalRequest.id)).where(ApprovalRequest.status == "pending")) or 0,
+    }
+
+
+@router.get("/ai/performance")
+def ai_performance(
+    days: int = Query(default=30, ge=1, le=90),
+    actor=Depends(require_platform_permission("operations.view")),
+    db: Session = Depends(get_db),
+):
+    since = now_utc() - timedelta(days=days)
+    total = func.count(AIExecutionTrace.id)
+    provider_turns = func.sum(case((AIExecutionTrace.provider_requests > 0, 1), else_=0))
+    zero_credit_turns = func.sum(case((AIExecutionTrace.zero_credit.is_(True), 1), else_=0))
+    cache_hits = func.sum(case((AIExecutionTrace.cache_status == "hit", 1), else_=0))
+    verification_failures = func.sum(case((AIExecutionTrace.verification_outcome == "deterministic_fallback", 1), else_=0))
+    fallbacks = func.sum(case((AIExecutionTrace.fallback_used.is_(True), 1), else_=0))
+    aggregates = db.execute(select(
+        total,
+        func.coalesce(provider_turns, 0),
+        func.coalesce(zero_credit_turns, 0),
+        func.coalesce(cache_hits, 0),
+        func.coalesce(verification_failures, 0),
+        func.coalesce(fallbacks, 0),
+        func.coalesce(func.sum(AIExecutionTrace.provider_requests), 0),
+        func.coalesce(func.sum(AIExecutionTrace.input_tokens), 0),
+        func.coalesce(func.sum(AIExecutionTrace.output_tokens), 0),
+        func.coalesce(func.sum(AIExecutionTrace.embedding_tokens), 0),
+        func.percentile_cont(0.5).within_group(AIExecutionTrace.total_latency_ms),
+        func.percentile_cont(0.95).within_group(AIExecutionTrace.total_latency_ms),
+        func.percentile_cont(0.95).within_group(AIExecutionTrace.first_event_latency_ms),
+    ).where(AIExecutionTrace.created_at >= since)).one()
+    count = int(aggregates[0] or 0)
+
+    route_rows = db.execute(select(
+        AIExecutionTrace.route,
+        func.count(AIExecutionTrace.id),
+        func.avg(AIExecutionTrace.total_latency_ms),
+        func.percentile_cont(0.95).within_group(AIExecutionTrace.total_latency_ms),
+        func.sum(AIExecutionTrace.provider_requests),
+        func.sum(case((AIExecutionTrace.zero_credit.is_(True), 1), else_=0)),
+        func.sum(case((AIExecutionTrace.verification_outcome == "deterministic_fallback", 1), else_=0)),
+    ).where(
+        AIExecutionTrace.created_at >= since,
+    ).group_by(AIExecutionTrace.route).order_by(func.count(AIExecutionTrace.id).desc())).all()
+
+    def ratio(value: int) -> float:
+        return round((int(value or 0) / count), 4) if count else 0.0
+
+    return {
+        "period_days": days,
+        "turns": count,
+        "provider_call_ratio": ratio(aggregates[1]),
+        "zero_credit_ratio": ratio(aggregates[2]),
+        "cache_hit_ratio": ratio(aggregates[3]),
+        "verification_failure_ratio": ratio(aggregates[4]),
+        "fallback_ratio": ratio(aggregates[5]),
+        "provider_requests": int(aggregates[6] or 0),
+        "tokens": {
+            "input": int(aggregates[7] or 0),
+            "output": int(aggregates[8] or 0),
+            "embedding": int(aggregates[9] or 0),
+        },
+        "latency_ms": {
+            "p50": int(aggregates[10] or 0),
+            "p95": int(aggregates[11] or 0),
+            "first_event_p95": int(aggregates[12] or 0),
+        },
+        "routes": [
+            {
+                "route": route,
+                "turns": int(turns or 0),
+                "average_latency_ms": int(average_latency or 0),
+                "p95_latency_ms": int(p95_latency or 0),
+                "provider_requests": int(requests or 0),
+                "zero_credit_turns": int(free_turns or 0),
+                "verification_fallbacks": int(failed_verification or 0),
+            }
+            for route, turns, average_latency, p95_latency, requests, free_turns, failed_verification in route_rows
+        ],
     }
 
 
@@ -908,6 +988,16 @@ def update_setting(key: str, body: SettingsBody, actor=Depends(require_platform_
         ):
             raise HTTPException(422, "Each request maximum must be between 1 and 100 credits")
         body.value = {**current, "route_max_credits": submitted_limits}
+    if key == "ai_models":
+        required = {"planner", "synthesis", "repair"}
+        if set(body.value or {}) != required or any(
+            not isinstance((body.value or {}).get(stage), str)
+            or not 1 <= len((body.value or {})[stage].strip()) <= 100
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]*", (body.value or {})[stage].strip())
+            for stage in required
+        ):
+            raise HTTPException(422, "Planner, synthesis, and repair models must be valid model identifiers")
+        body.value = {stage: body.value[stage].strip() for stage in required}
     if not row: row = PlatformSetting(key=key, value=body.value); db.add(row)
     elif row.version != body.version: raise HTTPException(409, "Settings changed. Refresh and try again")
     else: row.value = body.value; row.version += 1

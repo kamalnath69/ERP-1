@@ -4,10 +4,10 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 import {
-  Archive, ArrowClockwise, ArrowRight, Books, Briefcase, Buildings, CalendarCheck,
+  ArrowClockwise, ArrowRight, Books, Briefcase, Buildings, CalendarCheck,
   ChartBar, CheckCircle, Code, Copy, Database, FileArrowUp, Funnel, GraduationCap,
   Key, ListChecks, MagnifyingGlass, Medal, Plus, ShieldCheck, Sparkle, Student,
-  Target, Trash, UsersThree,
+  Target, Trash, UsersThree, WarningCircle,
 } from "@phosphor-icons/react";
 import { toast } from "sonner";
 
@@ -15,8 +15,11 @@ import SecondarySidebarLayout, {
   SecondarySidebarGroup, SecondarySidebarHeader, SecondarySidebarItem,
   SecondarySidebarNav, SecondarySidebarTrigger,
 } from "@/components/layout/SecondarySidebarLayout";
+import { useRegisterAIPageContext } from "@/components/ai/AIConversationProvider";
+import BusinessChart from "@/components/charts/BusinessChart";
 import AcademicStructurePanel from "@/components/college/AcademicStructurePanel";
 import AcademicResourceCombobox from "@/components/college/AcademicResourceCombobox";
+import AssessmentPatternsPanel from "@/components/college/AssessmentPatternsPanel";
 import DataExchangePanel from "@/components/college/DataExchangePanel";
 import { ValidatedActionDialog } from "@/components/forms/ValidatedActionDialog";
 import {
@@ -33,24 +36,23 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { useAuth } from "@/contexts/AuthContext";
 import {
-  useCommitCollegeImportMutation, useCreateCollegeApplicationMutation,
-  useCreateCollegeAttendanceMutation,
+  useCreateCollegeApplicationMutation, useCreateCollegeAttendanceMutation,
   useCreateCollegeCompanyMutation, useCreateCollegeIntegrationCredentialMutation,
   useCreateCollegeIntegrationMutation,
   useCreateCollegeOpportunityMutation, useGetCollegeAcademicEvidencePageQuery,
-  useGetCollegeAcademicHierarchyQuery,
+  useGetCollegeAcademicHierarchyQuery, useGetCollegeAcademicSummaryQuery,
   useGetCollegeApplicationsQuery, useGetCollegeAssessmentRegisterQuery,
   useGetCollegeAssessmentSchemesPageQuery,
   useGetCollegeAssessmentsPageQuery, useGetCollegeAttendanceRegisterQuery,
   useGetCollegeAttendanceSessionsPageQuery,
   useGetCollegeCohortsPageQuery, useGetCollegeOfferingsPageQuery,
-  useGetCollegeCompaniesQuery, useGetCollegeImportsQuery,
+  useGetCollegeCompaniesQuery,
   useGetCollegeIntegrationCredentialsQuery, useGetCollegeIntegrationsQuery,
   useGetCollegeInternshipClearancePageQuery,
   useGetCollegeLeaderboardsQuery, useGetCollegeOpportunitiesQuery,
   useGetCollegePipelineStagesQuery, useGetCollegeReadinessPolicyQuery,
   useGetCollegeStudentIntelligenceQuery,
-  useMoveCollegeApplicationStageMutation, usePreviewCollegeCsvImportMutation,
+  useMoveCollegeApplicationStageMutation,
   useQueueCollegeIntegrationSyncMutation, useRevokeCollegeIntegrationCredentialMutation,
   useRotateCollegeIntegrationCredentialMutation, useSaveCollegeAttendanceMutation,
   useCreateCollegeExamCycleMutation,
@@ -58,6 +60,7 @@ import {
   useUpdateCollegeIntegrationMutation,
 } from "@/features/college/collegeApi";
 import useCursorPagination from "@/hooks/useCursorPagination";
+import { PermissionDeniedPage } from "@/pages/SystemPages";
 import {
   applyApiErrors, attendanceRecordSchema, attendanceSessionSchema,
   collegeApplicationSchema, collegeConnectorSchema,
@@ -66,31 +69,35 @@ import {
 } from "@/lib/validation";
 
 
-const NAVIGATION = [
+const PLACEMENT_NAVIGATION = [
   { label: "Placement", items: [
-    { id: "pipeline", label: "Pipeline", icon: Funnel, permission: "college.placements.view" },
-    { id: "drives", label: "Drives", icon: Briefcase, permission: "college.placements.view" },
-    { id: "applications", label: "Applications", icon: ListChecks, permission: "college.placements.view" },
-    { id: "companies", label: "Companies", icon: Buildings, permission: "college.placements.view" },
+    { id: "pipeline", label: "Pipeline", icon: Funnel, domain: "placements", permission: "college.placements.view" },
+    { id: "drives", label: "Drives", icon: Briefcase, domain: "placements", permission: "college.placements.view" },
+    { id: "applications", label: "Applications", icon: ListChecks, domain: "placements", permission: "college.placements.view" },
+    { id: "companies", label: "Companies", icon: Buildings, domain: "placements", permission: "college.placements.view" },
   ] },
   { label: "Intelligence", items: [
-    { id: "readiness", label: "Readiness & support", icon: Target, permission: "college.readiness.view" },
-    { id: "coding", label: "Coding", icon: Code, permission: "college.coding.view" },
-    { id: "leaderboards", label: "Leaderboards", icon: Medal, permission: "college.readiness.view" },
-  ] },
-  { label: "Academic evidence", items: [
-    { id: "structure", label: "Academic structure", icon: Buildings, permission: "college.academics.view" },
-    { id: "attendance", label: "Attendance", icon: CalendarCheck, permission: "college.attendance.view" },
-    { id: "evidence", label: "Results & evidence", icon: Books, permission: "college.academics.view" },
-    { id: "assessments", label: "Assessments", icon: GraduationCap, permission: "college.assessments.view" },
-  ] },
-  { label: "Data", items: [
-    { id: "integrations", label: "ERP synchronization", icon: Database, permission: "college.integrations.manage" },
-    { id: "imports", label: "Data exchange", icon: FileArrowUp, permission: "college.data.view" },
+    { id: "readiness", label: "Readiness & support", icon: Target, domain: "readiness", permission: "college.readiness.view" },
+    { id: "coding", label: "Coding", icon: Code, domain: "coding", permission: "college.coding.view" },
+    { id: "leaderboards", label: "Leaderboards", icon: Medal, domain: "readiness", permission: "college.readiness.view" },
   ] },
   { label: "Administration", items: [
-    { id: "policy", label: "Readiness policy", icon: ShieldCheck, permission: "college.readiness.view" },
-    { id: "clearance", label: "Internship clearance", icon: CheckCircle, permission: "college.clearance.view" },
+    { id: "policy", label: "Readiness policy", icon: ShieldCheck, domain: "readiness", permission: "college.readiness.view" },
+    { id: "clearance", label: "Internship clearance", icon: CheckCircle, domain: "clearance", permission: "college.clearance.view" },
+  ] },
+];
+
+const ACADEMICS_NAVIGATION = [
+  { label: "Academics", items: [
+    { id: "overview", label: "Overview", icon: ChartBar, domains: ["academics", "attendance", "assessments", "data"], permissions: ["college.academics.view", "college.academics.manage", "college.attendance.view", "college.attendance.mark", "college.assessments.view", "college.assessments.record", "college.assessments.manage", "college.data.view", "college.imports.manage", "college.integrations.manage"] },
+    { id: "structure", label: "Academic structure", icon: Buildings, domain: "academics", permission: "college.academics.view" },
+    { id: "attendance", label: "Attendance", icon: CalendarCheck, domain: "attendance", permissions: ["college.attendance.view", "college.attendance.mark"] },
+    { id: "results", label: "Results & evidence", icon: Books, domain: "assessments", permissions: ["college.assessments.view", "college.assessments.record", "college.assessments.manage"] },
+    { id: "assessments", label: "Assessments", icon: GraduationCap, domain: "assessments", permissions: ["college.assessments.view", "college.assessments.record", "college.assessments.manage"] },
+  ] },
+  { label: "Data operations", items: [
+    { id: "integrations", label: "ERP synchronization", icon: Database, domain: "data", permission: "college.integrations.manage" },
+    { id: "exchange", label: "Data exchange", icon: FileArrowUp, domain: "data", permissions: ["college.data.view", "college.imports.manage"] },
   ] },
 ];
 
@@ -102,54 +109,110 @@ const SECTION_COPY = {
   readiness: ["Readiness & support", "Find students who are ready, developing, or missing critical evidence."],
   coding: ["Coding intelligence", "Track verified problem-solving progress without making it the only success signal."],
   leaderboards: ["Evidence leaderboards", "Compare achievement and improvement with transparent evidence coverage."],
+  overview: ["Academic overview", "Review the current academic period, evidence coverage, and work needing attention."],
   structure: ["Academic structure", "Manage the live departments, programs, graduation batches, terms, courses, and offerings used across College."],
   attendance: ["Attendance evidence", "Review imported history or record a local session when the ERP is unavailable."],
-  evidence: ["Academic evidence", "Use verified results and attendance as placement evidence, not a second student ERP."],
+  results: ["Results & evidence", "Review verified term results, CGPA, backlogs, and publication coverage."],
   assessments: ["Assessment cycles", "Run academic, coding, aptitude, and placement evaluations from your College's configured patterns."],
   integrations: ["ERP synchronization", "Keep authoritative student and academic records connected through audited read-only pulls."],
-  imports: ["Data exchange", "Use college-aware manual, Excel, CSV, ERP pull, and API push schemas with review before commit."],
+  exchange: ["Data exchange", "Use college-aware manual, Excel, CSV, ERP pull, and API push schemas with review before commit."],
   policy: ["Readiness policy", "Understand how evidence is weighted and when a student becomes rankable."],
   clearance: ["Internship clearance", "Review only the clearance signal required for internship eligibility."],
 };
 
-const LEGACY_SECTIONS = {
-  placements: "pipeline", academics: "evidence", coding: "coding",
-  leaderboards: "leaderboards", batches: "structure", academics_structure: "structure", imports: "imports", fees: "clearance",
-};
+const PLACEMENT_ALIASES = { placements: "pipeline", fees: "clearance" };
+const ACADEMIC_ALIASES = { academics: "results", evidence: "results", imports: "exchange", batches: "structure", academics_structure: "structure" };
+const ACADEMIC_LEGACY_SECTIONS = new Set(["academics", "evidence", "imports", "batches", "academics_structure", "structure", "attendance", "results", "assessments", "integrations", "exchange"]);
+const ACADEMIC_SCOPE_KEYS = ["academic_year_id", "term_id", "department_id", "program_id", "cohort_id"];
 
-export default function CollegeWorkspace() {
-  const { can } = useAuth();
+function academicScopeParams(params) {
+  const next = new URLSearchParams();
+  ACADEMIC_SCOPE_KEYS.forEach((key) => {
+    const value = params.get(key);
+    if (value) next.set(key, value);
+  });
+  return next;
+}
+
+function academicScopeValues(params) {
+  return {
+    academicYearId: params.get("academic_year_id") || "",
+    termId: params.get("term_id") || "",
+    departmentId: params.get("department_id") || "",
+    programId: params.get("program_id") || "",
+    cohortId: params.get("cohort_id") || "",
+  };
+}
+
+function permitted(item, can, accessContext) {
+  const domains = item.domains || (item.domain ? [item.domain] : []);
+  if (domains.length && accessContext?.domain_levels && !domains.some((domain) => {
+    const level = accessContext.domain_levels[domain];
+    return Boolean(level && level !== "none");
+  })) return false;
+  const permissions = item.permissions || (item.permission ? [item.permission, item.permission.replace(".view", ".manage")] : []);
+  return !permissions.length || permissions.some((permission) => can(permission));
+}
+
+function academicRedirect(params, requested) {
+  if (!ACADEMIC_LEGACY_SECTIONS.has(requested)) return null;
+  const next = new URLSearchParams(params);
+  let section = ACADEMIC_ALIASES[requested] || requested;
+  if (section === "structure" && next.get("tab") === "assessment-patterns") {
+    section = "assessments";
+    next.delete("tab");
+    next.set("view", "patterns");
+  }
+  if (section === "overview") next.delete("section"); else next.set("section", section);
+  return `/app/academics${next.toString() ? `?${next}` : ""}`;
+}
+
+export default function CollegeWorkspace({ workspace = "placement" }) {
+  const { can, accessContext } = useAuth();
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
-  const requested = params.get("section") || "pipeline";
-  const redirectTo = requested === "overview"
-    ? "/app"
-    : requested === "students"
-      ? `/app/clients${params.get("new") ? "?new=1" : ""}`
-      : null;
+  const academics = workspace === "academics";
+  const defaultSection = academics ? "overview" : "pipeline";
+  const requested = params.get("section") || defaultSection;
+  const redirectTo = !academics && requested === "overview" ? "/app"
+    : !academics && requested === "students" ? `/app/clients${params.get("new") ? "?new=1" : ""}`
+      : !academics ? academicRedirect(params, requested) : null;
 
-  const groups = NAVIGATION.map((group) => ({
+  const navigationConfig = academics ? ACADEMICS_NAVIGATION : PLACEMENT_NAVIGATION;
+  const aliases = academics ? ACADEMIC_ALIASES : PLACEMENT_ALIASES;
+  const allSections = navigationConfig.flatMap((group) => group.items);
+  const normalized = aliases[requested] || requested;
+  const groups = navigationConfig.map((group) => ({
     ...group,
-    items: group.items.filter((item) => !item.permission || can(item.permission) || can(item.permission.replace(".view", ".manage"))),
+    items: group.items.filter((item) => permitted(item, can, accessContext)),
   })).filter((group) => group.items.length);
   const sections = groups.flatMap((group) => group.items);
-  const normalized = LEGACY_SECTIONS[requested] || requested;
-  const active = sections.some((item) => item.id === normalized) ? normalized : sections[0]?.id || "pipeline";
-  const activeSection = sections.find((item) => item.id === active);
+  const recognized = allSections.some((item) => item.id === normalized);
+  const denied = params.has("section") && recognized && !sections.some((item) => item.id === normalized);
+  const active = denied ? normalized : sections.some((item) => item.id === normalized) ? normalized : sections[0]?.id || defaultSection;
+  const activeSection = allSections.find((item) => item.id === active);
+  const selectedScope = academicScopeValues(params);
+  const contextDomain = active === "attendance" ? "attendance"
+    : ["results", "assessments"].includes(active) ? "assessments" : "academics";
+
+  useRegisterAIPageContext(academics ? academicScopeContext({
+    ...selectedScope,
+    domain: contextDomain,
+  }) : null);
 
   useEffect(() => {
-    if (redirectTo) return;
+    if (redirectTo || denied) return;
     if (requested === active) return;
     const next = new URLSearchParams(params);
-    if (active === "pipeline") next.delete("section"); else next.set("section", active);
+    if (active === defaultSection) next.delete("section"); else next.set("section", active);
     setParams(next, { replace: true });
-  }, [active, params, redirectTo, requested, setParams]);
+  }, [active, defaultSection, denied, params, redirectTo, requested, setParams]);
 
   if (redirectTo) return <Navigate to={redirectTo} replace />;
 
   const changeSection = (section) => {
-    const next = new URLSearchParams();
-    if (section !== "pipeline") next.set("section", section);
+    const next = academics ? academicScopeParams(params) : new URLSearchParams();
+    if (section !== defaultSection) next.set("section", section);
     setParams(next);
   };
   const navigation = (close) => <SecondarySidebarNav>
@@ -165,13 +228,13 @@ export default function CollegeWorkspace() {
   </SecondarySidebarNav>;
 
   return <SecondarySidebarLayout
-    ariaLabel="College placement navigation"
+    ariaLabel={academics ? "College academics navigation" : "College placement navigation"}
     className="reveal bg-card"
     sidebarClassName="bg-surface-subtle/35"
     contentClassName="bg-background"
-    mobileTitle="College placement"
-    mobileDescription="Placement, evidence, and student success"
-    sidebar={<><SecondarySidebarHeader title="Placement workspace" description="Evidence to outcomes" />{navigation()}</>}
+    mobileTitle={academics ? "College academics" : "College placement"}
+    mobileDescription={academics ? "Structure, evidence, and data operations" : "Placement, readiness, and student success"}
+    sidebar={<><SecondarySidebarHeader title={academics ? "Academic workspace" : "Placement workspace"} description={academics ? "Structure to evidence" : "Evidence to outcomes"} />{navigation()}</>}
     mobileSidebar={({ closeSidebar }) => navigation(closeSidebar)}
   >
     {({ openSidebar }) => <div className="min-w-0">
@@ -179,18 +242,21 @@ export default function CollegeWorkspace() {
         <SecondarySidebarTrigger icon={activeSection?.icon} label={activeSection?.label || "College"} onClick={openSidebar} />
       </div>
       <main className="mx-auto w-full max-w-[1520px] space-y-5 p-4 sm:p-6 lg:p-8">
-        <CollegeSectionHeader section={active} navigate={navigate} />
-        <CollegeSection section={active} />
+        <CollegeSectionHeader section={active} workspace={workspace} navigate={navigate} />
+        {academics && ["attendance", "results", "assessments"].includes(active) && <AcademicScopeBar compact />}
+        {denied
+          ? <PermissionDeniedPage embedded title={`No access to ${activeSection?.label || "this academic section"}`} description="Your College access policy does not include this work area." />
+          : <CollegeSection section={active} />}
       </main>
     </div>}
   </SecondarySidebarLayout>;
 }
 
-function CollegeSectionHeader({ section, navigate }) {
+function CollegeSectionHeader({ section, workspace, navigate }) {
   const [title, description] = SECTION_COPY[section] || ["College placement", "Student success workspace"];
   const ask = encodeURIComponent(aiPrompt(section));
   return <header className="flex flex-col gap-4 border-b pb-5 sm:flex-row sm:items-end sm:justify-between">
-    <div className="min-w-0"><p className="section-kicker">College / Placement intelligence</p><h1 className="mt-1.5 text-2xl font-semibold tracking-[-0.035em] sm:text-3xl">{title}</h1><p className="mt-1.5 max-w-2xl text-sm text-muted-foreground">{description}</p></div>
+    <div className="min-w-0"><p className="section-kicker">College / {workspace === "academics" ? "Academic operations" : "Placement intelligence"}</p><h1 className="mt-1.5 text-2xl font-semibold tracking-[-0.035em] sm:text-3xl">{title}</h1><p className="mt-1.5 max-w-2xl text-sm text-muted-foreground">{description}</p></div>
     <Button variant="outline" onClick={() => navigate(`/app/ai?ask=${ask}`)}><Sparkle className="mr-2 text-accent" weight="fill" />Ask Edvatiq</Button>
   </header>;
 }
@@ -203,15 +269,153 @@ function CollegeSection({ section }) {
   if (section === "readiness") return <ReadinessPanel />;
   if (section === "coding") return <LeaderboardPanel initialBoard="coding" />;
   if (section === "leaderboards") return <LeaderboardPanel />;
+  if (section === "overview") return <AcademicOverview />;
   if (section === "structure") return <AcademicStructurePanel />;
   if (section === "attendance") return <AttendancePanel />;
-  if (section === "evidence") return <AcademicEvidencePanel />;
+  if (section === "results") return <AcademicEvidencePanel />;
   if (section === "assessments") return <AssessmentsPanel />;
   if (section === "integrations") return <IntegrationsPanel />;
-  if (section === "imports") return <DataExchangePanel />;
+  if (section === "exchange") return <DataExchangePanel />;
   if (section === "policy") return <ReadinessPolicyPanel />;
   if (section === "clearance") return <ClearancePanel />;
   return null;
+}
+
+const ACADEMIC_METRICS = [
+  { key: "students_in_scope", label: "Students in scope", icon: Student, format: (value) => Number(value).toLocaleString("en-IN") },
+  { key: "average_attendance_percent", label: "Average attendance", icon: CalendarCheck, format: percent },
+  { key: "results_coverage_percent", label: "Published result coverage", icon: Books, format: percent },
+  { key: "active_assessments", label: "Active assessments", icon: GraduationCap, format: (value) => Number(value).toLocaleString("en-IN") },
+];
+
+function AcademicOverview() {
+  const [params, setParams] = useSearchParams();
+  const { academicYearId, termId, departmentId, programId, cohortId } = academicScopeValues(params);
+  const query = useGetCollegeAcademicSummaryQuery({
+    academicYearId, termId, departmentId, programId, cohortId,
+  });
+  const data = query.currentData;
+  const loading = !data && (query.isLoading || query.isFetching);
+  const metrics = ACADEMIC_METRICS.filter((item) => data?.metrics?.[item.key] != null);
+
+  const openSection = (section) => {
+    const next = academicScopeParams(params);
+    next.set("section", section);
+    setParams(next);
+  };
+
+  if (query.isError && !data) return <ErrorState title="Academic overview could not be loaded" description={query.error?.data?.detail || "Retry before using these academic totals."} retry={query.refetch} />;
+
+  return <div className="space-y-5">
+    <AcademicScopeBar data={data} />
+
+    {loading ? <AcademicOverviewSkeleton /> : <>
+      {metrics.length > 0 && <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4" aria-label="Academic metrics">
+        {metrics.map((item) => <AcademicMetric key={item.key} definition={item} value={data.metrics[item.key]} />)}
+      </section>}
+
+      <section className="grid items-start gap-5 xl:grid-cols-12">
+        {data?.capabilities?.attendance && <Surface className="overflow-hidden xl:col-span-7">
+          <OverviewHeading eyebrow="Attendance" title="Attendance trend" copy={data.attendance_trend?.length ? "Average authorized attendance evidence for this scope." : "No dated attendance snapshots are available for this scope."} />
+          {data.attendance_trend?.length ? <div className="px-3 pb-4 sm:px-5"><BusinessChart data={data.attendance_trend} xKey="date" series={[{ key: "attendance_percent", label: "Attendance %" }]} type="area" height={280} ariaLabel="Academic attendance trend" /></div> : <EmptyState className="m-4" variant="inline" alignment="left" icon={CalendarCheck} title="No attendance trend yet" description="Synchronize attendance evidence or record a local session." />}
+        </Surface>}
+        {data?.capabilities?.results && <Surface className="overflow-hidden xl:col-span-5">
+          <OverviewHeading eyebrow="Results" title="Publication coverage" copy="Students with published results in the selected period." />
+          <CoveragePanel coverage={data.result_coverage} onOpen={() => openSection("results")} />
+        </Surface>}
+      </section>
+
+      <section className="grid items-start gap-5 xl:grid-cols-12">
+        {(data?.structure || data?.freshness) && <Surface className="overflow-hidden xl:col-span-5">
+          <OverviewHeading eyebrow="Foundation" title="Structure and source health" copy="The academic foundation used by placement evidence and Edvatiq AI." />
+          <AcademicHealth data={data} onOpen={openSection} />
+        </Surface>}
+        <Surface className={`${data?.structure || data?.freshness ? "xl:col-span-7" : "xl:col-span-12"} overflow-hidden`}>
+          <OverviewHeading eyebrow="Priorities" title="Needs attention" copy="Only actionable gaps from your authorized academic scope." />
+          <AcademicAttention rows={data?.attention || []} onOpen={openSection} />
+        </Surface>
+      </section>
+    </>}
+  </div>;
+}
+
+function AcademicScopeBar({ data, compact = false }) {
+  const { can } = useAuth();
+  const [params, setParams] = useSearchParams();
+  const { academicYearId, termId, departmentId, programId, cohortId } = academicScopeValues(params);
+  const canBrowseStructure = can("college.academics.view") || can("college.academics.manage");
+  const hierarchy = useGetCollegeAcademicHierarchyQuery(undefined, { skip: !canBrowseStructure });
+  const academicYears = hierarchy.data?.academic_years || [];
+  const updateScope = (key, value, clear = []) => {
+    const next = new URLSearchParams(params);
+    if (value) next.set(key, value); else next.delete(key);
+    clear.forEach((item) => next.delete(item));
+    next.delete("cursor");
+    setParams(next, { replace: true });
+  };
+  const clearScope = () => {
+    const next = new URLSearchParams(params);
+    ACADEMIC_SCOPE_KEYS.forEach((key) => next.delete(key));
+    next.delete("cursor");
+    setParams(next, { replace: true });
+  };
+  if (!canBrowseStructure) return null;
+  return <Surface className="overflow-hidden">
+    {!compact && <div className="flex flex-col gap-4 p-4 sm:p-5 lg:flex-row lg:items-center lg:justify-between">
+      <div className="min-w-0">
+        <div className="overline">Current academic scope</div>
+        <h2 className="mt-1 text-xl font-semibold">{data?.scope?.term?.name || "Institution overview"}</h2>
+        <p className="mt-1 text-sm text-muted-foreground">{[data?.scope?.term?.academic_year || academicYearId, data?.scope?.term?.status ? sentence(data.scope.term.status) : null].filter(Boolean).join(" / ") || "Showing all authorized academic evidence"}</p>
+      </div>
+      {(academicYearId || termId || departmentId || programId || cohortId) && <Button variant="ghost" size="sm" onClick={clearScope}>Clear scope</Button>}
+    </div>}
+    <div className={`grid gap-3 bg-surface-subtle/25 p-4 sm:grid-cols-2 xl:grid-cols-5 sm:p-5 ${compact ? "" : "border-t"}`}>
+      <Select value={academicYearId || "all"} onValueChange={(value) => updateScope("academic_year_id", value === "all" ? "" : value, ["term_id"])}>
+        <SelectTrigger aria-label="Academic year"><SelectValue placeholder="Academic year" /></SelectTrigger>
+        <SelectContent><SelectItem value="all">All academic years</SelectItem>{academicYears.map((year) => <SelectItem key={year} value={year}>{year}</SelectItem>)}</SelectContent>
+      </Select>
+      <AcademicResourceCombobox resource="terms" value={termId} onValueChange={(value) => updateScope("term_id", value)} filters={{ active: true, academic_year: academicYearId || undefined }} placeholder="Academic term" />
+      <AcademicResourceCombobox resource="departments" value={departmentId} onValueChange={(value) => updateScope("department_id", value, ["program_id", "cohort_id"])} filters={{ active: true }} placeholder="Department" />
+      <AcademicResourceCombobox resource="programs" value={programId} onValueChange={(value) => updateScope("program_id", value, ["cohort_id"])} filters={{ active: true, department_id: departmentId || undefined }} placeholder="Program" />
+      <AcademicResourceCombobox resource="cohorts" value={cohortId} onValueChange={(value) => updateScope("cohort_id", value)} filters={{ active: true, department_id: departmentId || undefined, program_id: programId || undefined }} placeholder="Batch or section" />
+    </div>
+    {compact && (academicYearId || termId || departmentId || programId || cohortId) && <div className="flex justify-end border-t px-4 py-2"><Button variant="ghost" size="sm" onClick={clearScope}>Clear academic scope</Button></div>}
+  </Surface>;
+}
+
+function AcademicMetric({ definition, value }) {
+  const Icon = definition.icon;
+  return <Surface className="p-4 sm:p-5"><div className="flex items-start justify-between gap-3"><div><p className="text-xs font-medium text-muted-foreground">{definition.label}</p><p className="mt-3 text-3xl font-semibold tracking-[-0.04em]">{definition.format(value)}</p></div><span className="grid h-9 w-9 place-items-center rounded-xl bg-accent/10 text-accent"><Icon /></span></div></Surface>;
+}
+
+function OverviewHeading({ eyebrow, title, copy }) {
+  return <div className="border-b p-4 sm:p-5"><div className="overline">{eyebrow}</div><h3 className="mt-1 font-semibold">{title}</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">{copy}</p></div>;
+}
+
+function CoveragePanel({ coverage, onOpen }) {
+  const value = coverage?.percent;
+  if (value == null) return <EmptyState className="m-4" variant="inline" alignment="left" icon={Books} title="No result coverage yet" description="Published term results will appear here." />;
+  return <div className="p-5"><div className="flex items-end justify-between gap-4"><div><div className="text-4xl font-semibold tracking-[-0.04em]">{percent(value)}</div><p className="mt-1 text-xs text-muted-foreground">{coverage.students_with_results} of {coverage.students_in_scope} students</p></div><Button variant="ghost" size="sm" onClick={onOpen}>Review results<ArrowRight className="ml-1.5" /></Button></div><div className="mt-5 h-2 overflow-hidden rounded-full bg-secondary"><div className="h-full rounded-full bg-primary transition-[width]" style={{ width: `${Math.max(0, Math.min(100, Number(value)))}%` }} /></div></div>;
+}
+
+function AcademicHealth({ data, onOpen }) {
+  const structure = data.structure;
+  const freshness = data.freshness || {};
+  const rows = [
+    structure && { label: "Academic structure", value: structure.ready ? "Ready" : "Setup needed", detail: `${structure.departments} departments / ${structure.programs} programs / ${structure.cohorts} batches`, section: "structure", tone: structure.ready ? "active" : "warning" },
+    data.capabilities?.integrations && { label: "ERP synchronization", value: freshness.stale_connectors ? `${freshness.stale_connectors} need attention` : freshness.connector_count ? "Current" : "Not connected", detail: freshness.last_erp_sync_at ? `Last sync ${relativeTime(freshness.last_erp_sync_at)}` : "No successful synchronization", section: "integrations", tone: freshness.stale_connectors ? "warning" : freshness.connector_count ? "active" : "pending" },
+    data.capabilities?.exchange && { label: "Data Exchange", value: freshness.last_exchange_at ? "Active" : "No runs yet", detail: freshness.last_exchange_at ? `Last activity ${relativeTime(freshness.last_exchange_at)}` : "Templates and reviewed runs appear here", section: "exchange", tone: freshness.last_exchange_at ? "active" : "neutral" },
+  ].filter(Boolean);
+  return <div className="divide-y">{rows.map((row) => <button key={row.label} type="button" onClick={() => onOpen(row.section)} className="flex w-full items-center gap-3 p-4 text-left transition-colors hover:bg-surface-hover sm:px-5"><span className="min-w-0 flex-1"><span className="block text-sm font-medium">{row.label}</span><span className="mt-1 block text-xs text-muted-foreground">{row.detail}</span></span><StatusBadge status={row.tone} label={row.value} /><ArrowRight className="shrink-0 text-muted-foreground" /></button>)}{!rows.length && <EmptyState variant="inline" alignment="left" title="No foundation details available" description="Your access policy does not include structure or data operations." />}</div>;
+}
+
+function AcademicAttention({ rows, onOpen }) {
+  if (!rows.length) return <EmptyState variant="inline" alignment="left" icon={CheckCircle} title="Academic evidence is in good shape" description="No immediate structure, coverage, or source-freshness issue needs action." />;
+  return <div className="divide-y">{rows.map((row) => <button key={row.id} type="button" onClick={() => onOpen(row.section)} className="group flex w-full items-start gap-3 p-4 text-left transition-colors hover:bg-surface-hover sm:px-5"><span className="mt-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-accent/10 text-accent"><WarningCircle /></span><span className="min-w-0 flex-1"><span className="block text-sm font-semibold">{row.title}</span><span className="mt-1 block text-xs leading-5 text-muted-foreground">{row.detail}</span></span><ArrowRight className="mt-2 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5" /></button>)}</div>;
+}
+
+function AcademicOverviewSkeleton() {
+  return <div className="space-y-5" aria-label="Loading academic overview"><div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">{[0, 1, 2, 3].map((item) => <Surface key={item} className="h-28 animate-pulse bg-surface-subtle" />)}</div><div className="grid gap-5 xl:grid-cols-12"><Surface className="h-80 animate-pulse bg-surface-subtle xl:col-span-7" /><Surface className="h-80 animate-pulse bg-surface-subtle xl:col-span-5" /></div></div>;
 }
 
 function usePagedData(query, paging) {
@@ -273,10 +477,16 @@ function ApplicationsPanel({ pipeline = false }) {
 
 function DrivesPanel() {
   const { can } = useAuth();
+  const [params, setParams] = useSearchParams();
   const [search, setSearch] = useState("");
   const q = useDeferredValue(search.trim());
   const [status, setStatus] = useState("all");
-  const [drawer, setDrawer] = useState(false);
+  const drawer = params.get("new") === "1";
+  const setDrawer = (open) => {
+    const next = new URLSearchParams(params);
+    if (open) next.set("new", "1"); else next.delete("new");
+    setParams(next, { replace: true });
+  };
   const paging = useCursorPagination(JSON.stringify({ q, status }));
   const query = useGetCollegeOpportunitiesQuery({ q, status: status === "all" ? undefined : status, cursor: paging.cursor, limit: 25 });
   const rows = usePagedData(query, paging);
@@ -292,9 +502,15 @@ function DrivesPanel() {
 
 function CompaniesPanel() {
   const { can } = useAuth();
+  const [params, setParams] = useSearchParams();
   const [search, setSearch] = useState("");
   const q = useDeferredValue(search.trim());
-  const [drawer, setDrawer] = useState(false);
+  const drawer = params.get("new") === "1";
+  const setDrawer = (open) => {
+    const next = new URLSearchParams(params);
+    if (open) next.set("new", "1"); else next.delete("new");
+    setParams(next, { replace: true });
+  };
   const paging = useCursorPagination(q);
   const query = useGetCollegeCompaniesQuery({ q, cursor: paging.cursor, limit: 25 });
   const rows = usePagedData(query, paging);
@@ -338,10 +554,12 @@ function LeaderboardPanel({ initialBoard = "readiness" }) {
 
 function AttendancePanel() {
   const { can } = useAuth();
+  const [params] = useSearchParams();
+  const scope = academicScopeValues(params);
   const [drawer, setDrawer] = useState(false);
   const [register, setRegister] = useState(null);
-  const paging = useCursorPagination("attendance-sessions");
-  const query = useGetCollegeAttendanceSessionsPageQuery({ cursor: paging.cursor, limit: 25 });
+  const paging = useCursorPagination(JSON.stringify({ resource: "attendance-sessions", ...scope }));
+  const query = useGetCollegeAttendanceSessionsPageQuery({ ...scope, cursor: paging.cursor, limit: 25 });
   const rows = usePagedData(query, paging);
   const columns = [
     { key: "course", label: "Course", render: (row) => <div><div className="font-semibold">{row.course_name}</div><div className="mt-1 text-xs text-muted-foreground">{row.course_code} / {row.cohort_name}</div></div> },
@@ -351,39 +569,40 @@ function AttendancePanel() {
     { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> },
     { key: "open", label: "", render: () => <ArrowRight /> },
   ];
-  return <Surface className="overflow-hidden"><PanelToolbar title="Attendance sessions" action={can("college.attendance.mark") && <Button size="sm" onClick={() => setDrawer(true)}><Plus className="mr-2" />New local session</Button>} /><DataTable className="rounded-none border-0 shadow-none" rows={rows} columns={columns} loading={query.isLoading && !rows.length} onRowClick={setRegister} empty={<EmptyState variant="section" alignment="left" icon={CalendarCheck} title="No attendance evidence yet" description="ERP attendance snapshots are preferred; use a local session only when needed." />} /><ListFooter query={query} paging={paging} noun="sessions" /><AttendanceSessionDrawer open={drawer} onClose={() => setDrawer(false)} /><AttendanceRegisterDrawer session={register} onClose={() => setRegister(null)} /></Surface>;
+  return <Surface className="overflow-hidden"><PanelToolbar title="Attendance sessions" action={can("college.attendance.mark") && <Button size="sm" onClick={() => setDrawer(true)}><Plus className="mr-2" />New local session</Button>} />{query.isError && !rows.length ? <div className="border-t p-4"><ErrorState title="Attendance sessions could not be loaded" description={query.error?.data?.detail || "Retry this academic scope without losing your filters."} retry={query.refetch} /></div> : <><DataTable className="rounded-none border-0 shadow-none" rows={rows} columns={columns} loading={query.isLoading && !rows.length} onRowClick={setRegister} empty={<EmptyState variant="section" alignment="left" icon={CalendarCheck} title="No attendance evidence in this scope" description="ERP attendance snapshots are preferred; use a local session only when needed." />} /><ListFooter query={query} paging={paging} noun="sessions" /></>}<AttendanceSessionDrawer open={drawer} onClose={() => setDrawer(false)} /><AttendanceRegisterDrawer session={register} onClose={() => setRegister(null)} /></Surface>;
 }
 
 function AcademicEvidencePanel() {
-  const [kind, setKind] = useState("term_results");
+  const [params] = useSearchParams();
+  const scope = academicScopeValues(params);
   const [search, setSearch] = useState("");
   const q = useDeferredValue(search.trim());
-  const paging = useCursorPagination(JSON.stringify({ kind, q }));
-  const query = useGetCollegeAcademicEvidencePageQuery({ kind, q, cursor: paging.cursor, limit: 25 });
+  const paging = useCursorPagination(JSON.stringify({ kind: "term_results", q, ...scope }));
+  const query = useGetCollegeAcademicEvidencePageQuery({ kind: "term_results", q, ...scope, cursor: paging.cursor, limit: 25 });
   const rows = usePagedData(query, paging);
-  const columns = kind === "term_results" ? [
+  const columns = [
     { key: "student", label: "Student", render: studentEvidenceCell },
     { key: "semester", label: "Semester", render: (row) => row.semester },
     { key: "sgpa", label: "SGPA", render: (row) => row.sgpa ?? "-" },
     { key: "cgpa", label: "CGPA", render: (row) => row.cgpa ?? "-" },
     { key: "backlogs", label: "Active backlogs", render: (row) => row.active_backlogs ?? "Not recorded" },
     { key: "source", label: "Source", render: (row) => <StatusBadge status="neutral" label={sentence(row.source_type || "local")} /> },
-  ] : [
-    { key: "student", label: "Student", render: studentEvidenceCell },
-    { key: "attendance", label: "Attendance", render: (row) => row.attendance_percent == null ? "-" : `${row.attendance_percent}%` },
-    { key: "classes", label: "Classes", render: (row) => `${row.classes_attended}/${row.classes_held}` },
-    { key: "as_of", label: "As of", render: (row) => shortDate(row.as_of) },
-    { key: "source", label: "Source", render: (row) => <StatusBadge status="neutral" label={sentence(row.source_type || "local")} /> },
   ];
-  return <Surface className="overflow-hidden"><PanelToolbar title="Verified academic evidence" /><div className="flex flex-col gap-3 border-t p-3 sm:flex-row sm:items-center"><SegmentControl value={kind} onChange={setKind} items={[{ value: "term_results", label: "Term results" }, { value: "attendance", label: "Attendance snapshots" }]} /><SearchField value={search} onChange={setSearch} placeholder="Search student" /></div><DataTable className="rounded-none border-0 shadow-none" rows={rows} columns={columns} loading={query.isLoading && !rows.length} empty={<EmptyState variant="section" alignment="left" icon={Books} title="No academic evidence in this view" description="Synchronize the College ERP or import a reviewed file." />} /><ListFooter query={query} paging={paging} noun="evidence records" /></Surface>;
+  return <Surface className="overflow-hidden"><PanelToolbar title="Published term results" /><FilterBar className="rounded-none border-x-0 border-t"><SearchField value={search} onChange={setSearch} placeholder="Search student or admission number" /></FilterBar>{query.isError && !rows.length ? <div className="border-t p-4"><ErrorState title="Published results could not be loaded" description={query.error?.data?.detail || "Retry this academic scope without losing your filters."} retry={query.refetch} /></div> : <><DataTable className="rounded-none border-0 shadow-none" rows={rows} columns={columns} loading={query.isLoading && !rows.length} empty={<EmptyState variant={q ? "filtered" : "section"} alignment="left" icon={Books} title={q ? "No students match this search" : "No published results in this scope"} description={q ? "Clear the student search to return to all authorized results." : "Synchronize results from the College ERP or import a reviewed term-result file."} primaryAction={q ? <Button variant="outline" size="sm" onClick={() => setSearch("")}>Clear search</Button> : undefined} />} /><ListFooter query={query} paging={paging} noun="result records" /></>}</Surface>;
 }
 
 function AssessmentsPanel() {
   const { can } = useAuth();
+  const [params, setParams] = useSearchParams();
+  const view = params.get("view") === "patterns" ? "patterns" : "cycles";
   const [cycleDrawer, setCycleDrawer] = useState(false);
   const [register, setRegister] = useState(null);
-  const paging = useCursorPagination("assessments");
-  const query = useGetCollegeAssessmentsPageQuery({ cursor: paging.cursor, limit: 25 });
+  const scope = academicScopeValues(params);
+  const paging = useCursorPagination(JSON.stringify({ resource: "assessments", ...scope }));
+  const query = useGetCollegeAssessmentsPageQuery(
+    { ...scope, cursor: paging.cursor, limit: 25 },
+    { skip: view === "patterns" },
+  );
   const rows = usePagedData(query, paging);
   const columns = [
     { key: "title", label: "Assessment", render: (row) => <div><div className="font-semibold">{row.title}</div><div className="mt-1 text-xs text-muted-foreground">{row.cycle_code || sentence(row.assessment_type)} / {row.course_name || sentence(row.scheme_snapshot?.domain || "cohort assessment")}</div></div> },
@@ -393,47 +612,18 @@ function AssessmentsPanel() {
     { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> },
     { key: "open", label: "", render: () => <ArrowRight /> },
   ];
-  return <Surface className="overflow-hidden"><PanelToolbar title="Institution-configured assessments" action={can("college.assessments.manage") && <Button size="sm" onClick={() => setCycleDrawer(true)}><Plus className="mr-2" />New exam cycle</Button>} /><DataTable className="rounded-none border-0 shadow-none" rows={rows} columns={columns} loading={query.isLoading && !rows.length} onRowClick={setRegister} empty={<EmptyState variant="section" alignment="left" icon={GraduationCap} title="No assessment cycles yet" description="Configure an assessment pattern, then create a cycle for the required courses or cohorts." primaryAction={can("college.academics.manage") ? <Button asChild variant="outline"><Link to="/app/college?section=structure&tab=assessment-patterns">Configure patterns</Link></Button> : undefined} />} /><ListFooter query={query} paging={paging} noun="assessments" /><ExamCycleDrawer open={cycleDrawer} onClose={() => setCycleDrawer(false)} /><DynamicAssessmentRegisterDrawer assessment={register} onClose={() => setRegister(null)} /></Surface>;
-}
-
-function ImportsPanel() {
-  const navigate = useNavigate();
-  const [resource, setResource] = useState("students");
-  const [file, setFile] = useState(null);
-  const [preview, setPreview] = useState(null);
-  const hierarchy = useGetCollegeAcademicHierarchyQuery();
-  const paging = useCursorPagination("imports");
-  const query = useGetCollegeImportsQuery({ cursor: paging.cursor, limit: 25 });
-  const rows = usePagedData(query, paging);
-  const [previewCsv, previewState] = usePreviewCollegeCsvImportMutation();
-  const [commit, commitState] = useCommitCollegeImportMutation();
-  const studentStructureReady = Number(hierarchy.data?.summary?.section_count || 0) > 0;
-  const structureUnavailable = resource === "students" && hierarchy.isError && !hierarchy.data;
-  const structureChecking = resource === "students" && hierarchy.isLoading && !hierarchy.data;
-  const structureRequired = resource === "students" && Boolean(hierarchy.data) && !studentStructureReady;
-  const studentImportBlocked = structureChecking || structureUnavailable || structureRequired;
-  const validate = async () => {
-    if (!file) return;
-    try { setPreview(await previewCsv({ file, resourceType: resource }).unwrap()); }
-    catch (error) { toast.error(error?.data?.detail || "Import could not be validated"); }
+  const chooseView = (value) => {
+    const next = new URLSearchParams(params);
+    if (value === "cycles") next.delete("view"); else next.set("view", value);
+    setParams(next, { replace: true });
   };
-  const commitRun = async () => {
-    try { await commit(preview.id).unwrap(); toast.success("Validated evidence imported"); setPreview(null); setFile(null); }
-    catch (error) { toast.error(error?.data?.detail || "Import could not be committed"); }
-  };
-  const columns = [
-    { key: "resource", label: "Resource", render: (row) => sentence(row.resource_type) },
-    { key: "source", label: "Source", render: (row) => sentence(row.source_type) },
-    { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> },
-    { key: "rows", label: "Committed", render: (row) => `${row.committed_count}/${row.row_count}` },
-    { key: "started", label: "Started", render: (row) => dateTime(row.created_at) },
-  ];
-  const changeResource = (value) => {
-    setResource(value);
-    setFile(null);
-    setPreview(null);
-  };
-  return <div className="space-y-5"><OwnershipNotice /><Surface className="p-4 sm:p-5"><h2 className="font-semibold">Validate academic structure or evidence</h2><p className="mt-1 text-xs text-muted-foreground">Import structure in dependency order: departments, programs, then cohorts. Nothing is committed until validation completes and a staff member confirms the preview.</p>{structureUnavailable && <div className="mt-4 flex flex-col gap-3 rounded-xl border bg-secondary/30 p-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="font-semibold">Academic structure could not be verified</div><p className="mt-1 text-xs text-muted-foreground">Retry the structure check before importing student records.</p></div><Button variant="outline" onClick={hierarchy.refetch}>Retry</Button></div>}{structureRequired && <div className="mt-4 flex flex-col gap-3 rounded-xl border border-warning/30 bg-warning-soft p-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="font-semibold">Academic structure is required for student imports</div><p className="mt-1 text-xs text-muted-foreground">Create at least one department, program, and graduation batch before mapping students.</p></div><Button variant="outline" onClick={() => navigate("/app/college?section=structure")}>Open Academic structure</Button></div>}<div className="mt-4 grid gap-3 sm:grid-cols-[190px_minmax(0,1fr)_auto]"><Select value={resource} onValueChange={changeResource}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{PUSH_RESOURCES.map((value) => <SelectItem key={value} value={value}>{sentence(value)}</SelectItem>)}</SelectContent></Select><Input key={resource} type="file" accept=".csv,text/csv" disabled={studentImportBlocked} onChange={(event) => setFile(event.target.files?.[0] || null)} /><Button onClick={validate} disabled={!file || studentImportBlocked || previewState.isLoading}>{previewState.isLoading ? "Validating..." : "Preview"}</Button></div>{preview && <div className="mt-4 flex flex-col gap-3 rounded-xl border bg-secondary/30 p-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="font-semibold">{preview.valid_count} of {preview.row_count} rows are ready</div><div className="mt-1 text-xs text-muted-foreground">{preview.failed_count ? `${preview.failed_count} rows need correction or reviewed linking.` : "No validation errors found."}</div></div><Button onClick={commitRun} disabled={!preview.valid_count || commitState.isLoading}>{commitState.isLoading ? "Importing..." : "Commit valid rows"}</Button></div>}</Surface><Surface className="overflow-hidden"><PanelToolbar title="Import history" /><DataTable className="rounded-none border-0 shadow-none" rows={rows} columns={columns} loading={query.isLoading && !rows.length} empty={<EmptyState variant="inline" alignment="left" icon={Archive} title="No import runs yet" description="Validated CSV and ERP runs will appear here." />} /><ListFooter query={query} paging={paging} noun="import runs" /></Surface></div>;
+  return <div className="space-y-5">
+    <Surface className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
+      <SegmentControl value={view} onChange={chooseView} items={[{ value: "cycles", label: "Exam cycles & registers" }, { value: "patterns", label: "Assessment patterns" }]} />
+      <p className="px-1 text-xs text-muted-foreground">Patterns define institution-specific fields; cycles create the working registers.</p>
+    </Surface>
+    {view === "patterns" ? <AssessmentPatternsPanel /> : <Surface className="overflow-hidden"><PanelToolbar title="Institution-configured assessments" action={can("college.assessments.manage") && <Button size="sm" onClick={() => setCycleDrawer(true)}><Plus className="mr-2" />New exam cycle</Button>} />{query.isError && !rows.length ? <div className="border-t p-4"><ErrorState title="Assessment cycles could not be loaded" description={query.error?.data?.detail || "Retry this academic scope without losing your filters."} retry={query.refetch} /></div> : <><DataTable className="rounded-none border-0 shadow-none" rows={rows} columns={columns} loading={query.isLoading && !rows.length} onRowClick={setRegister} empty={<EmptyState variant="section" alignment="left" icon={GraduationCap} title="No assessment cycles in this scope" description="Configure an assessment pattern, then create a cycle for the required courses or cohorts." primaryAction={(can("college.assessments.manage") || can("college.academics.manage")) ? <Button variant="outline" onClick={() => chooseView("patterns")}>Configure patterns</Button> : undefined} />} /><ListFooter query={query} paging={paging} noun="assessments" /></>}<ExamCycleDrawer open={cycleDrawer} onClose={() => setCycleDrawer(false)} /><DynamicAssessmentRegisterDrawer assessment={register} onClose={() => setRegister(null)} /></Surface>}
+  </div>;
 }
 
 function IntegrationsPanel() {
@@ -615,7 +805,7 @@ function ExamCycleDrawer({ open, onClose }) {
   return <DrawerForm open={open} onOpenChange={(value) => { if (!value && !pending) onClose(); }} title="Create exam or assessment cycle" description="The selected pattern revision defines every register field, template column, validation rule, and calculation.">
     <Form {...form}><form noValidate className="space-y-5" onSubmit={submit}>
       <FormField control={control} name="scheme_id" render={({ field }) => <FormItem><FormLabel>Assessment pattern</FormLabel><Select value={field.value || ""} onValueChange={field.onChange}><FormControl><SelectTrigger><SelectValue placeholder="Choose an active pattern" /></SelectTrigger></FormControl><SelectContent>{activeSchemes.map((row) => <SelectItem key={row.id} value={row.id}>{row.name} / revision {row.version_number} / {sentence(row.domain)}</SelectItem>)}</SelectContent></Select><FormDescription>Used versions become immutable so historical marks never change calculation rules.</FormDescription><FormMessage /></FormItem>} />
-      {!schemes.isLoading && !activeSchemes.length && <div className="rounded-xl border border-warning/30 bg-warning-soft p-4"><div className="font-semibold">No active assessment pattern</div><p className="mt-1 text-xs leading-5 text-muted-foreground">Create and activate a pattern in Academic Structure before opening a cycle.</p><Button asChild className="mt-3" size="sm" variant="outline"><Link to="/app/college?section=structure&tab=assessment-patterns">Open assessment patterns</Link></Button></div>}
+      {!schemes.isLoading && !activeSchemes.length && <div className="rounded-xl border border-warning/30 bg-warning-soft p-4"><div className="font-semibold">No active assessment pattern</div><p className="mt-1 text-xs leading-5 text-muted-foreground">Create and activate a pattern before opening a cycle.</p><Button asChild className="mt-3" size="sm" variant="outline"><Link to="/app/academics?section=assessments&view=patterns">Open assessment patterns</Link></Button></div>}
       {selectedScheme && <Surface className="border bg-surface-subtle/30 p-4 shadow-none"><div className="flex flex-wrap items-center gap-2"><StatusBadge status={selectedScheme.status} /><span className="text-sm font-medium">{selectedScheme.code}</span><span className="text-xs text-muted-foreground">revision {selectedScheme.version_number} / {sentence(selectedScheme.calculation_method)}</span></div><p className="mt-2 text-xs leading-5 text-muted-foreground">{selectedScheme.components.map((item) => item.name).join(", ")}</p></Surface>}
       {academic && <FormField control={control} name="scheme_component_id" render={({ field }) => <FormItem><FormLabel>Configured component</FormLabel><Select value={field.value || ""} onValueChange={field.onChange}><FormControl><SelectTrigger><SelectValue placeholder="Choose the exam component" /></SelectTrigger></FormControl><SelectContent>{(selectedScheme?.components || []).map((row) => <SelectItem key={row.id} value={row.id}>{row.name}{row.max_marks != null ? ` / ${row.max_marks} max` : ""}</SelectItem>)}</SelectContent></Select><FormMessage /></FormItem>} />}
       {academic && <CollegeAcademicReferenceField control={control} name="term_id" label="Academic term (optional)" resource="terms" enabled={open && Boolean(selectedScheme)} filters={{ active: true }} />}
@@ -1000,8 +1190,31 @@ function field(setter, key) { return (event) => setter((current) => ({ ...curren
 function nulls(value) { return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, item === "" ? null : item])); }
 function datePayload(value) { return value ? new Date(value).toISOString() : null; }
 function sentence(value) { return String(value || "").replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase()); }
+function percent(value) { return `${Number(value || 0).toLocaleString("en-IN", { maximumFractionDigits: 1 })}%`; }
 function shortDate(value) { return value ? new Intl.DateTimeFormat("en-IN", { day: "numeric", month: "short", year: "numeric" }).format(new Date(value)) : "Not scheduled"; }
 function dateTime(value) { return value ? new Intl.DateTimeFormat("en-IN", { day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(value)) : "Not scheduled"; }
+function relativeTime(value) {
+  const timestamp = new Date(value).getTime();
+  if (!Number.isFinite(timestamp)) return "not available";
+  const minutes = Math.max(0, Math.round((Date.now() - timestamp) / 60000));
+  if (minutes < 60) return minutes <= 1 ? "just now" : `${minutes} minutes ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.round(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
+}
+function academicScopeContext({ departmentId, programId, cohortId, domain = "academics" }) {
+  if (!departmentId && !programId && !cohortId) return null;
+  return {
+    kind: "college_scope",
+    id: cohortId ? `cohort:${cohortId}` : programId ? `program:${programId}` : `department:${departmentId}`,
+    label: "Selected academic scope",
+    domain,
+    department_id: departmentId || undefined,
+    program_id: programId || undefined,
+    cohort_id: cohortId || undefined,
+  };
+}
 function isoToday() { return new Date().toISOString().slice(0, 10); }
 function credentialExpiryValue(value) {
   let date = value ? new Date(value) : new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
@@ -1050,10 +1263,11 @@ function aiPrompt(section) {
     leaderboards: "Explain the current evidence leaderboards and any coverage limitations.",
     structure: "Explain our academic structure and identify any missing setup needed for student and placement workflows.",
     attendance: "Show students whose attendance may affect placement eligibility.",
-    evidence: "Find missing or stale academic evidence that affects placement readiness.",
+    overview: "Summarize this academic scope, its evidence coverage, and the most important next actions.",
+    results: "Find missing or stale published results that affect academic and placement decisions.",
     assessments: "Summarize assessment performance and students who need intervention.",
     integrations: "What College evidence is stale or missing from ERP synchronization?",
-    imports: "Review recent import health and unresolved validation issues.",
+    exchange: "Review recent Data Exchange health and unresolved validation issues.",
     policy: "Explain the readiness policy in plain language and show how missing evidence is handled.",
     clearance: "Show internship candidates whose clearance needs review.",
   };

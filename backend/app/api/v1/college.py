@@ -20,7 +20,7 @@ from app.models import (
     CollegeAttendanceSession, CollegeCareerProfile, CollegeCohort, CollegeCourse, CollegeCourseOffering,
     CollegeAttendanceSnapshot, CollegeClearanceSnapshot, CollegeDataConnector, CollegeDepartment,
     CollegeExamCycle, CollegeExternalRecord, CollegeFeePlan, CollegePlacementApplication, CollegeProgram,
-    CollegeStudentFee, CollegeStudentProfile, CollegeTerm, CollegeTermResult,
+    CollegeStudentFee, CollegeStudentProfile, CollegeTerm, CollegeTermResult, DataExchangeRun,
     Employee, Location, SaleInvoice, SaleLine, User,
 )
 from app.services.audit import log_action
@@ -850,6 +850,468 @@ def academic_hierarchy(
     )
 
 
+ACADEMIC_SUMMARY_PERMISSIONS = (
+    "college.academics.view", "college.academics.manage",
+    "college.attendance.view", "college.attendance.mark",
+    "college.assessments.view", "college.assessments.record", "college.assessments.manage",
+    "college.data.view", "college.imports.manage", "college.integrations.manage",
+)
+
+
+def _summary_access(db: Session, user: User, permissions: set[str], domain: str, codes: set[str]) -> CollegeAccess | None:
+    if not permissions.intersection(codes):
+        return None
+    try:
+        return resolve_college_access(db, user, domain)
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_403_FORBIDDEN:
+            return None
+        raise
+
+
+def _summary_student_ids(
+    db: Session,
+    user: User,
+    access: CollegeAccess,
+    *,
+    department_id: str | None,
+    program_id: str | None,
+    cohort_id: str | None,
+) -> set[str]:
+    statement = (
+        select(CollegeStudentProfile.id)
+        .join(CollegeProgram, CollegeProgram.id == CollegeStudentProfile.program_id)
+        .where(
+            CollegeStudentProfile.organization_id == user.organization_id,
+            CollegeStudentProfile.status == "active",
+        )
+    )
+    if not access.unrestricted:
+        statement = statement.where(CollegeStudentProfile.id.in_(access.student_ids))
+    if department_id:
+        statement = statement.where(CollegeProgram.department_id == department_id)
+    if program_id:
+        statement = statement.where(CollegeStudentProfile.program_id == program_id)
+    if cohort_id:
+        statement = statement.where(CollegeStudentProfile.cohort_id == cohort_id)
+    return set(db.execute(statement).scalars())
+
+
+def _summary_cohort_ids(
+    db: Session,
+    user: User,
+    access: CollegeAccess,
+    *,
+    department_id: str | None,
+    program_id: str | None,
+    cohort_id: str | None,
+) -> set[str]:
+    statement = (
+        select(CollegeCohort.id)
+        .join(CollegeProgram, CollegeProgram.id == CollegeCohort.program_id)
+        .where(CollegeCohort.organization_id == user.organization_id, CollegeCohort.is_active.is_(True))
+    )
+    if not access.unrestricted:
+        statement = statement.where(CollegeCohort.id.in_(access.cohort_ids))
+    if department_id:
+        statement = statement.where(CollegeProgram.department_id == department_id)
+    if program_id:
+        statement = statement.where(CollegeCohort.program_id == program_id)
+    if cohort_id:
+        statement = statement.where(CollegeCohort.id == cohort_id)
+    return set(db.execute(statement).scalars())
+
+
+def _coverage(covered: int, total: int) -> float | None:
+    return round((covered / total) * 100, 1) if total else None
+
+
+def _validate_summary_hierarchy(
+    db: Session,
+    user: User,
+    *,
+    department_id: str | None,
+    program_id: str | None,
+    cohort_id: str | None,
+) -> None:
+    department = None
+    program = None
+    cohort = None
+    if department_id:
+        department = db.execute(select(CollegeDepartment).where(
+            CollegeDepartment.id == department_id,
+            CollegeDepartment.organization_id == user.organization_id,
+        )).scalar_one_or_none()
+        if not department:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Academic scope not found")
+    if program_id:
+        program = db.execute(select(CollegeProgram).where(
+            CollegeProgram.id == program_id,
+            CollegeProgram.organization_id == user.organization_id,
+        )).scalar_one_or_none()
+        if not program:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Academic scope not found")
+        if department and program.department_id != department.id:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "The program is outside the selected department")
+    if cohort_id:
+        cohort = db.execute(select(CollegeCohort).where(
+            CollegeCohort.id == cohort_id,
+            CollegeCohort.organization_id == user.organization_id,
+        )).scalar_one_or_none()
+        if not cohort:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Academic scope not found")
+        if program and cohort.program_id != program.id:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "The batch is outside the selected program")
+        if department and not program:
+            cohort_department_id = db.scalar(select(CollegeProgram.department_id).where(
+                CollegeProgram.id == cohort.program_id,
+                CollegeProgram.organization_id == user.organization_id,
+            ))
+            if cohort_department_id != department.id:
+                raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "The batch is outside the selected department")
+
+
+def _academic_period_term_ids(
+    db: Session,
+    user: User,
+    *,
+    academic_year_id: str | None,
+    term_id: str | None,
+) -> set[str] | None:
+    """Validate period filters and return the term IDs represented by them."""
+    if term_id:
+        term = db.execute(select(CollegeTerm).where(
+            CollegeTerm.id == term_id,
+            CollegeTerm.organization_id == user.organization_id,
+            CollegeTerm.status != "archived",
+        )).scalar_one_or_none()
+        if not term:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Academic term not found")
+        if academic_year_id and term.academic_year != academic_year_id:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "The selected term is outside the academic year")
+        return {term.id}
+    if academic_year_id:
+        return set(db.execute(select(CollegeTerm.id).where(
+            CollegeTerm.organization_id == user.organization_id,
+            CollegeTerm.academic_year == academic_year_id,
+            CollegeTerm.status != "archived",
+        )).scalars())
+    return None
+
+
+@router.get("/academics/summary")
+def academic_summary(
+    academic_year_id: str | None = Query(default=None, max_length=20),
+    term_id: str | None = None,
+    department_id: str | None = None,
+    program_id: str | None = None,
+    cohort_id: str | None = None,
+    user: User = Depends(require_any_permission(*ACADEMIC_SUMMARY_PERMISSIONS)),
+    db: Session = Depends(get_db),
+):
+    require_college(db, user)
+    permissions = get_user_permissions(db, user)
+    access_by_domain = {
+        "academics": _summary_access(db, user, permissions, "academics", {"college.academics.view", "college.academics.manage"}),
+        "students": _summary_access(db, user, permissions, "students", {"college.students.view"}),
+        "attendance": _summary_access(db, user, permissions, "attendance", {"college.attendance.view", "college.attendance.mark"}),
+        "assessments": _summary_access(db, user, permissions, "assessments", {"college.assessments.view", "college.assessments.record", "college.assessments.manage"}),
+        "data": _summary_access(db, user, permissions, "data", {"college.data.view", "college.imports.manage", "college.integrations.manage"}),
+    }
+    if not any(access_by_domain[domain] for domain in ("academics", "attendance", "assessments", "data")):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "The Academics workspace is not included in your access")
+    has_hierarchy_filter = any((department_id, program_id, cohort_id))
+    has_authorized_scope = False
+    for domain in ("academics", "students", "attendance", "assessments"):
+        access = access_by_domain[domain]
+        if not access:
+            continue
+        try:
+            validate_college_filters(
+                access,
+                department_id=department_id,
+                program_id=program_id,
+                cohort_id=cohort_id,
+            )
+            has_authorized_scope = True
+        except HTTPException as exc:
+            if exc.status_code not in {status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND}:
+                raise
+            # Domain scopes may legitimately be narrower than the user's
+            # academic reach. Hide that domain's metrics instead of leaking a
+            # zero or blocking the rest of the authorized overview.
+            access_by_domain[domain] = None
+    if has_hierarchy_filter and not has_authorized_scope:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Academic scope not found")
+    if has_hierarchy_filter:
+        _validate_summary_hierarchy(
+            db, user,
+            department_id=department_id,
+            program_id=program_id,
+            cohort_id=cohort_id,
+        )
+
+    selected_term = None
+    if term_id:
+        selected_term = db.execute(select(CollegeTerm).where(
+            CollegeTerm.id == term_id,
+            CollegeTerm.organization_id == user.organization_id,
+            CollegeTerm.status != "archived",
+        )).scalar_one_or_none()
+        if not selected_term:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Academic term not found")
+        if academic_year_id and selected_term.academic_year != academic_year_id:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "The selected term is outside the academic year")
+    if not selected_term:
+        term_statement = select(CollegeTerm).where(
+            CollegeTerm.organization_id == user.organization_id,
+            CollegeTerm.status != "archived",
+        )
+        if academic_year_id:
+            term_statement = term_statement.where(CollegeTerm.academic_year == academic_year_id)
+        selected_term = db.execute(term_statement.order_by(
+            CollegeTerm.is_current.desc(),
+            case((CollegeTerm.status == "active", 0), else_=1),
+            CollegeTerm.starts_on.desc(),
+        )).scalars().first()
+
+    resolved_year = academic_year_id or (selected_term.academic_year if selected_term else None)
+    term_ids = set()
+    if term_id:
+        term_ids.add(term_id)
+    elif resolved_year:
+        term_ids.update(db.execute(select(CollegeTerm.id).where(
+            CollegeTerm.organization_id == user.organization_id,
+            CollegeTerm.academic_year == resolved_year,
+            CollegeTerm.status != "archived",
+        )).scalars())
+
+    capabilities = {
+        "structure": access_by_domain["academics"] is not None,
+        "students": access_by_domain["students"] is not None,
+        "attendance": access_by_domain["attendance"] is not None,
+        "results": access_by_domain["assessments"] is not None,
+        "assessments": access_by_domain["assessments"] is not None,
+        "integrations": access_by_domain["data"] is not None and "college.integrations.manage" in permissions,
+        "exchange": access_by_domain["data"] is not None and bool(permissions.intersection({"college.data.view", "college.imports.manage"})),
+    }
+
+    metrics = {
+        "students_in_scope": None,
+        "average_attendance_percent": None,
+        "attendance_coverage_percent": None,
+        "results_coverage_percent": None,
+        "active_assessments": None,
+    }
+    attendance_trend = []
+    result_coverage = None
+    student_access = access_by_domain["students"]
+    if student_access:
+        metrics["students_in_scope"] = len(_summary_student_ids(
+            db, user, student_access,
+            department_id=department_id, program_id=program_id, cohort_id=cohort_id,
+        ))
+
+    attendance_access = access_by_domain["attendance"]
+    if attendance_access:
+        attendance_ids = _summary_student_ids(
+            db, user, attendance_access,
+            department_id=department_id, program_id=program_id, cohort_id=cohort_id,
+        )
+        if attendance_ids:
+            latest_attendance = select(
+                CollegeAttendanceSnapshot.student_profile_id.label("student_id"),
+                CollegeAttendanceSnapshot.attendance_percent.label("attendance_percent"),
+                CollegeAttendanceSnapshot.as_of.label("as_of"),
+                func.row_number().over(
+                    partition_by=CollegeAttendanceSnapshot.student_profile_id,
+                    order_by=(CollegeAttendanceSnapshot.as_of.desc(), CollegeAttendanceSnapshot.created_at.desc()),
+                ).label("position"),
+            ).where(
+                CollegeAttendanceSnapshot.organization_id == user.organization_id,
+                CollegeAttendanceSnapshot.student_profile_id.in_(attendance_ids),
+                CollegeAttendanceSnapshot.course_id.is_(None),
+            )
+            if term_ids:
+                latest_attendance = latest_attendance.where(CollegeAttendanceSnapshot.term_id.in_(term_ids))
+            latest_attendance = latest_attendance.subquery()
+            attendance_row = db.execute(select(
+                func.count(latest_attendance.c.student_id),
+                func.avg(latest_attendance.c.attendance_percent),
+            ).where(latest_attendance.c.position == 1)).one()
+            covered = int(attendance_row[0] or 0)
+            metrics["average_attendance_percent"] = round(float(attendance_row[1]), 1) if attendance_row[1] is not None else None
+            metrics["attendance_coverage_percent"] = _coverage(covered, len(attendance_ids))
+
+            trend_statement = select(
+                CollegeAttendanceSnapshot.as_of,
+                func.avg(CollegeAttendanceSnapshot.attendance_percent),
+            ).where(
+                CollegeAttendanceSnapshot.organization_id == user.organization_id,
+                CollegeAttendanceSnapshot.student_profile_id.in_(attendance_ids),
+                CollegeAttendanceSnapshot.course_id.is_(None),
+                CollegeAttendanceSnapshot.attendance_percent.is_not(None),
+            )
+            if term_ids:
+                trend_statement = trend_statement.where(CollegeAttendanceSnapshot.term_id.in_(term_ids))
+            trend_rows = db.execute(trend_statement.group_by(
+                CollegeAttendanceSnapshot.as_of,
+            ).order_by(CollegeAttendanceSnapshot.as_of.desc()).limit(8)).all()
+            attendance_trend = [
+                {"date": row[0], "attendance_percent": round(float(row[1]), 1)}
+                for row in reversed(trend_rows)
+            ]
+
+    assessment_access = access_by_domain["assessments"]
+    if assessment_access:
+        assessment_ids = _summary_student_ids(
+            db, user, assessment_access,
+            department_id=department_id, program_id=program_id, cohort_id=cohort_id,
+        )
+        if assessment_ids:
+            latest_results = select(
+                CollegeTermResult.student_profile_id.label("student_id"),
+                func.row_number().over(
+                    partition_by=CollegeTermResult.student_profile_id,
+                    order_by=(CollegeTermResult.semester.desc(), CollegeTermResult.created_at.desc()),
+                ).label("position"),
+            ).where(
+                CollegeTermResult.organization_id == user.organization_id,
+                CollegeTermResult.student_profile_id.in_(assessment_ids),
+                CollegeTermResult.result_status == "published",
+            )
+            if term_ids:
+                latest_results = latest_results.where(CollegeTermResult.term_id.in_(term_ids))
+            latest_results = latest_results.subquery()
+            result_count = int(db.scalar(select(func.count(latest_results.c.student_id)).where(latest_results.c.position == 1)) or 0)
+            result_percent = _coverage(result_count, len(assessment_ids))
+            metrics["results_coverage_percent"] = result_percent
+            result_coverage = {
+                "students_with_results": result_count,
+                "students_in_scope": len(assessment_ids),
+                "percent": result_percent,
+            }
+
+        assessment_cohorts = _summary_cohort_ids(
+            db, user, assessment_access,
+            department_id=department_id, program_id=program_id, cohort_id=cohort_id,
+        )
+        assessment_statement = select(func.count(CollegeAssessment.id)).where(
+            CollegeAssessment.organization_id == user.organization_id,
+            CollegeAssessment.status.in_(["draft", "published"]),
+        )
+        if not assessment_access.unrestricted or department_id or program_id or cohort_id:
+            scope_conditions = []
+            if assessment_cohorts:
+                scope_conditions.append(CollegeAssessment.cohort_id.in_(assessment_cohorts))
+            if assessment_access.course_offering_ids:
+                scope_conditions.append(CollegeAssessment.offering_id.in_(assessment_access.course_offering_ids))
+            assessment_statement = assessment_statement.where(or_(*scope_conditions)) if scope_conditions else assessment_statement.where(false())
+        if term_ids:
+            assessment_statement = assessment_statement.where(CollegeAssessment.exam_cycle_id.in_(
+                select(CollegeExamCycle.id).where(
+                    CollegeExamCycle.organization_id == user.organization_id,
+                    CollegeExamCycle.term_id.in_(term_ids),
+                )
+            ))
+        metrics["active_assessments"] = int(db.scalar(assessment_statement) or 0)
+
+    structure = None
+    academic_access = access_by_domain["academics"]
+    if academic_access:
+        department_statement = select(func.count(CollegeDepartment.id)).where(
+            CollegeDepartment.organization_id == user.organization_id,
+            CollegeDepartment.is_active.is_(True),
+        )
+        program_statement = select(func.count(CollegeProgram.id)).where(
+            CollegeProgram.organization_id == user.organization_id,
+            CollegeProgram.is_active.is_(True),
+        )
+        cohort_statement = select(func.count(CollegeCohort.id)).where(
+            CollegeCohort.organization_id == user.organization_id,
+            CollegeCohort.is_active.is_(True),
+        )
+        course_statement = select(func.count(CollegeCourse.id)).where(
+            CollegeCourse.organization_id == user.organization_id,
+            CollegeCourse.is_active.is_(True),
+        )
+        if not academic_access.unrestricted:
+            department_statement = department_statement.where(CollegeDepartment.id.in_(academic_access.department_ids))
+            program_statement = program_statement.where(CollegeProgram.id.in_(academic_access.program_ids))
+            cohort_statement = cohort_statement.where(CollegeCohort.id.in_(academic_access.cohort_ids))
+            course_statement = course_statement.where(CollegeCourse.department_id.in_(academic_access.department_ids))
+        if department_id:
+            department_statement = department_statement.where(CollegeDepartment.id == department_id)
+            program_statement = program_statement.where(CollegeProgram.department_id == department_id)
+            course_statement = course_statement.where(CollegeCourse.department_id == department_id)
+        if program_id:
+            program_statement = program_statement.where(CollegeProgram.id == program_id)
+            cohort_statement = cohort_statement.where(CollegeCohort.program_id == program_id)
+        if cohort_id:
+            cohort_statement = cohort_statement.where(CollegeCohort.id == cohort_id)
+        structure = {
+            "departments": int(db.scalar(department_statement) or 0),
+            "programs": int(db.scalar(program_statement) or 0),
+            "cohorts": int(db.scalar(cohort_statement) or 0),
+            "courses": int(db.scalar(course_statement) or 0),
+        }
+        structure["ready"] = all(structure[key] > 0 for key in ("departments", "programs", "cohorts"))
+
+    freshness = {"last_erp_sync_at": None, "last_exchange_at": None, "stale_connectors": None, "connector_count": None}
+    if capabilities["integrations"]:
+        connectors = list(db.execute(select(CollegeDataConnector).where(
+            CollegeDataConnector.organization_id == user.organization_id,
+            CollegeDataConnector.is_active.is_(True),
+        )).scalars())
+        now = datetime.now(timezone.utc)
+        freshness["connector_count"] = len(connectors)
+        freshness["last_erp_sync_at"] = max((row.last_sync_at for row in connectors if row.last_sync_at), default=None)
+        freshness["stale_connectors"] = sum(
+            1 for row in connectors
+            if not row.last_sync_at or (now - row.last_sync_at).total_seconds() > max(row.sync_interval_hours * 7200, 86400)
+        )
+    if capabilities["exchange"]:
+        freshness["last_exchange_at"] = db.scalar(select(func.max(DataExchangeRun.created_at)).where(
+            DataExchangeRun.organization_id == user.organization_id,
+        ))
+
+    attention = []
+    if structure and not structure["ready"]:
+        attention.append({"id": "structure", "tone": "warning", "title": "Complete academic structure", "detail": "Departments, programs, and batches are required before evidence can be mapped safely.", "section": "structure"})
+    if freshness["stale_connectors"]:
+        attention.append({"id": "erp", "tone": "warning", "title": f"{freshness['stale_connectors']} ERP connection{'s' if freshness['stale_connectors'] != 1 else ''} need attention", "detail": "Review sync status before relying on recent academic evidence.", "section": "integrations"})
+    if metrics["attendance_coverage_percent"] is not None and metrics["attendance_coverage_percent"] < 80:
+        attention.append({"id": "attendance", "tone": "warning", "title": "Attendance coverage is incomplete", "detail": f"{metrics['attendance_coverage_percent']}% of students have current attendance evidence.", "section": "attendance"})
+    if metrics["results_coverage_percent"] is not None and metrics["results_coverage_percent"] < 80:
+        attention.append({"id": "results", "tone": "warning", "title": "Result evidence is incomplete", "detail": f"{metrics['results_coverage_percent']}% of students have published results in this period.", "section": "results"})
+
+    return {
+        "scope": {
+            "academic_year_id": resolved_year,
+            "term": {
+                "id": selected_term.id,
+                "name": selected_term.name,
+                "academic_year": selected_term.academic_year,
+                "term_number": selected_term.term_number,
+                "starts_on": selected_term.starts_on,
+                "ends_on": selected_term.ends_on,
+                "status": selected_term.status,
+                "is_current": selected_term.is_current,
+            } if selected_term else None,
+            "department_id": department_id,
+            "program_id": program_id,
+            "cohort_id": cohort_id,
+        },
+        "metrics": metrics,
+        "attendance_trend": attendance_trend,
+        "result_coverage": result_coverage,
+        "structure": structure,
+        "freshness": freshness,
+        "attention": attention[:3],
+        "capabilities": capabilities,
+    }
+
+
 @router.get("/students/hierarchy")
 def student_navigation_hierarchy(
     user: User = Depends(require_permissions("college.students.view")),
@@ -984,6 +1446,7 @@ def program_page(
 @router.get("/terms/page")
 def term_page(
     q: str | None = Query(default=None, max_length=120),
+    academic_year: str | None = Query(default=None, max_length=20),
     term_status: Literal["planned", "active", "closed", "archived"] | None = Query(default=None, alias="status"),
     active: bool | None = None,
     cursor: str | None = None,
@@ -993,7 +1456,7 @@ def term_page(
 ):
     require_college(db, user)
     resolve_college_access(db, user, "academics")
-    filters = {"q": q, "status": term_status, "active": active}
+    filters = {"q": q, "academic_year": academic_year, "status": term_status, "active": active}
     values = decode_cursor(cursor, scope="college.terms", organization_id=user.organization_id, filters=filters)
     counts = select(
         CollegeCourseOffering.term_id,
@@ -1007,6 +1470,8 @@ def term_page(
     ).outerjoin(counts, counts.c.term_id == CollegeTerm.id).where(
         CollegeTerm.organization_id == user.organization_id,
     )
+    if academic_year:
+        statement = statement.where(CollegeTerm.academic_year == academic_year)
     if term_status:
         statement = statement.where(CollegeTerm.status == term_status)
     elif active is True:
@@ -1290,22 +1755,48 @@ def cohort_page(
 def academic_evidence_page(
     kind: Literal["term_results", "attendance"] = "term_results",
     q: str | None = None,
+    academic_year_id: str | None = Query(default=None, max_length=20),
+    term_id: str | None = None,
+    department_id: str | None = None,
+    program_id: str | None = None,
     cohort_id: str | None = None,
     cursor: str | None = None,
     limit: int = Query(25, ge=1, le=100),
-    user: User = Depends(require_permissions("college.academics.view")),
+    user: User = Depends(require_any_permission("college.assessments.view", "college.attendance.view")),
     db: Session = Depends(get_db),
 ):
     require_college(db, user)
+    required_permission = "college.assessments.view" if kind == "term_results" else "college.attendance.view"
+    if required_permission not in get_user_permissions(db, user):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This academic evidence is not included in your access")
     access = resolve_college_access(db, user, "assessments" if kind == "term_results" else "attendance")
-    if cohort_id and not access.unrestricted and cohort_id not in access.cohort_ids:
-        offering_cohorts = set(db.execute(select(CollegeCourseOffering.cohort_id).where(
-            CollegeCourseOffering.organization_id == user.organization_id,
-            CollegeCourseOffering.id.in_(access.course_offering_ids),
-        )).scalars()) if access.course_offering_ids else set()
-        if cohort_id not in offering_cohorts:
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "Cohort is outside your College access")
-    filters = {"kind": kind, "q": q, "cohort_id": cohort_id}
+    validate_college_filters(
+        access,
+        department_id=department_id,
+        program_id=program_id,
+        cohort_id=cohort_id,
+    )
+    if any((department_id, program_id, cohort_id)):
+        _validate_summary_hierarchy(
+            db, user,
+            department_id=department_id,
+            program_id=program_id,
+            cohort_id=cohort_id,
+        )
+    period_term_ids = _academic_period_term_ids(
+        db, user,
+        academic_year_id=academic_year_id,
+        term_id=term_id,
+    )
+    filters = {
+        "kind": kind,
+        "q": q,
+        "academic_year_id": academic_year_id,
+        "term_id": term_id,
+        "department_id": department_id,
+        "program_id": program_id,
+        "cohort_id": cohort_id,
+    }
     model = CollegeTermResult if kind == "term_results" else CollegeAttendanceSnapshot
     values = decode_cursor(cursor, scope="college.academic-evidence", organization_id=user.organization_id, filters=filters)
     statement = select(model, CollegeStudentProfile, Client, CollegeProgram, CollegeCohort).join(
@@ -1341,6 +1832,12 @@ def academic_evidence_page(
             statement = statement.where(or_(*visibility) if visibility else false())
     if cohort_id:
         statement = statement.where(CollegeStudentProfile.cohort_id == cohort_id)
+    if program_id:
+        statement = statement.where(CollegeStudentProfile.program_id == program_id)
+    if department_id:
+        statement = statement.where(CollegeProgram.department_id == department_id)
+    if period_term_ids is not None:
+        statement = statement.where(model.term_id.in_(period_term_ids) if period_term_ids else false())
     if q:
         term = f"%{' '.join(q.casefold().split())}%"
         statement = statement.where(func.lower(func.concat_ws(" ", Client.first_name, Client.last_name, CollegeStudentProfile.admission_number, CollegeStudentProfile.roll_number)).like(term))
@@ -1370,6 +1867,10 @@ def academic_evidence_page(
 
 @router.get("/attendance/sessions/page")
 def attendance_session_page(
+    academic_year_id: str | None = Query(default=None, max_length=20),
+    term_id: str | None = None,
+    department_id: str | None = None,
+    program_id: str | None = None,
     cohort_id: str | None = None,
     cursor: str | None = None,
     limit: int = Query(25, ge=1, le=100),
@@ -1378,14 +1879,31 @@ def attendance_session_page(
 ):
     require_college(db, user)
     access = resolve_college_access(db, user, "attendance")
-    if cohort_id and not access.unrestricted and cohort_id not in access.cohort_ids:
-        offering_cohorts = set(db.execute(select(CollegeCourseOffering.cohort_id).where(
-            CollegeCourseOffering.organization_id == user.organization_id,
-            CollegeCourseOffering.id.in_(access.course_offering_ids),
-        )).scalars()) if access.course_offering_ids else set()
-        if cohort_id not in offering_cohorts:
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "Cohort is outside your College access")
-    filters = {"cohort_id": cohort_id}
+    validate_college_filters(
+        access,
+        department_id=department_id,
+        program_id=program_id,
+        cohort_id=cohort_id,
+    )
+    if any((department_id, program_id, cohort_id)):
+        _validate_summary_hierarchy(
+            db, user,
+            department_id=department_id,
+            program_id=program_id,
+            cohort_id=cohort_id,
+        )
+    period_term_ids = _academic_period_term_ids(
+        db, user,
+        academic_year_id=academic_year_id,
+        term_id=term_id,
+    )
+    filters = {
+        "academic_year_id": academic_year_id,
+        "term_id": term_id,
+        "department_id": department_id,
+        "program_id": program_id,
+        "cohort_id": cohort_id,
+    }
     values = decode_cursor(cursor, scope="college.attendance-sessions", organization_id=user.organization_id, filters=filters)
     counts = select(
         CollegeAttendanceRecord.session_id,
@@ -1398,7 +1916,9 @@ def attendance_session_page(
         func.coalesce(counts.c.present_count, 0).label("present_count"),
     ).join(CollegeCourseOffering, CollegeCourseOffering.id == CollegeAttendanceSession.offering_id).join(
         CollegeCourse, CollegeCourse.id == CollegeCourseOffering.course_id,
-    ).join(CollegeCohort, CollegeCohort.id == CollegeCourseOffering.cohort_id).outerjoin(
+    ).join(CollegeCohort, CollegeCohort.id == CollegeCourseOffering.cohort_id).join(
+        CollegeProgram, CollegeProgram.id == CollegeCohort.program_id,
+    ).outerjoin(
         counts, counts.c.session_id == CollegeAttendanceSession.id,
     ).where(CollegeAttendanceSession.organization_id == user.organization_id)
     if not access.unrestricted:
@@ -1408,6 +1928,14 @@ def attendance_session_page(
         )
     if cohort_id:
         statement = statement.where(CollegeCourseOffering.cohort_id == cohort_id)
+    if program_id:
+        statement = statement.where(CollegeCohort.program_id == program_id)
+    if department_id:
+        statement = statement.where(CollegeProgram.department_id == department_id)
+    if period_term_ids is not None:
+        statement = statement.where(
+            CollegeCourseOffering.term_id.in_(period_term_ids) if period_term_ids else false()
+        )
     statement = _dated_cursor(statement, CollegeAttendanceSession, values, "held_on")
     size = page_size(limit)
     rows = db.execute(statement.order_by(CollegeAttendanceSession.held_on.desc(), CollegeAttendanceSession.id.desc()).limit(size + 1)).all()
@@ -1427,6 +1955,10 @@ def attendance_session_page(
 
 @router.get("/assessments/page")
 def assessment_page(
+    academic_year_id: str | None = Query(default=None, max_length=20),
+    term_id: str | None = None,
+    department_id: str | None = None,
+    program_id: str | None = None,
     cohort_id: str | None = None,
     cursor: str | None = None,
     limit: int = Query(25, ge=1, le=100),
@@ -1435,14 +1967,31 @@ def assessment_page(
 ):
     require_college(db, user)
     access = resolve_college_access(db, user, "assessments")
-    if cohort_id and not access.unrestricted and cohort_id not in access.cohort_ids:
-        offering_cohorts = set(db.execute(select(CollegeCourseOffering.cohort_id).where(
-            CollegeCourseOffering.organization_id == user.organization_id,
-            CollegeCourseOffering.id.in_(access.course_offering_ids),
-        )).scalars()) if access.course_offering_ids else set()
-        if cohort_id not in offering_cohorts:
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "Cohort is outside your College access")
-    filters = {"cohort_id": cohort_id}
+    validate_college_filters(
+        access,
+        department_id=department_id,
+        program_id=program_id,
+        cohort_id=cohort_id,
+    )
+    if any((department_id, program_id, cohort_id)):
+        _validate_summary_hierarchy(
+            db, user,
+            department_id=department_id,
+            program_id=program_id,
+            cohort_id=cohort_id,
+        )
+    period_term_ids = _academic_period_term_ids(
+        db, user,
+        academic_year_id=academic_year_id,
+        term_id=term_id,
+    )
+    filters = {
+        "academic_year_id": academic_year_id,
+        "term_id": term_id,
+        "department_id": department_id,
+        "program_id": program_id,
+        "cohort_id": cohort_id,
+    }
     values = decode_cursor(cursor, scope="college.assessments", organization_id=user.organization_id, filters=filters)
     score_counts = select(
         CollegeAssessmentScore.assessment_id,
@@ -1455,8 +2004,9 @@ def assessment_page(
         CollegeCourse, CollegeCourse.id == CollegeCourseOffering.course_id,
     ).outerjoin(CollegeCohort, CollegeCohort.id == func.coalesce(
         CollegeAssessment.cohort_id, CollegeCourseOffering.cohort_id,
-    )).outerjoin(CollegeExamCycle, CollegeExamCycle.id == CollegeAssessment.exam_cycle_id).outerjoin(
-        score_counts, score_counts.c.assessment_id == CollegeAssessment.id,
+    )).outerjoin(CollegeProgram, CollegeProgram.id == CollegeCohort.program_id).outerjoin(
+        CollegeExamCycle, CollegeExamCycle.id == CollegeAssessment.exam_cycle_id,
+    ).outerjoin(score_counts, score_counts.c.assessment_id == CollegeAssessment.id,
     ).where(CollegeAssessment.organization_id == user.organization_id)
     if not access.unrestricted:
         visibility = []
@@ -1472,6 +2022,15 @@ def assessment_page(
         statement = statement.where(func.coalesce(
             CollegeAssessment.cohort_id, CollegeCourseOffering.cohort_id,
         ) == cohort_id)
+    if program_id:
+        statement = statement.where(CollegeCohort.program_id == program_id)
+    if department_id:
+        statement = statement.where(CollegeProgram.department_id == department_id)
+    if period_term_ids is not None:
+        statement = statement.where(
+            func.coalesce(CollegeExamCycle.term_id, CollegeCourseOffering.term_id).in_(period_term_ids)
+            if period_term_ids else false()
+        )
     statement = _dated_cursor(statement, CollegeAssessment, values)
     size = page_size(limit)
     rows = db.execute(statement.order_by(CollegeAssessment.created_at.desc(), CollegeAssessment.id.desc()).limit(size + 1)).all()

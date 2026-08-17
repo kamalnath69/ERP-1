@@ -140,12 +140,12 @@ def execute_local_query(
     else:
         result = _execute_records(db, user, query, 0, query.limit)
 
-    if result.get("count", 0) > query.limit and not result.get("result_session_id"):
+    if result.get("has_more") and not result.get("result_session_id"):
         from app.models import AIResultSession
         session = AIResultSession(
             organization_id=user.organization_id, user_id=user.id, conversation_id=conversation_id,
             tool_name="local_query", query_spec=query.model_dump(mode="json"), result_type=query.subject,
-            total_count=result["count"], expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+            total_count=int(result.get("count") or 0), expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
         )
         db.add(session); db.flush(); result["result_session_id"] = session.id
     summary = style_deterministic_summary(_summary(query, result), query.language, preferences)
@@ -181,14 +181,16 @@ def clarification_response(clarification: QueryClarification) -> dict:
     }
 
 
-def run_local_result_page(db: Session, user: User, spec: dict, offset=0, limit=25) -> dict:
+def run_local_result_page(
+    db: Session, user: User, spec: dict, offset=0, limit=25, *, cursor_values=None,
+) -> dict:
     query = BusinessQueryV1.model_validate(spec)
     access_error = _query_access_error(db, user, query)
     if access_error:
         return access_error
     if query.operation == "buyers":
-        return _execute_buyers(db, user, query, offset, limit)
-    return _execute_records(db, user, query, offset, limit)
+        return _execute_buyers(db, user, query, offset, limit, cursor_values=cursor_values)
+    return _execute_records(db, user, query, offset, limit, cursor_values=cursor_values)
 
 
 def _query_access_error(db, user, query):
@@ -203,7 +205,48 @@ def _query_access_error(db, user, query):
     return None
 
 
-def _execute_records(db: Session, user: User, query: BusinessQueryV1, offset: int, limit: int) -> dict:
+def _parse_cursor_date(field, value):
+    if value in (None, ""):
+        return None
+    try:
+        python_type = field.type.python_type
+        if python_type is date:
+            return date.fromisoformat(str(value))
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (AttributeError, NotImplementedError, TypeError, ValueError):
+        return None
+
+
+def _apply_record_cursor(stmt, field, id_field, direction: str, cursor_values: dict | None):
+    if not cursor_values:
+        return stmt
+    cursor_id = cursor_values.get("id")
+    cursor_is_null = bool(cursor_values.get("sort_is_null"))
+    cursor_value = _parse_cursor_date(field, cursor_values.get("sort"))
+    if not cursor_id or (not cursor_is_null and cursor_value is None):
+        return None
+    id_after = id_field > cursor_id if direction == "asc" else id_field < cursor_id
+    if cursor_is_null:
+        return stmt.where(field.is_(None), id_after)
+    value_after = field > cursor_value if direction == "asc" else field < cursor_value
+    return stmt.where(or_(
+        value_after,
+        and_(field == cursor_value, id_after),
+        field.is_(None),
+    ))
+
+
+def _row_order_value(db: Session, subject: str, row, field):
+    if subject == "purchases":
+        invoice = db.get(SaleInvoice, row.invoice_id)
+        return invoice.created_at if invoice else None
+    return getattr(row, field.key, None)
+
+
+def _execute_records(
+    db: Session, user: User, query: BusinessQueryV1, offset: int, limit: int,
+    *, cursor_values: dict | None = None,
+) -> dict:
     permission = SUBJECT_PERMISSIONS.get(query.subject)
     model = SUBJECT_MODEL.get(query.subject)
     if not permission or not model:
@@ -219,12 +262,20 @@ def _execute_records(db: Session, user: User, query: BusinessQueryV1, offset: in
             .order_by(SaleInvoice.created_at.desc(), SaleInvoice.id.desc()).limit(1)
         )
         stmt = stmt.where(SaleLine.invoice_id == latest_invoice_id) if latest_invoice_id else stmt.where(false())
-    count = db.scalar(select(func.count()).select_from(stmt.order_by(None).subquery())) or 0
     order = DATE_FIELD.get(query.subject)
     if order is None:
         order = model.created_at
-    direction = order.asc() if query.direction == "asc" else order.desc()
-    rows = db.execute(stmt.order_by(direction).offset(offset).limit(min(limit, 100))).scalars().all()
+    stmt = _apply_record_cursor(stmt, order, model.id, query.direction, cursor_values)
+    if stmt is None:
+        return {"error": "The result cursor is invalid."}
+    page_limit = min(max(int(limit or 25), 1), 100)
+    order_expression = order.asc().nullslast() if query.direction == "asc" else order.desc().nullslast()
+    id_expression = model.id.asc() if query.direction == "asc" else model.id.desc()
+    rows = db.execute(
+        stmt.order_by(order_expression, id_expression).offset(max(0, int(offset or 0))).limit(page_limit + 1)
+    ).scalars().all()
+    has_more = len(rows) > page_limit
+    rows = rows[:page_limit]
     serialization_context = (
         sale_invoice_context(db, user, rows) if query.subject == "invoices" else None
     )
@@ -236,9 +287,19 @@ def _execute_records(db: Session, user: User, query: BusinessQueryV1, offset: in
         ["invoice_number", "customer_name", "item_names", "status", "total_paise", "pending_paise"]
         if query.subject == "invoices" else []
     )
+    count = len(items) if not has_more and not cursor_values and not offset else None
+    next_values = None
+    if has_more and rows:
+        sort_value = _row_order_value(db, query.subject, rows[-1], order)
+        next_values = {
+            "sort": sort_value.isoformat() if sort_value is not None else None,
+            "sort_is_null": sort_value is None,
+            "id": str(rows[-1].id),
+        }
     return {
-        "count": count, "items": items,
-        "next_offset": offset + len(items) if offset + len(items) < count else None,
+        "count": count, "count_is_exact": count is not None, "items": items,
+        "has_more": has_more, "next_values": next_values,
+        "next_offset": offset + len(items) if offset and has_more else None,
         "query_spec": query.model_dump(mode="json"),
         "presentation": {"display": "cards" if _profile_kind(query.subject) else "table",
                          "title": TITLES.get(query.subject, query.subject.replace("_", " ").title()),
@@ -516,7 +577,7 @@ def _apply_record_filters(stmt, query, model):
     return stmt
 
 
-def _execute_buyers(db, user, query, offset, limit):
+def _execute_buyers(db, user, query, offset, limit, *, cursor_values=None):
     if not user_has_permissions(db, user, ["sales.view"]):
         return {"access_denied": True, "message": "You do not have access to sales information."}
     stmt = select(
@@ -538,9 +599,26 @@ def _execute_buyers(db, user, query, offset, limit):
     entity = query.entities[0] if query.entities else None
     if entity and entity.kind == "catalog": stmt = stmt.where(SaleLine.item_id == entity.id)
     elif query.query_text: stmt = stmt.where(or_(func.lower(SaleLine.item_name).contains(query.query_text.casefold()), func.lower(func.coalesce(SaleLine.sku, "")).contains(query.query_text.casefold())))
+    last_purchase = func.max(SaleInvoice.created_at)
+    tie_breaker = func.coalesce(SaleInvoice.client_id, "00000000-0000-0000-0000-000000000000")
+    if cursor_values:
+        cursor_date = _parse_cursor_date(SaleInvoice.created_at, cursor_values.get("sort"))
+        cursor_id = cursor_values.get("id")
+        if cursor_date is None or not cursor_id:
+            return {"error": "The result cursor is invalid."}
+        stmt = stmt.having(or_(
+            last_purchase < cursor_date,
+            and_(last_purchase == cursor_date, tie_breaker < cursor_id),
+        ))
+        offset = 0
     grouped = stmt.group_by(SaleInvoice.client_id)
-    count = db.scalar(select(func.count()).select_from(grouped.subquery())) or 0
-    rows = db.execute(grouped.order_by(func.max(SaleInvoice.created_at).desc()).offset(offset).limit(min(limit, 100))).all()
+    page_limit = min(max(int(limit or 25), 1), 100)
+    rows = db.execute(
+        grouped.order_by(last_purchase.desc(), tie_breaker.desc())
+        .offset(max(0, int(offset or 0))).limit(page_limit + 1)
+    ).all()
+    has_more = len(rows) > page_limit
+    rows = rows[:page_limit]
     client_ids = [row.client_id for row in rows if row.client_id]
     client_rows = db.execute(filter_clients(select(Client).where(Client.id.in_(client_ids)), db, user)).scalars().all() if client_ids else []
     by_id = {row.id: row for row in client_rows}
@@ -553,7 +631,16 @@ def _execute_buyers(db, user, query, offset, limit):
                       "purchase_count": row.purchase_count, "quantity_milli": row.quantity_milli,
                       "total_paise": row.total_paise, "last_purchased_at": row.last_purchased_at,
                       "profile_ref": {"kind": "client", "id": row.client_id} if client else None})
-    return {"count": count, "items": items, "next_offset": offset + len(items) if offset + len(items) < count else None,
+    count = len(items) if not has_more and not cursor_values and not offset else None
+    next_values = None
+    if has_more and rows:
+        next_values = {
+            "sort": rows[-1].last_purchased_at.isoformat(),
+            "id": str(rows[-1].client_id or "00000000-0000-0000-0000-000000000000"),
+        }
+    return {"count": count, "count_is_exact": count is not None, "items": items,
+            "has_more": has_more, "next_values": next_values,
+            "next_offset": offset + len(items) if offset and has_more else None,
             "query_spec": query.model_dump(mode="json"),
             "presentation": {"display": "cards", "title": "Clients who purchased", "entity_kind": "client"}}
 
@@ -924,7 +1011,8 @@ def _summary(query, result):
         if query.language == "ta":
             return f"{first['client']} அவர்களின் சமீபத்திய வாங்குதல்: {names}{more_text}. ரசீது {invoice}{amount_text}."
         return f"{first['client']}'s latest purchase was {names}{more_text} on invoice {invoice}{amount_text}."
-    count = int(result.get("count", len(result.get("items", []))))
+    count_value = result.get("count")
+    count = int(count_value if count_value is not None else len(result.get("items", [])))
     label = TITLES.get(query.subject, query.subject.replace("_", " ")).lower()
     if query.language == "tanglish":
         return f"{count} {label} kidaichirukku." if count else f"Matching {label} edhuvum kidaikkala."

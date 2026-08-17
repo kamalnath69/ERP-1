@@ -1,12 +1,20 @@
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import CollegeWorkspace from "./CollegeWorkspace";
 
 
 vi.mock("@/contexts/AuthContext", () => ({
   useAuth: () => ({ can: () => true }),
+}));
+
+vi.mock("@/components/ai/AIConversationProvider", () => ({
+  useRegisterAIPageContext: () => {},
+}));
+
+vi.mock("@/components/charts/BusinessChart", () => ({
+  default: () => <div>Academic trend chart</div>,
 }));
 
 vi.mock("@/features/college/collegeApi", () => {
@@ -66,9 +74,26 @@ vi.mock("@/features/college/collegeApi", () => {
   };
   const leaderboardsResult = { data: { readiness: [], coding: [], academics: [], improvement: [] }, isLoading: false };
   const policyResult = { data: { name: "Placement readiness", weights: { academics: 25 }, minimum_coverage_percent: 60 }, isError: false, refetch: vi.fn() };
+  const academicSummaryResult = {
+    currentData: {
+      scope: { term: { id: "term-7", name: "Semester 7", academic_year: "2026-27", status: "active" } },
+      metrics: { students_in_scope: 40, average_attendance_percent: 86.4, results_coverage_percent: 90, active_assessments: 3 },
+      attendance_trend: [{ date: "2026-08-01", attendance_percent: 86.4 }],
+      result_coverage: { students_with_results: 36, students_in_scope: 40, percent: 90 },
+      structure: { departments: 1, programs: 1, cohorts: 2, courses: 6, ready: true },
+      freshness: { last_erp_sync_at: null, last_exchange_at: null, stale_connectors: 0, connector_count: 0 },
+      attention: [],
+      capabilities: { structure: true, students: true, attendance: true, results: true, assessments: true, integrations: true, exchange: true },
+    },
+    isLoading: false,
+    isFetching: false,
+    isError: false,
+    refetch: vi.fn(),
+  };
   return {
     useGetCollegeApplicationsQuery: () => applicationsResult,
     useGetCollegeAcademicHierarchyQuery: () => hierarchyResult,
+    useGetCollegeAcademicSummaryQuery: () => academicSummaryResult,
     useGetCollegeDepartmentsPageQuery: () => departmentsResult,
     useGetCollegeProgramsPageQuery: () => programsResult,
     useGetCollegeTermsPageQuery: emptyPage,
@@ -80,12 +105,14 @@ vi.mock("@/features/college/collegeApi", () => {
     useGetCollegeAcademicEvidencePageQuery: emptyPage,
     useGetCollegeAssessmentRegisterQuery: emptyPage,
     useGetCollegeAssessmentsPageQuery: emptyPage,
+    useGetCollegeAssessmentSchemesPageQuery: emptyPage,
     useGetCollegeAttendanceRegisterQuery: emptyPage,
     useGetCollegeAttendanceSessionsPageQuery: emptyPage,
     useGetCollegeCohortsPageQuery: () => cohortsResult,
     useGetCollegeCompaniesQuery: emptyPage,
     useGetCollegeImportsQuery: emptyPage,
     useGetCollegeIntegrationsQuery: emptyPage,
+    useGetCollegeIntegrationCredentialsQuery: emptyPage,
     useGetCollegeLeaderboardsQuery: () => leaderboardsResult,
     useGetCollegeOpportunitiesQuery: emptyPage,
     useGetCollegeReadinessPolicyQuery: () => policyResult,
@@ -100,6 +127,8 @@ vi.mock("@/features/college/collegeApi", () => {
     useCreateCollegeCourseMutation: mutation,
     useCreateCollegeDepartmentMutation: mutation,
     useCreateCollegeIntegrationMutation: mutation,
+    useCreateCollegeIntegrationCredentialMutation: mutation,
+    useCreateCollegeExamCycleMutation: mutation,
     useCreateCollegeOfferingMutation: mutation,
     useCreateCollegeOpportunityMutation: mutation,
     useCreateCollegeProgramMutation: mutation,
@@ -107,10 +136,13 @@ vi.mock("@/features/college/collegeApi", () => {
     useMoveCollegeApplicationStageMutation: mutation,
     usePreviewCollegeCsvImportMutation: mutation,
     useQueueCollegeIntegrationSyncMutation: mutation,
+    useRevokeCollegeIntegrationCredentialMutation: mutation,
+    useRotateCollegeIntegrationCredentialMutation: mutation,
     useSaveCollegeAttendanceMutation: mutation,
     useSaveCollegeScoresMutation: mutation,
     useSetCollegeAcademicRecordArchivedMutation: mutation,
     useUpdateCollegeAcademicRecordMutation: mutation,
+    useUpdateCollegeIntegrationMutation: mutation,
   };
 });
 
@@ -121,7 +153,10 @@ async function renderAt(path) {
   document.body.appendChild(container);
   const root = createRoot(container);
   await act(async () => {
-    root.render(<MemoryRouter initialEntries={[path]}><CollegeWorkspace /></MemoryRouter>);
+    root.render(<MemoryRouter initialEntries={[path]}><Routes>
+      <Route path="/app/college" element={<CollegeWorkspace workspace="placement" />} />
+      <Route path="/app/academics" element={<CollegeWorkspace workspace="academics" />} />
+    </Routes></MemoryRouter>);
   });
   return {
     container,
@@ -140,9 +175,22 @@ test("opens College on the live placement pipeline with universal navigation", a
   expect(view.container.textContent).toContain("Live pipeline");
   expect(view.container.textContent).toContain("Asha Raman");
   expect(view.container.textContent).toContain("Graduate Engineer");
-  expect(view.container.textContent).toContain("ERP synchronization");
+  expect(view.container.textContent).not.toContain("ERP synchronization");
+  expect(view.container.textContent).not.toContain("Academic structure");
   expect(view.container.textContent).not.toContain("Revenue");
   expect(view.container.textContent).not.toContain("Invoices");
+  view.cleanup();
+});
+
+test("opens Academics on a scoped overview with data operations navigation", async () => {
+  const view = await renderAt("/app/academics");
+  expect(view.container.textContent).toContain("Academic workspace");
+  expect(view.container.textContent).toContain("Academic overview");
+  expect(view.container.textContent).toContain("Semester 7");
+  expect(view.container.textContent).toContain("Attendance trend");
+  expect(view.container.textContent).toContain("ERP synchronization");
+  expect(view.container.textContent).toContain("Data exchange");
+  expect(view.container.textContent).not.toContain("Live pipeline");
   view.cleanup();
 });
 
@@ -160,6 +208,7 @@ test("keeps fee evidence as a compact internship-clearance administration view",
 
 test("opens legacy batch links in the managed academic structure console", async () => {
   const view = await renderAt("/app/college?section=batches");
+  expect(view.container.textContent).toContain("Academic workspace");
   expect(view.container.textContent).toContain("Academic structure");
   expect(view.container.textContent).toContain("Start with placement essentials");
   expect(view.container.textContent).toContain("Departments");

@@ -397,6 +397,17 @@ def resource_schema(db: Session, organization_id: str, resource_key: str, scope:
             CollegeAssessment.organization_id == organization_id,
             CollegeAssessment.exam_cycle_id == cycle.id,
         )))
+        allowed_cohort_ids = scope.get("allowed_cohort_ids")
+        allowed_offering_ids = scope.get("allowed_course_offering_ids")
+        if allowed_cohort_ids is not None or allowed_offering_ids is not None:
+            allowed_cohorts = set(allowed_cohort_ids or [])
+            allowed_offerings = set(allowed_offering_ids or [])
+            assessments = [item for item in assessments if (
+                (item.cohort_id and item.cohort_id in allowed_cohorts)
+                or (item.offering_id and item.offering_id in allowed_offerings)
+            )]
+            if not assessments:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Assessment cycle not found")
         cohort_ids = {item.cohort_id for item in assessments if item.cohort_id}
         if any(item.offering_id and not item.cohort_id for item in assessments):
             offering_ids = [item.offering_id for item in assessments if item.offering_id and not item.cohort_id]

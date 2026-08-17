@@ -430,6 +430,10 @@ def seed_organization_defaults(
         organization_id=org.id, flag="ai.local_intent_v2", enabled=True,
         meta={"mode": "enabled", "engine_version": "local-intent-v1"},
     ))
+    db.add(FeatureFlag(
+        organization_id=org.id, flag="ai.execution_v3", enabled=True,
+        meta={"mode": "enabled", "version": 3, "legacy_kill_switch": True},
+    ))
     if org.industry.value == "college":
         db.add(FeatureFlag(
             organization_id=org.id, flag="college.placement_v1", enabled=True,
@@ -507,6 +511,11 @@ def ensure_control_plane(db: Session) -> None:
                 "text-embedding-3-small": {"input": 7, "cached_input": 7, "output": 0},
             },
             "fallback": {"input": 255, "cached_input": 26, "output": 1530},
+        },
+        "ai_models": {
+            "planner": settings.AI_MODEL_PLANNER,
+            "synthesis": settings.AI_MODEL_SYNTHESIS,
+            "repair": settings.AI_MODEL_REPAIR,
         },
         "billing_identity": {"registered_state": "Tamil Nadu", "country": "IN"},
         "payment_gateway": {"provider": settings.PAYMENT_GATEWAY},

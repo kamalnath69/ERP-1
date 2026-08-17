@@ -80,7 +80,7 @@ export default function PlacementDashboard({ embedded = false, onSection }) {
         title="Build the placement cohort"
         description="Bring students from your ERP or admit a student locally, then add the first academic or placement evidence."
         primaryAction={<Button onClick={() => navigate("/app/clients?new=1")}>Add a student</Button>}
-        secondaryAction={<Button variant="outline" onClick={() => navigate("/app/college?section=integrations")}>Connect ERP</Button>}
+        secondaryAction={<Button variant="outline" onClick={() => navigate("/app/academics?section=integrations")}>Connect ERP</Button>}
       /> : <>
         <section className="grid gap-5 xl:grid-cols-12" aria-label="Placement position">
           <Surface className="overflow-hidden xl:col-span-4">

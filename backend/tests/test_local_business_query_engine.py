@@ -194,6 +194,27 @@ def test_customer_count_and_follow_up_list_keep_the_same_active_scope():
         db.rollback()
 
 
+def test_local_result_continuation_uses_stable_keyset_pages_without_counting():
+    with SessionLocal() as db:
+        user = _demo_user(db)
+        match = interpret_business_query(db, user, "show active clients", None, {})
+        spec = match.query.model_dump(mode="json")
+
+        first = run_local_result_page(db, user, spec, limit=2)
+        second = run_local_result_page(
+            db, user, spec, limit=2, cursor_values=first["next_values"],
+        )
+
+        assert first["has_more"] is True
+        assert first["count"] is None
+        assert first["count_is_exact"] is False
+        assert first["next_values"]["sort"]
+        assert {item["id"] for item in first["items"]}.isdisjoint(
+            item["id"] for item in second["items"]
+        )
+        db.rollback()
+
+
 def test_follow_up_preserves_an_explicit_all_client_scope():
     with SessionLocal() as db:
         user = _demo_user(db)

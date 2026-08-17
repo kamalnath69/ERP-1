@@ -62,6 +62,7 @@ export function contextIdentity(context) {
   return JSON.stringify([
     context.kind,
     context.id,
+    context.domain,
     context.graduation_year,
     context.department_id,
     context.program_id,

@@ -1,0 +1,29 @@
+{
+  "version": "ai-execution-v3-golden-1",
+  "cases": [
+    {"id": "en-greeting", "domain": "conversation", "prompt": "Hello!", "language": "en", "expected_path": "conversation", "provider_free": true},
+    {"id": "ta-greeting", "domain": "conversation", "prompt": "வணக்கம்", "language": "ta", "expected_path": "conversation", "provider_free": true},
+    {"id": "tanglish-greeting", "domain": "conversation", "prompt": "Vanakkam, epdi irukeenga?", "language": "tanglish", "expected_path": "conversation", "provider_free": true},
+    {"id": "client-count", "domain": "records", "prompt": "How many active clients are there?", "language": "en", "expected_path": "deterministic", "provider_free": true},
+    {"id": "customer-count-tanglish", "domain": "records", "prompt": "evlo customers irukaanga ipo", "language": "tanglish", "expected_path": "deterministic", "provider_free": true},
+    {"id": "client-list", "domain": "records", "prompt": "List all active clients", "language": "en", "expected_path": "deterministic", "provider_free": true},
+    {"id": "student-count", "domain": "college", "prompt": "How many active students are there?", "language": "en", "expected_path": "deterministic", "provider_free": true},
+    {"id": "purchase-list", "domain": "sales", "prompt": "Who bought what?", "language": "en", "expected_path": "deterministic", "provider_free": true},
+    {"id": "business-summary", "domain": "operations", "prompt": "Show today's business summary", "language": "en", "expected_path": "deterministic", "provider_free": true},
+    {"id": "scoped-follow-up", "domain": "follow_up", "prompt": "who are they", "language": "en", "expected_path": "structured_memory", "provider_free": true},
+    {"id": "single-keyword-item", "domain": "ambiguity", "prompt": "item", "language": "en", "expected_path": "model", "provider_free": false},
+    {"id": "compound-request", "domain": "ambiguity", "prompt": "List clients and explain why revenue dropped", "language": "en", "expected_path": "model", "provider_free": false},
+    {"id": "finance-analysis", "domain": "finance", "prompt": "Why did collections fall compared with last month?", "language": "en", "expected_path": "model", "provider_free": false},
+    {"id": "clinical-evidence", "domain": "clinical", "prompt": "Summarize this patient's latest encounter and active prescriptions", "language": "en", "expected_path": "model", "provider_free": false},
+    {"id": "college-batch", "domain": "college_academics", "prompt": "Show the 2027 AIML batch", "language": "en", "expected_path": "model", "provider_free": false},
+    {"id": "college-comparison", "domain": "college_academics", "prompt": "Compare attendance for ECE 2026 and 2027", "language": "en", "expected_path": "model", "provider_free": false},
+    {"id": "placement-shortlist", "domain": "placements", "prompt": "Recommend eligible candidates for the Freshworks drive and explain the evidence", "language": "en", "expected_path": "model", "provider_free": false},
+    {"id": "placement-tanglish", "domain": "placements", "prompt": "intha batch la yaarukku placement support venum", "language": "tanglish", "expected_path": "model", "provider_free": false},
+    {"id": "document-policy", "domain": "documents", "prompt": "What does our cancellation policy say?", "language": "en", "expected_path": "knowledge", "provider_free": false},
+    {"id": "document-tamil", "domain": "documents", "prompt": "இந்த கொள்கையின் முக்கிய அம்சங்களை விளக்குங்கள்", "language": "ta", "expected_path": "knowledge", "provider_free": false},
+    {"id": "protected-ranking", "domain": "protected_data", "prompt": "Rank candidates using gender and category", "language": "en", "expected_path": "model", "provider_free": false},
+    {"id": "date-window", "domain": "dates", "prompt": "Show clients created in the last 30 days", "language": "en", "expected_path": "local", "provider_free": true},
+    {"id": "partial-payment", "domain": "finance", "prompt": "Show partially paid sales", "language": "en", "expected_path": "local", "provider_free": true},
+    {"id": "invoice-follow-up", "domain": "follow_up", "prompt": "ena item athu", "language": "tanglish", "expected_path": "structured_memory", "provider_free": true}
+  ]
+}

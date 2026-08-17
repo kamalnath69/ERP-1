@@ -8,6 +8,7 @@ import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 from time import perf_counter
+from types import SimpleNamespace
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -16,7 +17,9 @@ from sqlalchemy import and_, case, delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.ai.actions import confirm_action as execute_confirmed_action, serialize_action, undo_action
+from app.ai.compiler_v3 import compile_turn
 from app.ai.contracts import compose_response
+from app.ai.execution_v3 import run_ai_turn_v3
 from app.ai.fast_queries import deterministic_query_plan, execute_deterministic_query
 from app.ai.orchestrator import classify_route, fast_conversation_reply, run_ai_turn, selected_model
 from app.ai.local_contracts import BusinessQueryV1, ResolvedEntity
@@ -24,11 +27,12 @@ from app.ai.local_executor import clarification_response, execute_local_query, r
 from app.ai.local_intent import ENGINE_VERSION, interpret_business_query, normalize_language
 from app.ai.personalization import load_assistant_preferences
 from app.ai.tools import run_result_page
+from app.core.config import settings
 from app.core.database import SessionLocal, get_db
 from app.schemas.validation import RequestModel
 from app.core.deps import require_permissions
 from app.models import (
-    AIAction, AIIntentResolution, AIMessageFeedback, AIResultSession, AISavedView, AIUsage, AIWallet,
+    AIAction, AIExecutionTrace, AIIntentResolution, AIMessageFeedback, AIResultSession, AISavedView, AIUsage, AIWallet,
     ChatConversation, ChatMessage, ChatTurn, Client, CollegeCohort, CollegeDepartment, CollegeProgram,
     Document, FeatureFlag, Organization,
     PatientProfile, PlatformSetting, Setting, User,
@@ -401,7 +405,10 @@ def _validated_college_scope(db, user, context):
     if not any([graduation_year, department_id, program_id, cohort_ids]):
         raise HTTPException(422, "College context requires an academic scope")
 
-    access = resolve_college_access(db, user, "students")
+    domain = str(context.get("domain") or "students").strip().lower()
+    if domain not in {"students", "academics", "attendance", "assessments", "placements", "readiness", "coding"}:
+        raise HTTPException(422, "College context domain is invalid")
+    access = resolve_college_access(db, user, domain)
     statement = (
         select(CollegeCohort, CollegeProgram, CollegeDepartment)
         .join(CollegeProgram, CollegeProgram.id == CollegeCohort.program_id)
@@ -461,6 +468,7 @@ def _validated_college_scope(db, user, context):
         "program_id": program_id,
         "cohort_id": cohort_id,
         "cohort_ids": cohort_ids,
+        "domain": domain,
     }
 
 
@@ -615,6 +623,100 @@ def _local_intent_mode(db: Session, organization_id: str) -> str:
     return mode if mode in {"enabled", "shadow"} else "enabled"
 
 
+def _execution_v3_enabled(db: Session, organization_id: str) -> bool:
+    flag = db.execute(select(FeatureFlag).where(
+        FeatureFlag.organization_id == organization_id,
+        FeatureFlag.flag == "ai.execution_v3",
+    )).scalar_one_or_none()
+    return settings.AI_EXECUTION_V3_DEFAULT if flag is None else bool(flag.enabled)
+
+
+def _memory_state(context_state: dict, result: dict) -> dict:
+    """Persist only validated, compact follow-up state rather than transcript text."""
+    allowed = {
+        "primary_entity", "recent_entities", "result_entities", "last_read", "filters",
+        "date_range", "location_id", "college_scope", "validated_scope", "sorting", "local_query",
+    }
+    memory = {key: context_state.get(key) for key in allowed if context_state.get(key) not in (None, [], {})}
+    plan = result.get("query_plan") or {}
+    unresolved = plan.get("unresolved_references") or []
+    if unresolved:
+        memory["unresolved"] = unresolved[:8]
+    evidence_refs = []
+    for call in result.get("tool_calls") or []:
+        tool_result = call.get("result") or {}
+        for item in (tool_result.get("items") or [])[:8]:
+            if isinstance(item, dict) and item.get("id"):
+                evidence_refs.append({"kind": item.get("kind") or call.get("name"), "id": item["id"]})
+        for citation in (tool_result.get("citations") or [])[:8]:
+            if isinstance(citation, dict) and citation.get("document_id"):
+                evidence_refs.append({"kind": "document", "id": citation["document_id"]})
+    if evidence_refs:
+        memory["evidence_refs"] = evidence_refs[:16]
+    return memory
+
+
+def _memory_summary_text(memory: dict) -> str | None:
+    """Create a small, factual follow-up bridge without replaying transcripts."""
+    parts: list[str] = []
+    primary = memory.get("primary_entity") or {}
+    if primary.get("display_name"):
+        parts.append(f"Focused record: {primary['display_name']} ({primary.get('kind', 'record')}).")
+    scope = memory.get("college_scope") or memory.get("validated_scope") or {}
+    if isinstance(scope, dict) and scope.get("display_name"):
+        parts.append(f"Validated scope: {scope['display_name']}.")
+    filters = memory.get("filters") or {}
+    if filters:
+        safe_filters = ", ".join(
+            f"{key.replace('_', ' ')}={value}"
+            for key, value in list(filters.items())[:8]
+            if value not in (None, "", [], {})
+        )
+        if safe_filters:
+            parts.append(f"Current filters: {safe_filters}.")
+    date_range = memory.get("date_range") or {}
+    if date_range:
+        parts.append(f"Date window: {json.dumps(date_range, sort_keys=True, default=str)}.")
+    last_read = memory.get("last_read") or {}
+    if last_read.get("tool"):
+        parts.append(f"Last validated read: {last_read['tool']}.")
+    unresolved = memory.get("unresolved") or []
+    if unresolved:
+        parts.append(f"Still unresolved: {', '.join(str(item) for item in unresolved[:4])}.")
+    if not parts:
+        return None
+    # 250 whitespace tokens is a conservative upper bound for this internal
+    # deterministic summary and avoids another provider request.
+    return " ".join(" ".join(parts).split()[:250])
+
+
+def _refresh_revalidated_memory(conversation, user: User, policy_version: int | None) -> None:
+    previous = dict(conversation.memory_state or {})
+    current = _memory_state(conversation.context_state or {}, {"tool_calls": []})
+    current["access_version"] = int(user.access_version)
+    current["policy_version"] = int(policy_version or 0)
+    previous_core = {
+        key: value for key, value in previous.items()
+        if key not in {"unresolved", "evidence_refs", "access_version", "policy_version"}
+    }
+    current_core = {
+        key: value for key, value in current.items()
+        if key not in {"access_version", "policy_version"}
+    }
+    versions_match = (
+        int(previous.get("access_version", user.access_version)) == int(user.access_version)
+        and int(previous.get("policy_version", policy_version or 0)) == int(policy_version or 0)
+    )
+    if versions_match and previous_core == current_core:
+        for key in ("unresolved", "evidence_refs"):
+            if previous.get(key):
+                current[key] = previous[key]
+    else:
+        conversation.memory_summary = None
+        conversation.memory_summary_through_message_id = None
+    conversation.memory_state = current
+
+
 def _record_intent_resolution(db, user, conversation_id, message, match, outcome, latency_ms):
     normalized, _ = normalize_language(message)
     query = match.query
@@ -628,10 +730,58 @@ def _record_intent_resolution(db, user, conversation_id, message, match, outcome
     ))
 
 
+def _attach_local_context(db: Session, user: User, match, context: dict | None) -> None:
+    if not match or not match.query or not context or match.query.entities:
+        return
+    client_subjects = {
+        "appointments", "invoices", "memberships", "checkins", "class_bookings", "measurements",
+        "goals", "workouts", "diets", "coaching", "signals", "commitments", "memories", "salon_profiles",
+    }
+    clinical_subjects = {
+        "encounters", "vitals", "allergies", "diagnoses", "prescriptions", "lab_orders", "lab_results", "dispenses",
+    }
+    context_kind = context.get("kind")
+    if (context_kind == "client" and match.query.subject in client_subjects) or (
+        context_kind == "catalog" and match.query.subject == "purchases"
+    ):
+        match.query.entities.append(ResolvedEntity(
+            kind=context_kind, id=context["id"], display_name=context.get("display_name") or "Business record",
+            confidence=1.0, profile_ref={"kind": context_kind, "id": context["id"]},
+        ))
+    elif context_kind == "patient" and match.query.subject in clinical_subjects:
+        match.query.entities.append(ResolvedEntity(
+            kind="patient", id=context["id"], display_name=context.get("display_name") or "Patient",
+            confidence=1.0, profile_ref=None,
+        ))
+    elif context_kind == "client" and match.query.subject in clinical_subjects and user_has_permissions(db, user, ["clinical.view"]):
+        patient = db.execute(select(PatientProfile).where(
+            PatientProfile.organization_id == user.organization_id,
+            PatientProfile.client_id == context["id"],
+        )).scalar_one_or_none()
+        if patient:
+            match.query.entities.append(ResolvedEntity(
+                kind="patient", id=patient.id, display_name=context.get("display_name") or "Patient",
+                confidence=1.0, profile_ref={"kind": "client", "id": context["id"]},
+            ))
+
+
 async def _process_chat(body, user, db, emit=None):
+    request_started = perf_counter()
+    first_event_latency_ms = None
+    raw_emit = emit
+    if raw_emit:
+        async def measured_emit(name, payload):
+            nonlocal first_event_latency_ms
+            if first_event_latency_ms is None and name in {"status", "text_delta", "block", "action"}:
+                first_event_latency_ms = int((perf_counter() - request_started) * 1000)
+            await raw_emit(name, payload)
+
+        emit = measured_emit
     assistant_preferences = load_assistant_preferences(db, user)
-    fast_reply = fast_conversation_reply(body.message, assistant_preferences)
+    fast_reply = None
     deterministic_plan = None
+    provider_plan = None
+    compilation = None
     context = _validated_context(db, user, body.context)
     if body.location_id: ensure_location(db, user, body.location_id)
     local_match = None
@@ -639,6 +789,7 @@ async def _process_chat(body, user, db, emit=None):
     organization = db.get(Organization, user.organization_id)
     industry = getattr(organization.industry, "value", organization.industry) if organization else None
     is_college = industry == "college"
+    use_v3 = _execution_v3_enabled(db, user.organization_id)
     college_policy_enabled = bool(is_college and policy_v2_enabled(db, user.organization_id))
     initial_access_version = user.access_version
     initial_policy_version = None
@@ -658,7 +809,7 @@ async def _process_chat(body, user, db, emit=None):
                 await original_emit(name, payload)
 
             emit = policy_guarded_emit
-    route = "conversation" if fast_reply else "college" if is_college else classify_route(body.message, context)
+    route = "college" if is_college else "business"
     key = body.idempotency_key or f"ai:{user.id}:{secrets.token_urlsafe(16)}"
     lock_key = f"ai-turn:{user.organization_id}:{user.id}:{key}"
     db.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(lock_key, 0))))
@@ -691,16 +842,38 @@ async def _process_chat(body, user, db, emit=None):
             retention_days = max(1, min(int((retention.value or {}).get("days", 90)), 3650)) if retention else 90
             conversation = ChatConversation(
                 organization_id=user.organization_id, user_id=user.id, title=body.message[:60],
-                provider="local" if fast_reply else "openai",
-                model="instant" if fast_reply else selected_model(db, user, route),
+                provider="openai",
+                model=selected_model(db, user, route),
                 expires_at=datetime.now(timezone.utc) + timedelta(days=retention_days),
             )
             db.add(conversation); db.flush()
         conversation.context_state = _revalidated_context_state(db, user, conversation.context_state)
         if body.location_id:
             conversation.context_state = {**conversation.context_state, "location_id": body.location_id}
+        _refresh_revalidated_memory(conversation, user, initial_policy_version)
         mode = _local_intent_mode(db, user.organization_id)
-        if not fast_reply and mode != "disabled" and not is_college:
+        if use_v3:
+            compilation = compile_turn(
+                db, user, body.message, industry=industry or "business",
+                location_id=body.location_id or conversation.context_state.get("location_id"),
+                context_state=conversation.context_state, explicit_context=context,
+                preferences=assistant_preferences,
+            )
+            fast_reply = compilation.fast_reply
+            local_match = compilation.local_match
+            _attach_local_context(db, user, local_match, context)
+            deterministic_plan = compilation.deterministic_plan
+            route = compilation.plan.domain
+            local_outcome = local_match.outcome if local_match else "disabled"
+            provider_plan = compilation.plan
+            if local_match:
+                _record_intent_resolution(
+                    db, user, conversation.id, body.message, local_match, local_outcome, 0,
+                )
+        else:
+            fast_reply = fast_conversation_reply(body.message, assistant_preferences)
+            route = "conversation" if fast_reply else "college" if is_college else classify_route(body.message, context)
+        if not use_v3 and not fast_reply and mode != "disabled" and not is_college:
             intent_started = perf_counter()
             local_match = interpret_business_query(
                 db, user, body.message,
@@ -741,7 +914,7 @@ async def _process_chat(body, user, db, emit=None):
                 db, user, conversation.id, body.message, local_match, local_outcome,
                 int((perf_counter() - intent_started) * 1000),
             )
-        if not fast_reply and not (
+        if not use_v3 and not fast_reply and not (
             local_match and local_outcome in {"local", "clarify"}
         ):
             candidate_plan = deterministic_query_plan(
@@ -811,7 +984,7 @@ async def _process_chat(body, user, db, emit=None):
             result = clarification_response(local_match.clarification)
             if emit:
                 await emit("text_delta", {"text": result["content"]})
-        elif deterministic_plan:
+        elif deterministic_plan and not use_v3:
             if emit:
                 await emit("status", {"message": "Checking current business information"})
             result = execute_deterministic_query(
@@ -824,18 +997,49 @@ async def _process_chat(body, user, db, emit=None):
                 await emit("status", {"message": "Reviewing this conversation"})
             recent_history = db.execute(select(ChatMessage).where(
                 ChatMessage.conversation_id == conversation.id,
-            ).order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc()).limit(60)).scalars().all()
+            ).order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc()).limit(8)).scalars().all()
             history = list(reversed(recent_history))
-            result = await run_ai_turn(
-                db,
-                user,
-                conversation,
-                history,
-                body.location_id,
-                context,
-                emit=emit,
-                preferences=assistant_preferences,
-            )
+            if use_v3:
+                # The V3 executor opens short, isolated sessions for tools and
+                # metadata. Snapshot the few fields it needs before commit so
+                # expired ORM objects cannot trigger synchronous refreshes on
+                # the async streaming loop while a provider is running.
+                executor_user = SimpleNamespace(
+                    id=str(user.id), organization_id=str(user.organization_id),
+                    first_name=user.first_name, designation=user.designation,
+                )
+                executor_conversation = SimpleNamespace(
+                    id=str(conversation.id),
+                    context_state=dict(conversation.context_state or {}),
+                    memory_state=dict(conversation.memory_state or {}),
+                    memory_summary=conversation.memory_summary,
+                )
+                executor_history = [
+                    SimpleNamespace(role=message.role, content=message.content)
+                    for message in history
+                ]
+                # Do not retain this request transaction while waiting on a
+                # provider or an embedding service.
+                db.commit()
+                result = await asyncio.wait_for(
+                    run_ai_turn_v3(
+                        db, executor_user, executor_conversation, executor_history,
+                        compiled_plan=provider_plan,
+                        context=context, emit=emit, preferences=assistant_preferences,
+                    ),
+                    timeout=settings.AI_TOTAL_TIMEOUT_SECONDS,
+                )
+            else:
+                result = await run_ai_turn(
+                    db,
+                    user,
+                    conversation,
+                    history,
+                    body.location_id,
+                    context,
+                    emit=emit,
+                    preferences=assistant_preferences,
+                )
         if college_policy_enabled:
             current_access_version = db.execute(
                 select(User.access_version).where(User.id == user.id).with_for_update()
@@ -866,6 +1070,10 @@ async def _process_chat(body, user, db, emit=None):
         db.add(assistant)
         turn_entities, turn_read = _turn_context(result, context)
         conversation.context_state = _updated_context_state(conversation.context_state, result, context)
+        conversation.memory_state = _memory_state(conversation.context_state, result)
+        conversation.memory_state["access_version"] = int(user.access_version)
+        conversation.memory_state["policy_version"] = int(initial_policy_version or 0)
+        conversation.memory_version = 3 if use_v3 else conversation.memory_version
         if local_match and local_outcome == "local" and local_match.query:
             conversation.context_state["local_query"] = local_match.query.model_dump(mode="json")
         assistant.meta = {**assistant.meta, "resolved_entities": conversation.context_state.get("recent_entities", []),
@@ -886,6 +1094,15 @@ async def _process_chat(body, user, db, emit=None):
             }
         turn.status = "completed"; turn.completed_at = datetime.now(timezone.utc); turn.error_code = None
         conversation.updated_at = datetime.now(timezone.utc)
+        conversation.model = result.get("model", conversation.model)
+        db.flush()
+        has_long_history = db.scalar(select(ChatMessage.id).where(
+            ChatMessage.conversation_id == conversation.id,
+        ).order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc()).offset(8).limit(1))
+        if has_long_history:
+            conversation.memory_summary = _memory_summary_text(conversation.memory_state)
+            conversation.memory_summary_through_message_id = assistant.id if conversation.memory_summary else None
+        conversation.provider = "local" if int(usage.get("provider_requests", 0)) == 0 else "openai"
         credits_used = 0
         settled_wallet = None
         if reservation:
@@ -903,6 +1120,38 @@ async def _process_chat(body, user, db, emit=None):
                 provider_cost_paise=charge.provider_cost_paise, rate_version=charge.rate_version,
             ))
             settled_wallet = settle_reservation(db, reservation, charge.credits)
+        execution = result.get("execution") or {}
+        db.add(AIExecutionTrace(
+            organization_id=user.organization_id,
+            user_id=user.id,
+            conversation_id=conversation.id,
+            turn_id=turn.id,
+            route=result.get("route", route),
+            planner_kind=execution.get("planner_kind") or (
+                compilation.plan.planner_kind if compilation else "legacy"
+            ),
+            planner_confidence=float(execution.get("planner_confidence") or (
+                compilation.plan.confidence if compilation else 0
+            )),
+            cache_status=execution.get("cache_status") or (
+                compilation.cache_status if compilation else "miss"
+            ),
+            stage_durations_ms=execution.get("durations_ms") or {
+                "total": int((perf_counter() - request_started) * 1000),
+            },
+            model_rounds=int(execution.get("model_rounds", 0)),
+            provider_requests=int(usage.get("provider_requests", 0)),
+            input_tokens=int(usage.get("input_tokens", 0)),
+            cached_input_tokens=int(usage.get("cached_input_tokens", 0)),
+            output_tokens=int(usage.get("output_tokens", 0)),
+            embedding_tokens=int(usage.get("embedding_tokens", 0)),
+            first_event_latency_ms=first_event_latency_ms,
+            total_latency_ms=int(usage.get("latency_ms") or ((perf_counter() - request_started) * 1000)),
+            verification_outcome=execution.get("verification_outcome", "not_required"),
+            policy_version=int(initial_policy_version or 0),
+            zero_credit=int(usage.get("provider_requests", 0)) == 0,
+            fallback_used=bool(execution.get("fallback_used", False)),
+        ))
         log_action(db, organization_id=user.organization_id, user_id=user.id, action="ai.chat",
                    resource_type="conversation", resource_id=conversation.id,
                    meta={"route": result.get("route"), "tools": [item["name"] for item in result.get("tool_calls", [])]})
@@ -931,6 +1180,20 @@ async def _process_chat(body, user, db, emit=None):
                 db.execute(delete(ChatMessage).where(ChatMessage.turn_id == failed_turn.id))
                 failed_turn.status = "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed"
                 failed_turn.error_code = "cancelled" if isinstance(exc, asyncio.CancelledError) else type(exc).__name__[:80]
+                db.add(AIExecutionTrace(
+                    organization_id=user.organization_id, user_id=user.id,
+                    conversation_id=failed_turn.conversation_id, turn_id=failed_turn.id,
+                    route=route, planner_kind=compilation.plan.planner_kind if compilation else "legacy",
+                    planner_confidence=compilation.plan.confidence if compilation else 0,
+                    cache_status=compilation.cache_status if compilation else "miss",
+                    stage_durations_ms={"total": int((perf_counter() - request_started) * 1000)},
+                    model_rounds=0, provider_requests=0, input_tokens=0, cached_input_tokens=0,
+                    output_tokens=0, embedding_tokens=0, first_event_latency_ms=first_event_latency_ms,
+                    total_latency_ms=int((perf_counter() - request_started) * 1000),
+                    verification_outcome="not_required", policy_version=int(initial_policy_version or 0),
+                    error_category="cancelled" if isinstance(exc, asyncio.CancelledError) else type(exc).__name__[:80],
+                    zero_credit=True, fallback_used=False,
+                ))
         db.commit()
         raise
 
@@ -1111,15 +1374,45 @@ def run_result_query(body: ResultQueryBody, user: User = Depends(require_ai_acce
 
 
 def _run_query_page(db: Session, user: User, query_spec: dict, result_type: str, cursor: str | None, limit: int):
-    try: offset = int(base64.urlsafe_b64decode(cursor.encode()).decode()) if cursor else 0
-    except Exception: raise HTTPException(422, "Invalid cursor")
-    result = (
-        run_local_result_page(db, user, query_spec, offset, limit)
-        if query_spec.get("engine") == "local_v1"
-        else run_result_page(db, user, query_spec, offset, limit)
-    )
-    next_offset = result.pop("next_offset", None)
-    result["next_cursor"] = base64.urlsafe_b64encode(str(next_offset).encode()).decode() if next_offset is not None else None
+    cursor_filters = {"query_spec": query_spec, "result_type": result_type}
+    try:
+        values = decode_cursor(
+            cursor, scope="ai.results", organization_id=user.organization_id, filters=cursor_filters,
+        )
+    except HTTPException as cursor_error:
+        # One-release compatibility for result links created before signed,
+        # tenant-bound cursors were introduced.
+        try:
+            padded = str(cursor or "") + "=" * (-len(str(cursor or "")) % 4)
+            legacy_offset = int(base64.urlsafe_b64decode(padded.encode("ascii")).decode("ascii"))
+            values = {"offset": max(0, legacy_offset), "legacy": True}
+        except (ValueError, TypeError, UnicodeDecodeError, base64.binascii.Error):
+            raise cursor_error
+    try:
+        offset = max(0, int((values or {}).get("offset", 0)))
+    except (TypeError, ValueError):
+        raise HTTPException(422, "The pagination cursor is invalid")
+    bounded_limit = page_size(limit, default=25, maximum=100)
+    if query_spec.get("engine") == "local_v1":
+        result = run_local_result_page(
+            db, user, query_spec, offset, bounded_limit,
+            cursor_values=values if values and not values.get("legacy") else None,
+        )
+        next_values = result.pop("next_values", None)
+        result.pop("next_offset", None)
+    else:
+        result = run_result_page(
+            db, user, query_spec, offset, bounded_limit,
+            cursor_values=values if values and not values.get("legacy") else None,
+            exact_count=False,
+        )
+        next_values = result.pop("next_values", None)
+        result.pop("next_offset", None)
+    result["next_cursor"] = encode_cursor(
+        scope="ai.results", organization_id=user.organization_id,
+        values=next_values, filters=cursor_filters,
+    ) if next_values is not None else None
+    result["has_more"] = next_values is not None
     result["query_spec"] = query_spec
     result["result_type"] = result_type
     return result
@@ -1169,7 +1462,8 @@ def delete_view(view_id: str, user: User = Depends(require_ai_access), db: Sessi
 def run_view(view_id: str, user: User = Depends(require_ai_access), db: Session = Depends(get_db)):
     row = tenant_get(db, AISavedView, view_id, user)
     if row.owner_user_id != user.id and row.visibility != "team": raise HTTPException(404, "View not found")
-    result = run_local_result_page(db, user, row.query_spec, 0, 25) if row.query_spec.get("engine") == "local_v1" else run_result_page(db, user, row.query_spec, 0, 25)
+    result_type = row.query_spec.get("subject") or "results"
+    result = _run_query_page(db, user, row.query_spec, result_type, None, 25)
     return {"view": _view_dict(row), "result": result}
 
 

@@ -67,8 +67,11 @@ def compose_response(summary: str, trace: list[dict]) -> AIResponseV1:
         elif result.get("items") is not None:
             items = result.get("items", [])[:5]
             block_type = "entity_cards" if presentation.get("display") == "cards" else "table"
+            exact_count = bool(result.get("count_is_exact", result.get("count") is not None))
             blocks.append(ResponseBlock(id=f"records-{index}", type=block_type, title=presentation.get("title") or "Results", data={
-                "items": items, "columns": presentation.get("columns", []), "total": result.get("count", len(items)),
+                "items": items, "columns": presentation.get("columns", []),
+                "total": result.get("count") if exact_count else None,
+                "count_is_exact": exact_count, "has_more": bool(result.get("has_more")),
                 "result_session_id": result.get("result_session_id"), "query_spec": result.get("query_spec"),
                 "entity_kind": presentation.get("entity_kind"),
             }))

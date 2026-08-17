@@ -105,10 +105,10 @@ def college_route_contract(path: str, method: str) -> RoutePolicyContract | None
     if path.startswith("/college/attendance"):
         return _contract("attendance", method)
     if path.startswith("/college/academic-evidence"):
-        return _contract("academics", method)
+        return _contract("assessments", method)
 
     academic_roots = (
-        "/college/academic-hierarchy", "/college/departments", "/college/programs",
+        "/college/academics/summary", "/college/academic-hierarchy", "/college/departments", "/college/programs",
         "/college/terms", "/college/cohorts", "/college/courses", "/college/offerings",
         "/college/{resource}",
     )
