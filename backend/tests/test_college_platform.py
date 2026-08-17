@@ -20,6 +20,7 @@ from app.services.college_access import CollegeAccess
 from app.services.college_imports import commit_run, stage_rows
 from app.services.college_placement import evaluate_eligibility
 from app.services.college_jobs import _public_host, _url_origin
+from conftest import delete_signup_challenge, verified_signup_body
 from server import app
 
 
@@ -32,7 +33,7 @@ def college_account():
     slug = f"test-college-{unique}"
     email = f"owner-{unique}@example.com"
     created_id = None
-    response = client.post("/api/auth/register", json={
+    body, challenge_id = verified_signup_body(client, {
         "organization_name": f"Test College {unique}",
         "organization_slug": slug,
         "industry": "college",
@@ -43,13 +44,14 @@ def college_account():
         "location_name": "Main Campus",
         "city": "Chennai",
     })
+    try:
+        response = client.post("/api/auth/register", json=body)
+    finally:
+        delete_signup_challenge(challenge_id)
     assert response.status_code == 201, response.text
     with SessionLocal() as db:
         organization = db.execute(select(Organization).where(Organization.slug == slug)).scalar_one()
-        owner = db.execute(select(User).where(User.organization_id == organization.id)).scalar_one()
-        owner.email_verified = True
         created_id = organization.id
-        db.commit()
 
     login = client.post("/api/auth/login", json={
         "email": email,
@@ -315,7 +317,45 @@ def test_enterprise_policy_scopes_hod_data_fields_dashboard_and_finance(college_
 
     hierarchy = client.get("/api/college/academic-hierarchy", headers=hod_headers)
     assert hierarchy.status_code == 200, hierarchy.text
-    assert {row["id"] for row in hierarchy.json()["departments"]} == {ece["id"]}
+    visible_departments = {
+        department["id"]
+        for batch in hierarchy.json()["items"]
+        for department in batch["departments"]
+    }
+    assert visible_departments == {ece["id"]}
+
+    student_hierarchy = client.get("/api/college/students/hierarchy", headers=hod_headers)
+    assert student_hierarchy.status_code == 200, student_hierarchy.text
+    visible_sections = {
+        section["id"]
+        for batch in student_hierarchy.json()["items"]
+        for department in batch["departments"]
+        for program in department["programs"]
+        for section in program["sections"]
+    }
+    assert visible_sections == {ece_a["id"]}
+
+    student_summary = client.get("/api/college/students/summary", headers=hod_headers, params={
+        "graduation_year": 2027,
+    })
+    assert student_summary.status_code == 200, student_summary.text
+    assert student_summary.json()["total_students"] == 1
+    assert student_summary.json()["capabilities"]["readiness"] is True
+    assert student_summary.json()["capabilities"]["placements"] is True
+
+    student_page = client.get("/api/college/students/page", headers=hod_headers, params={
+        "graduation_year": 2027,
+        "limit": 25,
+    })
+    assert student_page.status_code == 200, student_page.text
+    assert [row["id"] for row in student_page.json()["items"]] == [student_a["id"]]
+    assert student_page.json()["next_cursor"] is None
+    assert student_page.json()["capabilities"]["contact"] is False
+
+    outside_summary = client.get("/api/college/students/summary", headers=hod_headers, params={
+        "cohort_id": ece_b["id"],
+    })
+    assert outside_summary.status_code == 403
 
     cohorts = client.get("/api/college/cohorts/page", headers=hod_headers)
     assert cohorts.status_code == 200, cohorts.text
@@ -527,17 +567,18 @@ def test_college_workspace_connects_academics_students_attendance_results_and_fe
         "guardian": {"name": "Raman", "phone": "9884000099"},
     })
 
-    # A generic shared Client must not leak into a College student directory.
-    generic = _post("/api/clients", headers, {
+    # College tenants must use admission so no ownerless generic Client can be created.
+    generic = client.post("/api/clients", headers=headers, json={
         "first_name": "Not a student",
         "phone": "9884000002",
         "home_location_id": location_id,
     })
-    assert generic["id"] != student["client_id"]
+    assert generic.status_code == 409
+    assert "student admission" in generic.json()["detail"].lower()
 
     search = client.get("/api/search", headers=headers, params={"q": "Not a student"})
     assert search.status_code == 200, search.text
-    assert generic["id"] not in {row["id"] for row in search.json()["clients"]}
+    assert search.json()["clients"] == []
     student_search = client.get("/api/search", headers=headers, params={"q": "ADM-2026-001"})
     assert student_search.status_code == 200, student_search.text
     assert student["client_id"] in {row["id"] for row in student_search.json()["clients"]}

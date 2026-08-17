@@ -4,7 +4,7 @@ import { bindApiDispatch } from "@/lib/api";
 import { baseApi } from "./api/baseApi";
 import { setupCacheSync } from "./api/cacheSync";
 import authReducer from "./slices/authSlice";
-import preferencesReducer, { clearTenantPreferences, resetDashboardLayout, setAISidebarCollapsed, setAppearance, setDashboardLayout, setLocationId, setSidebarCompact } from "./slices/preferencesSlice";
+import preferencesReducer, { clearTenantPreferences, resetDashboardLayout, setAISidebarCollapsed, setAppearance, setDashboardLayout, setLocationId, setSidebarPinned } from "./slices/preferencesSlice";
 import aiReducer from "./slices/aiSlice";
 
 const persistence = createListenerMiddleware();
@@ -40,9 +40,11 @@ persistence.startListening({
 });
 
 persistence.startListening({
-  actionCreator: setSidebarCompact,
+  actionCreator: setSidebarPinned,
   effect: (_action, listenerApi) => {
-    localStorage.setItem("edvatiq.sidebar", listenerApi.getState().preferences.sidebarCompact ? "compact" : "full");
+    localStorage.removeItem("edvatiq.sidebar");
+    if (listenerApi.getState().preferences.sidebarPinned) sessionStorage.setItem("edvatiq.sidebar.pinned.v2", "true");
+    else sessionStorage.removeItem("edvatiq.sidebar.pinned.v2");
   },
 });
 

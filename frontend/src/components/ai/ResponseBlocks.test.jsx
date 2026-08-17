@@ -95,3 +95,22 @@ test("does not hide candidate cards when no result drawer can be opened", () => 
   expect(html).toContain("Second candidate");
   expect(html).not.toContain("View all");
 });
+
+test("hands large compact tables to the full AI even after a result session expires", () => {
+  const html = render(<ResponseBlocks compact message={{ blocks: [{
+    id: "students",
+    type: "table",
+    title: "Students",
+    data: {
+      total: 18,
+      query_spec: { tool: "college_students", graduation_year: 2027 },
+      items: [
+        { id: "1", name: "Anika" },
+        { id: "2", name: "Bharat" },
+      ],
+    },
+  }] }} onViewAll={() => {}} />);
+
+  expect(html).toContain("View all");
+  expect(html).toContain("18 found");
+});

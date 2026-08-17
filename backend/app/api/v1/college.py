@@ -19,7 +19,7 @@ from app.models import (
     Client, CollegeAssessment, CollegeAssessmentScore, CollegeAttendanceRecord,
     CollegeAttendanceSession, CollegeCareerProfile, CollegeCohort, CollegeCourse, CollegeCourseOffering,
     CollegeAttendanceSnapshot, CollegeClearanceSnapshot, CollegeDataConnector, CollegeDepartment,
-    CollegeExamCycle, CollegeExternalRecord, CollegeFeePlan, CollegeProgram,
+    CollegeExamCycle, CollegeExternalRecord, CollegeFeePlan, CollegePlacementApplication, CollegeProgram,
     CollegeStudentFee, CollegeStudentProfile, CollegeTerm, CollegeTermResult,
     Employee, Location, SaleInvoice, SaleLine, User,
 )
@@ -599,26 +599,28 @@ def college_references(
     }
 
 
-@router.get("/academic-hierarchy")
-def academic_hierarchy(
-    user: User = Depends(require_permissions("college.academics.view")),
-    db: Session = Depends(get_db),
-):
-    """Return the bounded batch, department, program, and section tree for student navigation."""
-    require_college(db, user)
-    access = resolve_college_access(db, user, "academics")
+def _shared_student_ids(primary: CollegeAccess, secondary: CollegeAccess) -> set[str] | None:
+    if primary.unrestricted and secondary.unrestricted:
+        return None
+    if primary.unrestricted:
+        return set(secondary.student_ids)
+    if secondary.unrestricted:
+        return set(primary.student_ids)
+    return set(primary.student_ids) & set(secondary.student_ids)
+
+
+def _hierarchy_payload(
+    db: Session,
+    user: User,
+    access: CollegeAccess,
+    *,
+    placement_access: CollegeAccess | None,
+) -> dict:
+    """Build one hierarchy while keeping optional placement aggregates independently scoped."""
     counts = (
         select(
             CollegeStudentProfile.cohort_id.label("cohort_id"),
             func.count(CollegeStudentProfile.id).label("student_count"),
-            func.sum(case(
-                (CollegeCareerProfile.placement_status.in_(("placed", "joined")), 1),
-                else_=0,
-            )).label("placed_count"),
-        )
-        .outerjoin(
-            CollegeCareerProfile,
-            CollegeCareerProfile.student_profile_id == CollegeStudentProfile.id,
         )
         .where(
             CollegeStudentProfile.organization_id == user.organization_id,
@@ -629,17 +631,58 @@ def academic_hierarchy(
         counts = counts.where(CollegeStudentProfile.id.in_(access.constrained_student_ids))
     counts = counts.group_by(CollegeStudentProfile.cohort_id).subquery()
 
+    placed_applications = select(
+        CollegePlacementApplication.student_profile_id.label("student_profile_id"),
+    ).where(
+        CollegePlacementApplication.organization_id == user.organization_id,
+        CollegePlacementApplication.outcome.in_(("selected", "offered", "joined")),
+    ).distinct().subquery()
+    placement_counts = (
+        select(
+            CollegeStudentProfile.cohort_id.label("cohort_id"),
+            func.count(CollegeStudentProfile.id).label("placement_scope_count"),
+            func.sum(case(
+                (or_(
+                    CollegeCareerProfile.placement_status.in_(("placed", "joined")),
+                    placed_applications.c.student_profile_id.is_not(None),
+                ), 1),
+                else_=0,
+            )).label("placed_count"),
+        )
+        .outerjoin(
+            CollegeCareerProfile,
+            CollegeCareerProfile.student_profile_id == CollegeStudentProfile.id,
+        )
+        .outerjoin(
+            placed_applications,
+            placed_applications.c.student_profile_id == CollegeStudentProfile.id,
+        )
+        .where(
+            CollegeStudentProfile.organization_id == user.organization_id,
+            CollegeStudentProfile.status == "active",
+        )
+    )
+    if placement_access is None:
+        placement_counts = placement_counts.where(false())
+    else:
+        shared_ids = _shared_student_ids(access, placement_access)
+        if shared_ids is not None:
+            placement_counts = placement_counts.where(CollegeStudentProfile.id.in_(shared_ids))
+    placement_counts = placement_counts.group_by(CollegeStudentProfile.cohort_id).subquery()
+
     statement = (
         select(
             CollegeCohort,
             CollegeProgram,
             CollegeDepartment,
             func.coalesce(counts.c.student_count, 0).label("student_count"),
-            func.coalesce(counts.c.placed_count, 0).label("placed_count"),
+            func.coalesce(placement_counts.c.placement_scope_count, 0).label("placement_scope_count"),
+            func.coalesce(placement_counts.c.placed_count, 0).label("placed_count"),
         )
         .join(CollegeProgram, CollegeProgram.id == CollegeCohort.program_id)
         .join(CollegeDepartment, CollegeDepartment.id == CollegeProgram.department_id)
         .outerjoin(counts, counts.c.cohort_id == CollegeCohort.id)
+        .outerjoin(placement_counts, placement_counts.c.cohort_id == CollegeCohort.id)
         .where(
             CollegeCohort.organization_id == user.organization_id,
             CollegeCohort.is_active.is_(True),
@@ -662,14 +705,16 @@ def academic_hierarchy(
     section_count = 0
     total_students = 0
     total_placed = 0
-    for cohort, program, department, student_count, placed_count in rows:
+    for cohort, program, department, student_count, placement_scope_count, placed_count in rows:
         year = int(cohort.graduation_year)
         students = int(student_count or 0)
+        placement_students = int(placement_scope_count or 0)
         placed = int(placed_count or 0)
         batch = batches.setdefault(year, {
             "graduation_year": year,
             "label": f"Class of {year}",
             "student_count": 0,
+            "placement_scope_count": 0,
             "placed_count": 0,
             "unplaced_count": 0,
             "_departments": {},
@@ -679,6 +724,7 @@ def academic_hierarchy(
             "name": department.name,
             "code": department.code,
             "student_count": 0,
+            "placement_scope_count": 0,
             "placed_count": 0,
             "unplaced_count": 0,
             "_programs": {},
@@ -689,6 +735,7 @@ def academic_hierarchy(
             "code": program.code,
             "degree_type": program.degree_type,
             "student_count": 0,
+            "placement_scope_count": 0,
             "placed_count": 0,
             "unplaced_count": 0,
             "sections": [],
@@ -705,14 +752,16 @@ def academic_hierarchy(
             "graduation_year": year,
             "current_semester": cohort.current_semester,
             "student_count": students,
-            "placed_count": placed,
-            "unplaced_count": max(0, students - placed),
+            "placement_scope_count": placement_students,
+            "placed_count": placed if placement_access is not None else None,
+            "unplaced_count": max(0, placement_students - placed) if placement_access is not None else None,
         }
         program_node["sections"].append(section)
         for node in (program_node, department_node, batch):
             node["student_count"] += students
+            node["placement_scope_count"] += placement_students
             node["placed_count"] += placed
-            node["unplaced_count"] += max(0, students - placed)
+            node["unplaced_count"] += max(0, placement_students - placed)
         department_ids.add(department.id)
         section_count += 1
         total_students += students
@@ -735,6 +784,20 @@ def academic_hierarchy(
         batch["section_count"] = sum(row["section_count"] for row in departments)
         items.append(batch)
 
+    if placement_access is None:
+        for batch in items:
+            batch["placement_scope_count"] = None
+            batch["placed_count"] = None
+            batch["unplaced_count"] = None
+            for department in batch["departments"]:
+                department["placement_scope_count"] = None
+                department["placed_count"] = None
+                department["unplaced_count"] = None
+                for program in department["programs"]:
+                    program["placement_scope_count"] = None
+                    program["placed_count"] = None
+                    program["unplaced_count"] = None
+
     academic_years = list(db.execute(
         select(CollegeTerm.academic_year)
         .where(CollegeTerm.organization_id == user.organization_id)
@@ -749,10 +812,57 @@ def academic_hierarchy(
             "department_count": len(department_ids),
             "section_count": section_count,
             "student_count": total_students,
-            "placed_count": total_placed,
-            "unplaced_count": max(0, total_students - total_placed),
+            "placement_scope_count": sum(
+                int(batch.get("placement_scope_count") or 0) for batch in items
+            ) if placement_access is not None else None,
+            "placed_count": total_placed if placement_access is not None else None,
+            "unplaced_count": sum(
+                int(batch.get("unplaced_count") or 0) for batch in items
+            ) if placement_access is not None else None,
         },
+        "capabilities": {"placement": placement_access is not None},
     }
+
+
+def _optional_hierarchy_placement_access(db: Session, user: User) -> CollegeAccess | None:
+    if "college.placements.view" not in get_user_permissions(db, user):
+        return None
+    try:
+        return resolve_college_access(db, user, "placements")
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_403_FORBIDDEN:
+            return None
+        raise
+
+
+@router.get("/academic-hierarchy")
+def academic_hierarchy(
+    user: User = Depends(require_permissions("college.academics.view")),
+    db: Session = Depends(get_db),
+):
+    """Return the bounded academic hierarchy for structure and legacy consumers."""
+    require_college(db, user)
+    return _hierarchy_payload(
+        db,
+        user,
+        resolve_college_access(db, user, "academics"),
+        placement_access=_optional_hierarchy_placement_access(db, user),
+    )
+
+
+@router.get("/students/hierarchy")
+def student_navigation_hierarchy(
+    user: User = Depends(require_permissions("college.students.view")),
+    db: Session = Depends(get_db),
+):
+    """Return only hierarchy branches reachable from the caller's student policy."""
+    require_college(db, user)
+    return _hierarchy_payload(
+        db,
+        user,
+        resolve_college_access(db, user, "students"),
+        placement_access=_optional_hierarchy_placement_access(db, user),
+    )
 
 
 @router.get("/departments/page")

@@ -24,18 +24,20 @@ from app.ai.local_executor import clarification_response, execute_local_query, r
 from app.ai.local_intent import ENGINE_VERSION, interpret_business_query, normalize_language
 from app.ai.personalization import load_assistant_preferences
 from app.ai.tools import run_result_page
-from app.core.database import get_db
+from app.core.database import SessionLocal, get_db
 from app.schemas.validation import RequestModel
 from app.core.deps import require_permissions
 from app.models import (
     AIAction, AIIntentResolution, AIMessageFeedback, AIResultSession, AISavedView, AIUsage, AIWallet,
-    ChatConversation, ChatMessage, ChatTurn, Client, Document, FeatureFlag, Organization,
+    ChatConversation, ChatMessage, ChatTurn, Client, CollegeCohort, CollegeDepartment, CollegeProgram,
+    Document, FeatureFlag, Organization,
     PatientProfile, PlatformSetting, Setting, User,
 )
 from app.schemas import ChatMessageOut, ChatRequest, ConversationOut
 from app.services.audit import log_action
 from app.services.access_policy import policy_v2_enabled, resolve_policy_context
 from app.services.business_access import ensure_client_access, ensure_location, tenant_get
+from app.services.college_access import resolve_college_access
 from app.services.rbac import user_has_permissions
 from app.services.entity_resolution import validate_entity_ref
 from app.services.realtime import publish_change
@@ -358,10 +360,116 @@ def _conversation_summary(db, conversation):
             "pinned_at": conversation.pinned_at, "archived_at": conversation.archived_at}
 
 
+def _context_identifier(value, label):
+    if value is None or value == "":
+        return None
+    value = str(value).strip()
+    if not value or len(value) > 80:
+        raise HTTPException(422, f"{label} is invalid")
+    return value
+
+
+def _validated_college_scope(db, user, context):
+    organization = db.get(Organization, user.organization_id)
+    industry = getattr(getattr(organization, "industry", None), "value", getattr(organization, "industry", None))
+    if industry != "college":
+        raise HTTPException(404, "College scope not found")
+
+    graduation_year = context.get("graduation_year")
+    if graduation_year not in (None, ""):
+        try:
+            graduation_year = int(graduation_year)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, "Graduation year is invalid") from exc
+        if graduation_year < 2000 or graduation_year > 2200:
+            raise HTTPException(422, "Graduation year is invalid")
+    else:
+        graduation_year = None
+
+    department_id = _context_identifier(context.get("department_id"), "Department")
+    program_id = _context_identifier(context.get("program_id"), "Program")
+    cohort_id = _context_identifier(context.get("cohort_id"), "Cohort")
+    raw_cohort_ids = context.get("cohort_ids") or []
+    if not isinstance(raw_cohort_ids, list) or len(raw_cohort_ids) > 50:
+        raise HTTPException(422, "Cohort selection is invalid")
+    cohort_ids = list(dict.fromkeys(
+        _context_identifier(value, "Cohort") for value in raw_cohort_ids
+    ))
+    cohort_ids = [value for value in cohort_ids if value]
+    if cohort_id and cohort_id not in cohort_ids:
+        cohort_ids.append(cohort_id)
+    if not any([graduation_year, department_id, program_id, cohort_ids]):
+        raise HTTPException(422, "College context requires an academic scope")
+
+    access = resolve_college_access(db, user, "students")
+    statement = (
+        select(CollegeCohort, CollegeProgram, CollegeDepartment)
+        .join(CollegeProgram, CollegeProgram.id == CollegeCohort.program_id)
+        .join(CollegeDepartment, CollegeDepartment.id == CollegeProgram.department_id)
+        .where(
+            CollegeCohort.organization_id == user.organization_id,
+            CollegeProgram.organization_id == user.organization_id,
+            CollegeDepartment.organization_id == user.organization_id,
+            CollegeCohort.is_active.is_(True),
+            CollegeProgram.is_active.is_(True),
+            CollegeDepartment.is_active.is_(True),
+        )
+    )
+    if graduation_year:
+        statement = statement.where(CollegeCohort.graduation_year == graduation_year)
+    if department_id:
+        statement = statement.where(CollegeDepartment.id == department_id)
+    if program_id:
+        statement = statement.where(CollegeProgram.id == program_id)
+    if cohort_ids:
+        statement = statement.where(CollegeCohort.id.in_(cohort_ids))
+    if not access.unrestricted:
+        statement = statement.where(CollegeCohort.id.in_(set(access.cohort_ids)))
+
+    rows = list(db.execute(statement.order_by(
+        CollegeCohort.graduation_year,
+        CollegeProgram.code,
+        CollegeCohort.section,
+        CollegeCohort.id,
+    )).all())
+    if not rows or (cohort_ids and {row[0].id for row in rows} != set(cohort_ids)):
+        # Scope misses use 404 so callers cannot enumerate another user's College reach.
+        raise HTTPException(404, "College scope not found")
+
+    first_cohort, first_program, first_department = rows[0]
+    if cohort_id and len(rows) == 1:
+        display_name = f"{first_program.code} {first_cohort.graduation_year} / {first_cohort.section}"
+        scope_id = f"cohort:{first_cohort.id}"
+    elif program_id:
+        display_name = first_program.name
+        scope_id = f"program:{first_program.id}"
+    elif department_id:
+        display_name = first_department.name
+        scope_id = f"department:{first_department.id}"
+    elif graduation_year:
+        display_name = f"{graduation_year} batch"
+        scope_id = f"graduation:{graduation_year}"
+    else:
+        display_name = f"{len(rows)} selected cohorts"
+        scope_id = f"cohorts:{len(rows)}"
+    return {
+        "kind": "college_scope",
+        "id": scope_id,
+        "display_name": display_name,
+        "graduation_year": graduation_year,
+        "department_id": department_id,
+        "program_id": program_id,
+        "cohort_id": cohort_id,
+        "cohort_ids": cohort_ids,
+    }
+
+
 def _validated_context(db, user, context):
     if not context: return None
     kind, row_id = context.get("kind"), context.get("id")
     if not kind or not row_id: raise HTTPException(422, "Context requires kind and id")
+    if kind == "college_scope":
+        return _validated_college_scope(db, user, context)
     if kind == "document":
         from app.ai.retrieval import document_access_conditions
         document = db.execute(select(Document).where(Document.id == row_id, *document_access_conditions(db, user))).scalar_one_or_none()
@@ -385,7 +493,7 @@ def _entity_ref(item):
 
 def _turn_context(result, explicit=None):
     entities = []
-    if explicit and explicit.get("kind") != "document": entities.append(_entity_ref(explicit))
+    if explicit and explicit.get("kind") not in {"document", "college_scope"}: entities.append(_entity_ref(explicit))
     last_read = None
     for call in result.get("tool_calls", []):
         name, arguments, tool_result = call.get("name"), call.get("arguments") or {}, call.get("result") or {}
@@ -428,8 +536,11 @@ def _updated_context_state(previous, result, explicit=None):
                                              "id": (call.get("arguments") or {}).get("id")})
                                for call in result.get("tool_calls", []) if call.get("name") == "entity_workspace"), None)
     state["primary_entity"] = unique_selected or workspace_selected or (
-        _entity_ref(explicit) if explicit and explicit.get("kind") != "document" else previous.get("primary_entity")
+        _entity_ref(explicit) if explicit and explicit.get("kind") not in {"document", "college_scope"} else previous.get("primary_entity")
     )
+    college_scope = explicit if explicit and explicit.get("kind") == "college_scope" else previous.get("college_scope")
+    if college_scope:
+        state["college_scope"] = college_scope
     if last_read: state["last_read"] = last_read
     arguments = (last_read or {}).get("arguments") or {}
     filters = {key: value for key, value in arguments.items() if key not in {"location_id", "days"} and value is not None}
@@ -461,6 +572,11 @@ def _revalidated_context_state(db, user, state):
     if state.get("last_read"): result["last_read"] = state["last_read"]
     for key in ["filters", "date_range"]:
         if state.get(key): result[key] = state[key]
+    if state.get("college_scope"):
+        try:
+            result["college_scope"] = _validated_college_scope(db, user, state["college_scope"])
+        except HTTPException:
+            result.pop("last_read", None)
     if state.get("location_id"):
         try:
             ensure_location(db, user, state["location_id"])
@@ -635,8 +751,13 @@ async def _process_chat(body, user, db, emit=None):
             )
             if is_college:
                 arguments = (candidate_plan or {}).get("arguments") or {}
+                has_college_scope = bool(
+                    (context or {}).get("kind") == "college_scope"
+                    or conversation.context_state.get("college_scope")
+                )
                 deterministic_plan = candidate_plan if (
-                    candidate_plan
+                    not has_college_scope
+                    and candidate_plan
                     and candidate_plan.get("tool") == "business_records"
                     and arguments.get("subject") == "students"
                     and set(arguments).issubset({"subject", "location_id", "status"})
@@ -909,7 +1030,12 @@ def _event(name, payload):
 
 
 @router.post("/chat/stream")
-async def chat_stream(body: ChatRequest, user: User = Depends(require_ai_access), db: Session = Depends(get_db)):
+async def chat_stream(body: ChatRequest, user: User = Depends(require_ai_access)):
+    # Request dependencies may be released before StreamingResponse starts iterating.
+    # Keep only scalar identity here and give the producer its own session lifecycle.
+    stream_user_id = user.id
+    stream_organization_id = user.organization_id
+
     async def events():
         queue = asyncio.Queue()
 
@@ -918,7 +1044,17 @@ async def chat_stream(body: ChatRequest, user: User = Depends(require_ai_access)
 
         async def produce():
             try:
-                result = await _process_chat(body, user, db, emit=emit)
+                with SessionLocal() as stream_db:
+                    stream_user = stream_db.get(User, stream_user_id)
+                    if (
+                        not stream_user
+                        or not stream_user.is_active
+                        or stream_user.organization_id != stream_organization_id
+                    ):
+                        raise HTTPException(401, "Authentication session is no longer active")
+                    if not user_has_permissions(stream_db, stream_user, ["ai.use"]):
+                        raise HTTPException(403, "Edvatiq AI access is no longer available")
+                    result = await _process_chat(body, stream_user, stream_db, emit=emit)
                 for block in result["message"].get("blocks", []):
                     if block.get("type") != "text":
                         await emit("block", block)
@@ -927,7 +1063,11 @@ async def chat_stream(body: ChatRequest, user: User = Depends(require_ai_access)
                 await emit("complete", result)
             except Exception as exc:
                 if not isinstance(exc, HTTPException):
-                    logger.exception("ai_stream_failed organization=%s user=%s", user.organization_id, user.id)
+                    logger.exception(
+                        "ai_stream_failed organization=%s user=%s",
+                        stream_organization_id,
+                        stream_user_id,
+                    )
                 message = exc.detail if isinstance(exc, HTTPException) and isinstance(exc.detail, str) else "Edvatiq could not complete that request."
                 await emit("error", {"message": message})
             finally:

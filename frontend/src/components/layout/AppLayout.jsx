@@ -1,16 +1,15 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useDispatch, useSelector } from "react-redux";
 import {
-  Bell, Books, Briefcase, CalendarBlank, CaretDoubleLeft, CaretDown, ClockCounterClockwise,
-  Command, DotsThreeCircle, Gear, List, MagnifyingGlass, Package, Plus, Receipt,
+  Bell, Books, Briefcase, CalendarBlank, CaretDown, CircleNotch, ClockCounterClockwise,
+  Command, Gear, List, MagnifyingGlass, Package, Plus, PushPin, PushPinSlash, Receipt,
   ShoppingCart, SignOut, Sparkle, Storefront, UserCircle, UserPlus, Wallet, X,
 } from "@phosphor-icons/react";
 import { useAuth } from "@/contexts/AuthContext";
 import { useBusiness } from "@/contexts/BusinessContext";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import {
@@ -22,46 +21,85 @@ import {
 } from "@/components/ui/dropdown-menu";
 import DataHealthBanner from "@/components/DataHealthBanner";
 import RealtimeSync from "@/components/RealtimeSync";
-import AIQuickLauncher from "@/components/ai/AIQuickLauncher";
+import { useAIConversation } from "@/components/ai/AIConversationProvider";
 import BrandLogo from "@/components/brand/BrandLogo";
 import { EntityAvatar, EntityProfileLink } from "@/components/entities/EntityProfile";
 import { profileRef } from "@/lib/profileNavigation";
 import { useGetQuery } from "@/store/api/baseApi";
 import { useGetNotificationSummaryQuery } from "@/features/notifications/notificationsApi";
 import { QUERY_POLICIES, withSkip } from "@/store/api/queryPolicies";
-import { selectSidebarCompact, setSidebarCompact } from "@/store/slices/preferencesSlice";
+import { selectSidebarPinned, setSidebarPinned } from "@/store/slices/preferencesSlice";
 import { clientLabel, routeForPath, routeLabel, visibleRoutes } from "@/app/routeManifest";
 import { cn } from "@/lib/utils";
 
 const RECENT_KEY = "edvatiq.command.recent";
+const loadFloatingAssistant = () => import("@/components/ai/FloatingAssistantPanel");
+const FloatingAssistantPanel = lazy(loadFloatingAssistant);
 export const PRIMARY_SIDEBAR_WIDTH_CLASS = "w-[232px]";
+export const PRIMARY_SIDEBAR_COLLAPSED_WIDTH_CLASS = "w-[72px]";
+
+export function groupSidebarRoutes(routes) {
+  const visible = routes.filter((route) => !route.hideFromSidebar);
+  return {
+    workspace: visible.filter((route) => route.group === "primary" || route.group === "more"),
+    administration: visible.filter((route) => route.group === "admin"),
+  };
+}
+
+export function resolvePrimarySidebarState({ wide, pinned, hovered, focused }) {
+  const expanded = Boolean(wide && (pinned || hovered || focused));
+  return {
+    expanded,
+    compact: !expanded,
+    widthClass: expanded ? PRIMARY_SIDEBAR_WIDTH_CLASS : PRIMARY_SIDEBAR_COLLAPSED_WIDTH_CLASS,
+  };
+}
 
 export default function AppLayout({ children }) {
   const dispatch = useDispatch();
-  const compact = useSelector(selectSidebarCompact);
+  const sidebarPinned = useSelector(selectSidebarPinned);
   const { user, organization: authOrg, can, logout } = useAuth();
   const { organization, locations, locationId, setLocationId, hasModule, wallet, entitlements } = useBusiness();
+  const {
+    streaming: aiStreaming,
+    streamStatus: aiStreamStatus,
+    lastCompletedMessageId,
+  } = useAIConversation();
   const org = organization || authOrg;
   const current = useLocation();
   const navigate = useNavigate();
   const wide = useWideLayout();
-  const rail = compact || !wide;
+  const sidebarRef = useRef(null);
+  const [sidebarHovered, setSidebarHovered] = useState(false);
+  const [sidebarFocused, setSidebarFocused] = useState(false);
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [commandOpen, setCommandOpen] = useState(false);
   const [aiOpen, setAiOpen] = useState(false);
-  const [moreOpen, setMoreOpen] = useState(false);
+  const [lastSeenAssistantMessageId, setLastSeenAssistantMessageId] = useState(null);
   const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
 
   const routes = useMemo(() => visibleRoutes({ industry: org?.industry, can, hasModule }), [can, hasModule, org?.industry]);
-  const primary = routes.filter((route) => route.group === "primary");
-  const secondary = routes.filter((route) => route.group === "more");
-  const admin = routes.filter((route) => route.group === "admin");
+  const sidebarGroups = useMemo(() => groupSidebarRoutes(routes), [routes]);
+  const primary = sidebarGroups.workspace.filter((route) => route.group === "primary");
+  const { expanded: sidebarExpanded, compact: rail, widthClass: sidebarWidthClass } = resolvePrimarySidebarState({
+    wide,
+    pinned: sidebarPinned,
+    hovered: sidebarHovered,
+    focused: sidebarFocused,
+  });
   const currentRoute = routeForPath(current.pathname, org?.industry);
+  const aiAvailable = can("ai.use") && hasModule("ai");
+  const isAIWorkspace = current.pathname.startsWith("/app/ai");
+  const assistantUnread = Boolean(
+    lastCompletedMessageId
+    && lastCompletedMessageId !== lastSeenAssistantMessageId
+    && !aiOpen
+    && !isAIWorkspace,
+  );
   const title = currentRoute ? routeLabel(currentRoute, org?.industry) : "Edvatiq";
   const secondaryWorkspace = currentRoute?.layout?.startsWith("secondary");
   const fixedSecondaryWorkspace = currentRoute?.layout === "secondary-fixed";
-  const activeSecondary = currentRoute?.group === "more";
   const industryRoute = primary.find((route) => route.industries?.includes(org?.industry));
   const mobileRoutes = [
     primary.find((route) => route.key === "home"),
@@ -78,9 +116,34 @@ export default function AppLayout({ children }) {
     setSearch("");
     setCommandOpen(false);
     setMobileMoreOpen(false);
+    setSidebarHovered(false);
+    setSidebarFocused(false);
   }, [current.pathname]);
+  useEffect(() => {
+    if (isAIWorkspace || !aiAvailable) setAiOpen(false);
+  }, [aiAvailable, isAIWorkspace]);
+  useEffect(() => {
+    if ((aiOpen || isAIWorkspace) && lastCompletedMessageId) {
+      setLastSeenAssistantMessageId(lastCompletedMessageId);
+    }
+  }, [aiOpen, isAIWorkspace, lastCompletedMessageId]);
   useEffect(() => { document.title = `${title} | Edvatiq`; }, [title]);
-  useEffect(() => { if (activeSecondary) setMoreOpen(true); }, [activeSecondary]);
+  useEffect(() => {
+    if (wide) return;
+    setSidebarHovered(false);
+    setSidebarFocused(false);
+  }, [wide]);
+  useEffect(() => {
+    if (!wide || sidebarPinned || !sidebarExpanded) return undefined;
+    const closeOnEscape = (event) => {
+      if (event.key !== "Escape") return;
+      setSidebarHovered(false);
+      setSidebarFocused(false);
+      if (sidebarRef.current?.contains(document.activeElement)) document.activeElement?.blur?.();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [sidebarExpanded, sidebarPinned, wide]);
   useEffect(() => {
     const openCommand = (event) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
@@ -102,29 +165,57 @@ export default function AppLayout({ children }) {
   if (user?.is_super_admin) return children;
 
   const closeCommand = () => { setSearch(""); setCommandOpen(false); };
+  const closeTemporarySidebar = () => {
+    if (sidebarPinned || !wide) return;
+    setSidebarHovered(false);
+    setSidebarFocused(false);
+  };
+  const handleSidebarBlur = (event) => {
+    if (!event.currentTarget.contains(event.relatedTarget)) setSidebarFocused(false);
+  };
+  const toggleSidebarPin = (event) => {
+    dispatch(setSidebarPinned(!sidebarPinned));
+    if (sidebarPinned) {
+      setSidebarFocused(false);
+      event.currentTarget.blur();
+    }
+  };
+  const notificationsActive = currentRoute?.key === "notifications";
   return <div className="flex h-screen overflow-hidden bg-background text-foreground">
     <RealtimeSync />
-    <aside className={cn(
-      "relative hidden shrink-0 flex-col border-r bg-sidebar text-sidebar-foreground transition-[width] duration-200 md:flex",
-      rail ? "w-[72px]" : PRIMARY_SIDEBAR_WIDTH_CLASS,
-    )}>
-      <Brand compact={rail} industry={org?.industry} />
-      <nav aria-label="Main navigation" className="premium-scrollbar flex-1 overflow-y-auto px-2.5 py-3">
-        <div className="space-y-1">{primary.map((route) => <NavItem key={route.key} route={route} compact={rail} industry={org?.industry} />)}</div>
-        {!!secondary.length && <Collapsible open={moreOpen} onOpenChange={setMoreOpen} className="mt-1">
-          <CollapsibleTrigger className={cn("nav-item nav-item-idle w-full", rail ? "justify-center px-0" : "gap-3", activeSecondary && "bg-secondary text-sidebar-foreground")} title={rail ? "More" : undefined}>
-            <DotsThreeCircle size={19} weight="duotone" />{!rail && <><span className="flex-1 text-left">More</span><CaretDown size={13} className={cn("transition-transform", moreOpen && "rotate-180")} /></>}
-          </CollapsibleTrigger>
-          <CollapsibleContent className="mt-1 space-y-1">{secondary.map((route) => <NavItem key={route.key} route={route} compact={rail} industry={org?.industry} subdued />)}</CollapsibleContent>
-        </Collapsible>}
-        {!!admin.length && <div className="mt-6 space-y-1">
-          {!rail && <div className="px-3 pb-2 text-[9px] font-bold uppercase tracking-[0.16em] text-sidebar-muted/70">Administration</div>}
-          {admin.map((route) => <NavItem key={route.key} route={route} compact={rail} industry={org?.industry} />)}
-        </div>}
-      </nav>
-      {wide && <button onClick={() => dispatch(setSidebarCompact(!compact))} aria-label={compact ? "Expand navigation" : "Collapse navigation"} className="absolute -right-3 top-[5.2rem] z-10 grid h-7 w-7 place-items-center rounded-full border bg-card text-foreground shadow-sm transition-colors hover:bg-secondary">
-        <CaretDoubleLeft size={13} className={cn("transition-transform", compact && "rotate-180")} />
+    <aside
+      ref={sidebarRef}
+      data-primary-sidebar="true"
+      data-expanded={sidebarExpanded ? "true" : "false"}
+      data-pinned={sidebarPinned ? "true" : "false"}
+      onMouseEnter={() => { if (wide) setSidebarHovered(true); }}
+      onMouseLeave={() => setSidebarHovered(false)}
+      onFocusCapture={() => { if (wide) setSidebarFocused(true); }}
+      onBlurCapture={handleSidebarBlur}
+      className={cn(
+        "relative hidden shrink-0 flex-col border-r bg-sidebar text-sidebar-foreground transition-[width] duration-200 ease-out motion-reduce:transition-none md:flex",
+        sidebarWidthClass,
+      )}
+    >
+      <Brand compact={rail} industry={org?.industry} onNavigate={closeTemporarySidebar} />
+      {wide && sidebarExpanded && <button
+        type="button"
+        onClick={toggleSidebarPin}
+        aria-label={sidebarPinned ? "Unpin navigation" : "Pin navigation for this session"}
+        aria-pressed={sidebarPinned}
+        title={sidebarPinned ? "Unpin navigation" : "Keep navigation open for this session"}
+        className="absolute -right-3 top-[5.2rem] z-20 grid h-7 w-7 place-items-center rounded-full border bg-card text-muted-foreground shadow-sm transition-colors hover:bg-secondary hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        {sidebarPinned ? <PushPinSlash size={13} weight="bold" /> : <PushPin size={13} weight="bold" />}
       </button>}
+      <nav aria-label="Main navigation" className="premium-scrollbar flex-1 overflow-y-auto px-2.5 py-3">
+        <SidebarNavGroup label="Workspace" compact={rail}>
+          {sidebarGroups.workspace.map((route) => <NavItem key={route.key} route={route} compact={rail} industry={org?.industry} onClick={closeTemporarySidebar} />)}
+        </SidebarNavGroup>
+        {!!sidebarGroups.administration.length && <SidebarNavGroup label="Administration" compact={rail} separated>
+          {sidebarGroups.administration.map((route) => <NavItem key={route.key} route={route} compact={rail} industry={org?.industry} onClick={closeTemporarySidebar} />)}
+        </SidebarNavGroup>}
+      </nav>
       {can("ai.use") && hasModule("ai") && <SidebarWalletCard wallet={wallet} plan={entitlements?.plan} compact={rail} canManage={can("billing.view")} />}
       <SidebarAccount compact={rail} user={user} org={org} navigate={navigate} logout={logout} />
     </aside>
@@ -143,8 +234,18 @@ export default function AppLayout({ children }) {
         </button>
         {locations.length > 1 && <Select value={locationId || ""} onValueChange={setLocationId}><SelectTrigger aria-label="Current location" className="hidden h-10 w-40 rounded-xl xl:flex"><Storefront size={16} /><SelectValue /></SelectTrigger><SelectContent>{locations.map((location) => <SelectItem value={location.id} key={location.id}>{location.name}</SelectItem>)}</SelectContent></Select>}
         <QuickCreate can={can} industry={org?.industry} navigate={navigate} />
-        <button onClick={() => navigate("/app/notifications")} aria-label="Notifications" className="relative grid h-10 w-10 shrink-0 place-items-center rounded-xl border bg-card text-muted-foreground shadow-sm transition-colors hover:bg-secondary hover:text-foreground"><Bell size={18} />{unread > 0 && <span className="absolute -right-1 -top-1 grid h-5 min-w-5 place-items-center rounded-full bg-accent px-1 text-[10px] font-bold text-accent-foreground">{unread > 99 ? "99+" : unread}</span>}</button>
-        {can("ai.use") && hasModule("ai") && <Button onClick={() => setAiOpen(true)} className="hidden gap-2 lg:flex"><Sparkle weight="fill" /><span>Ask Edvatiq</span></Button>}
+        <button onClick={() => navigate("/app/notifications")} aria-label="Notifications" aria-current={notificationsActive ? "page" : undefined} className={cn("relative grid h-10 w-10 shrink-0 place-items-center rounded-xl border shadow-sm transition-colors hover:bg-secondary hover:text-foreground", notificationsActive ? "border-primary/25 bg-primary/10 text-primary" : "bg-card text-muted-foreground")}><Bell size={18} weight={notificationsActive ? "fill" : "regular"} />{unread > 0 && <span className="absolute -right-1 -top-1 grid h-5 min-w-5 place-items-center rounded-full bg-accent px-1 text-[10px] font-bold text-accent-foreground">{unread > 99 ? "99+" : unread}</span>}</button>
+        {aiAvailable && <Button
+          onClick={() => setAiOpen(true)}
+          onMouseEnter={loadFloatingAssistant}
+          aria-expanded={aiOpen}
+          aria-controls="floating-edvatiq-assistant"
+          className="hidden gap-2 lg:flex"
+        >
+          {aiStreaming ? <CircleNotch className="animate-spin" /> : <Sparkle weight="fill" />}
+          <span>Ask Edvatiq</span>
+          {assistantUnread && <span className="h-1.5 w-1.5 rounded-full bg-accent" aria-label="New assistant response" />}
+        </Button>}
         <TopAccount user={user} org={org} navigate={navigate} logout={logout} />
       </header>
       <main id="main-content" className={cn(
@@ -163,12 +264,29 @@ export default function AppLayout({ children }) {
         moreOpen={mobileMoreOpen}
         setMoreOpen={setMobileMoreOpen}
         industry={org?.industry}
-        secondary={[...primary, ...secondary, ...admin]}
+        secondary={[...sidebarGroups.workspace, ...sidebarGroups.administration]}
         locations={locations}
         locationId={locationId}
         setLocationId={setLocationId}
       />
-      <AIQuickLauncher open={aiOpen} onOpenChange={setAiOpen} />
+      {aiAvailable && !isAIWorkspace && !aiOpen && <button
+        type="button"
+        onClick={() => setAiOpen(true)}
+        onMouseEnter={loadFloatingAssistant}
+        aria-label={aiStreaming ? "Open Edvatiq assistant, response in progress" : assistantUnread ? "Open Edvatiq assistant, new response available" : "Open Edvatiq assistant"}
+        className="group fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom))] right-4 z-[45] grid h-12 w-12 place-items-center rounded-2xl border border-primary/20 bg-primary text-primary-foreground shadow-[0_14px_34px_hsl(var(--primary)/.28)] transition-transform hover:-translate-y-0.5 hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 md:bottom-5 md:right-5"
+      >
+        {aiStreaming ? <CircleNotch size={21} className="animate-spin" /> : <Sparkle size={21} weight="fill" />}
+        {assistantUnread && <span className="absolute -right-1 -top-1 h-3.5 w-3.5 rounded-full border-2 border-background bg-accent" />}
+        <span className="pointer-events-none absolute right-full mr-2 hidden whitespace-nowrap rounded-lg border bg-card px-2.5 py-1.5 text-xs font-semibold text-foreground shadow-md group-hover:block group-focus-visible:block md:block md:opacity-0 md:transition-opacity md:group-hover:opacity-100 md:group-focus-visible:opacity-100">
+          {aiStreaming ? aiStreamStatus || "Edvatiq is responding" : "Ask Edvatiq"}
+        </span>
+      </button>}
+      {aiAvailable && !isAIWorkspace && aiOpen && <Suspense fallback={null}>
+        <div id="floating-edvatiq-assistant">
+          <FloatingAssistantPanel open={aiOpen} onOpenChange={setAiOpen} />
+        </div>
+      </Suspense>}
       <CommandPalette
         open={commandOpen}
         onOpenChange={setCommandOpen}
@@ -198,8 +316,8 @@ function useWideLayout() {
   return wide;
 }
 
-function Brand({ compact = false, mobile = false, industry }) {
-  return <Link to="/app" aria-label="Edvatiq home" className={cn("flex items-center overflow-hidden", mobile ? "w-10" : "h-16 border-b px-4", compact && !mobile && "justify-center px-0")}>
+function Brand({ compact = false, mobile = false, industry, onNavigate }) {
+  return <Link to="/app" aria-label="Edvatiq home" onClick={onNavigate} className={cn("flex items-center overflow-hidden", mobile ? "w-10" : "h-16 border-b px-4", compact && !mobile && "justify-center px-0")}>
     <BrandLogo
       showName={!compact && !mobile}
       subtitle={industry === "college" ? "Placement OS" : "Business OS"}
@@ -208,10 +326,17 @@ function Brand({ compact = false, mobile = false, industry }) {
   </Link>;
 }
 
-function NavItem({ route, compact, industry, subdued = false, onClick }) {
+function SidebarNavGroup({ label, compact, separated = false, children }) {
+  return <section className={cn(separated && (compact ? "mt-3 border-t pt-3" : "mt-5"))}>
+    {!compact && <div className="px-3 pb-2 text-[9px] font-bold uppercase tracking-[0.16em] text-sidebar-muted/70">{label}</div>}
+    <div className="space-y-1">{children}</div>
+  </section>;
+}
+
+function NavItem({ route, compact, industry, onClick }) {
   const Icon = route.icon;
   const label = routeLabel(route, industry);
-  return <NavLink to={route.path} end={route.end} title={compact ? label : undefined} onClick={onClick} className={({ isActive }) => cn("nav-item", compact ? "justify-center px-0" : "gap-3", isActive ? "nav-item-active" : "nav-item-idle", subdued && !isActive && "text-sidebar-muted/85")}><Icon size={19} weight="duotone" className="shrink-0" />{!compact && <span className="truncate">{label}</span>}</NavLink>;
+  return <NavLink to={route.path} end={route.end} title={compact ? label : undefined} aria-label={compact ? label : undefined} onClick={onClick} className={({ isActive }) => cn("nav-item", compact ? "justify-center px-0" : "gap-3", isActive ? "nav-item-active" : "nav-item-idle")}><Icon size={19} weight="duotone" className="shrink-0" />{!compact && <span className="truncate">{label}</span>}</NavLink>;
 }
 
 function QuickCreate({ can, industry, navigate }) {
@@ -341,9 +466,9 @@ export function SidebarWalletCard({ wallet, plan, compact, canManage }) {
   const title = `${available.toLocaleString("en-IN")} AI credits available`;
   if (compact) {
     const content = <span className="relative grid h-10 w-10 place-items-center rounded-xl border bg-secondary text-sidebar-muted transition-colors hover:text-sidebar-foreground"><Wallet size={18} /><span className={cn("absolute right-1.5 top-1.5 h-2 w-2 rounded-full ring-2 ring-sidebar", low ? "bg-warning" : "bg-positive")} /></span>;
-    return <div className="px-4 pb-2" title={title}>{canManage ? <Link to="/app/billing" aria-label={title}>{content}</Link> : content}</div>;
+    return <div className="px-4 pb-2" title={title}>{canManage ? <Link to="/app/billing?section=credits" aria-label={title}>{content}</Link> : content}</div>;
   }
-  return <section className="mx-2.5 mb-2.5 overflow-hidden rounded-xl border bg-surface-subtle p-3" aria-label="AI credit wallet"><div className="flex items-center justify-between gap-2"><div className="flex min-w-0 items-center gap-2"><span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-primary text-primary-foreground"><Wallet size={16} weight="fill" /></span><div className="min-w-0"><div className="text-[9px] font-bold uppercase tracking-[0.13em] text-sidebar-muted">AI credits</div><div className="truncate text-xs font-semibold">{available.toLocaleString("en-IN")} available</div></div></div>{canManage && <Link to="/app/billing" className="shrink-0 text-[10px] font-semibold text-accent">Plan</Link>}</div><div className="mt-2.5 h-1 overflow-hidden rounded-full bg-border"><div className={cn("h-full rounded-full transition-[width]", low ? "bg-warning" : "bg-positive")} style={{ width: `${percent}%` }} /></div>{cycleLabel && <div className="mt-1.5 truncate text-[9px] text-sidebar-muted">{cycleLabel}</div>}</section>;
+  return <section className="mx-2.5 mb-2.5 overflow-hidden rounded-xl border bg-surface-subtle p-3" aria-label="AI credit wallet"><div className="flex items-center justify-between gap-2"><div className="flex min-w-0 items-center gap-2"><span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-primary text-primary-foreground"><Wallet size={16} weight="fill" /></span><div className="min-w-0"><div className="text-[9px] font-bold uppercase tracking-[0.13em] text-sidebar-muted">AI credits</div><div className="truncate text-xs font-semibold">{available.toLocaleString("en-IN")} available</div></div></div>{canManage && <Link to="/app/billing?section=credits" className="shrink-0 text-[10px] font-semibold text-accent">Manage</Link>}</div><div className="mt-2.5 h-1 overflow-hidden rounded-full bg-border"><div className={cn("h-full rounded-full transition-[width]", low ? "bg-warning" : "bg-positive")} style={{ width: `${percent}%` }} /></div>{cycleLabel && <div className="mt-1.5 truncate text-[9px] text-sidebar-muted">{cycleLabel}</div>}</section>;
 }
 
 export function SearchResults({ results, close, loading = false, industry = "gym" }) {

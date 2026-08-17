@@ -28,6 +28,24 @@ class LegalAcceptanceRequest(RequestModel):
     refund_document_id: str = Field(min_length=1, max_length=100)
 
 
+class SignupEmailVerificationProof(RequestModel):
+    challenge_id: str = Field(
+        min_length=36,
+        max_length=36,
+        pattern=r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$",
+    )
+    proof: str = Field(min_length=32, max_length=200)
+
+
+class SignupEmailChallengeRequest(RequestModel):
+    email: EmailStr
+
+
+class SignupEmailChallengeVerifyRequest(RequestModel):
+    challenge_token: str = Field(min_length=32, max_length=200)
+    code: str = Field(pattern=r"^\d{6}$")
+
+
 class RegisterOrgRequest(RequestModel):
     organization_name: str = Field(min_length=2, max_length=200)
     organization_slug: str = Field(min_length=2, max_length=80, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -41,6 +59,7 @@ class RegisterOrgRequest(RequestModel):
     city: str | None = Field(default=None, max_length=120)
     state: str | None = Field(default=None, max_length=100)
     legal_acceptance: LegalAcceptanceRequest
+    email_verification: SignupEmailVerificationProof
 
     @field_validator("admin_password")
     @classmethod

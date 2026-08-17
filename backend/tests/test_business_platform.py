@@ -6,10 +6,12 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, func, select
+from sqlalchemy.orm import object_session
 
 from app.core.database import SessionLocal
 from app.core.config import settings
 from app.models import AIUsage, AuditLog, ChatConversation, ChatMessage, ChatTurn, Client, Organization, PlanDefinition, PlanVersion, Subscription, User, WalletReservation
+from conftest import delete_signup_challenge, verified_signup_body
 from server import app
 
 
@@ -28,7 +30,7 @@ def organizations():
 
 def register(created, industry):
     unique = uuid4().hex[:10]
-    response = client.post("/api/auth/register", json={
+    body, challenge_id = verified_signup_body(client, {
         "organization_name": f"Test {industry.title()} {unique}",
         "organization_slug": f"test-{industry}-{unique}",
         "industry": industry,
@@ -39,12 +41,11 @@ def register(created, industry):
         "location_name": "Main Location",
         "city": "Chennai",
     })
+    try:
+        response = client.post("/api/auth/register", json=body)
+    finally:
+        delete_signup_challenge(challenge_id)
     assert response.status_code == 201, response.text
-    with SessionLocal() as db:
-        org = db.execute(select(Organization).where(Organization.slug == f"test-{industry}-{unique}")).scalar_one()
-        owner = db.execute(select(User).where(User.organization_id == org.id)).scalar_one()
-        owner.email_verified = True
-        db.commit()
     login = client.post("/api/auth/login", json={
         "email": f"owner-{unique}@example.com", "password": "Testing@123",
         "org_slug": f"test-{industry}-{unique}",
@@ -98,7 +99,7 @@ class TestSecureAuthentication:
         assert taken.json()["available"] is False
         assert taken.json()["suggestions"]
 
-        weak_password = client.post("/api/auth/register", json={
+        weak_body, challenge_id = verified_signup_body(client, {
             "organization_name": "Weak Password Test",
             "organization_slug": candidate,
             "industry": "gym",
@@ -109,44 +110,47 @@ class TestSecureAuthentication:
             "location_name": "Main Location",
             "city": "Chennai",
         })
+        try:
+            weak_password = client.post("/api/auth/register", json=weak_body)
+        finally:
+            delete_signup_challenge(challenge_id)
         assert weak_password.status_code == 422
+        assert "admin_password" in weak_password.json()["error"]["field_errors"]
 
     def test_verification_cookie_csrf_refresh_and_recovery(self, organizations, monkeypatch):
         delivered = {}
+        delivery_counts = {}
 
         def capture_email(recipient, code, purpose, first_name=""):
             delivered[purpose] = {"recipient": recipient, "code": code}
+            delivery_counts[purpose] = delivery_counts.get(purpose, 0) + 1
             return True
 
         monkeypatch.setattr("app.api.v1.auth.send_auth_code_email", capture_email)
         unique = uuid4().hex[:10]
         slug = f"secure-auth-{unique}"
         email = f"secure-{unique}@example.com"
-        registered = client.post("/api/auth/register", json={
+        body, challenge_id = verified_signup_body(client, {
             "organization_name": "Secure Auth Test", "organization_slug": slug,
             "industry": "gym", "admin_email": email, "admin_password": "Testing@123",
             "admin_first_name": "Secure", "admin_last_name": "Owner",
             "location_name": "Main Location", "city": "Chennai",
         })
+        try:
+            registered = client.post("/api/auth/register", json=body)
+        finally:
+            delete_signup_challenge(challenge_id)
         assert registered.status_code == 201, registered.text
         assert "access_token" not in registered.json()
-        assert registered.json()["requires_verification"] is True
+        assert registered.json()["user"]["email_verified"] is True
         assert delivered["email_verification"]["recipient"] == email
+        assert delivery_counts["email_verification"] == 1
         with SessionLocal() as db:
             org = db.execute(select(Organization).where(Organization.slug == slug)).scalar_one()
             organizations.append(org.id)
-            assert db.execute(select(User).where(User.organization_id == org.id)).scalar_one().email_verified is False
+            assert db.execute(select(User).where(User.organization_id == org.id)).scalar_one().email_verified is True
 
-        blocked = client.post("/api/auth/login", json={"email": email, "password": "Testing@123", "org_slug": slug})
-        assert blocked.status_code == 403
-        assert blocked.json()["detail"] == "Email is not verified"
-
-        verified = client.post("/api/auth/email/verify", json={
-            "email": email, "org_slug": slug, "code": delivered["email_verification"]["code"],
-        })
-        assert verified.status_code == 200, verified.text
-        assert "access_token" not in verified.json()
-        set_cookies = "; ".join(verified.headers.get_list("set-cookie"))
+        set_cookies = "; ".join(registered.headers.get_list("set-cookie"))
         assert f"{settings.ACCESS_COOKIE_NAME}=" in set_cookies and "HttpOnly" in set_cookies
         assert "SameSite=lax" in set_cookies
         assert client.get("/api/auth/me").status_code == 200
@@ -373,6 +377,33 @@ class TestSharedPlatform:
             assert turn.status == "cancelled"
             assert turn.error_code == "cancelled"
             assert db.scalar(select(func.count(ChatMessage.id)).where(ChatMessage.turn_id == turn.id)) == 0
+
+    def test_ai_stream_owns_session_and_attaches_user(self, organizations, monkeypatch):
+        headers, _context = register(organizations, "gym")
+        observed = {}
+
+        async def streamed_response(_body, stream_user, stream_db, emit=None):
+            observed["attached"] = object_session(stream_user) is stream_db
+            if emit:
+                await emit("text_delta", {"text": "Ready"})
+            return {
+                "conversation_id": "stream-session-test",
+                "conversation": {"id": "stream-session-test"},
+                "message": {"blocks": [], "actions": []},
+                "credits_used": 0,
+                "ai_wallet": {},
+            }
+
+        monkeypatch.setattr("app.api.v1.ai._process_chat", streamed_response)
+        response = client.post(
+            "/api/ai/chat/stream",
+            headers=headers,
+            json={"message": "Check stream session ownership"},
+        )
+
+        assert response.status_code == 200, response.text
+        assert observed["attached"] is True
+        assert "event: complete" in response.text
 
     def test_ai_chat_management_personalization_and_feedback(self, organizations):
         headers, context = register(organizations, "gym")

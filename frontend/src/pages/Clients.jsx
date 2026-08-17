@@ -10,6 +10,7 @@ import { toast } from "sonner";
 import { EntityAvatar } from "@/components/entities/EntityProfile";
 import AcademicScopeNavigator from "@/components/college/AcademicScopeNavigator";
 import CohortCompareSheet from "@/components/college/CohortCompareSheet";
+import CollegeStudents from "@/pages/CollegeStudents";
 import {
   CursorListFooter, DataTable, DrawerForm, EmptyState, ErrorState, FilterBar, MetricStrip,
   PageHeader, PageShell, SegmentControl, StatusBadge, Surface,
@@ -47,6 +48,11 @@ const emptyStudent = {
 };
 
 export default function Clients() {
+  const { industry } = useBusiness();
+  return industry === "college" ? <CollegeStudents /> : <ClientDirectory />;
+}
+
+function ClientDirectory() {
   const navigate = useNavigate();
   const { can } = useAuth();
   const { industry, locations, locationId } = useBusiness();

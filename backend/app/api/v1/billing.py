@@ -688,7 +688,7 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
         processed_at=datetime.now(timezone.utc), payload={**data, "edvatiq_payment_mode": mode},
     ))
     db.commit()
-    if signup_created and signup_owner:
+    if signup_created and signup_owner and not signup_owner.email_verified:
         from app.api.v1.auth import _send_signup_verification
         _send_signup_verification(db, signup_checkout, signup_owner, request)
     return {"ok": True, **({"needs_review": True} if signup_review_error else {})}
@@ -841,7 +841,7 @@ async def cashfree_webhook(request: Request, db: Session = Depends(get_db)):
         payload={**event, "edvatiq_payment_mode": config.mode},
     ))
     db.commit()
-    if signup_created and signup_owner:
+    if signup_created and signup_owner and not signup_owner.email_verified:
         from app.api.v1.auth import _send_signup_verification
         _send_signup_verification(db, signup_checkout, signup_owner, request)
     return {"ok": True, **({"needs_review": True} if signup_review_error else {})}

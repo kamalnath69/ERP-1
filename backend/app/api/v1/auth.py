@@ -13,17 +13,21 @@ from app.core.database import get_db
 from app.core.deps import get_current_user
 from app.core.security import create_access_token, create_refresh_token, decode_token, hash_password, verify_password
 from app.db.seed import seed_organization_defaults
-from app.models import AuthAttempt, IndustryEnum, Location, Organization, RefreshToken, SignupCheckout, User
+from app.models import (
+    AuthAttempt, IndustryEnum, Location, Organization, RefreshToken, SignupCheckout,
+    SignupEmailChallenge, User,
+)
 from app.schemas import (
     CodeRequest, LoginRequest, LoginResponse, PaidSignupAccessRequest,
     PaidSignupCheckoutRequest, PaidSignupVerifyRequest, RegisterOrgRequest,
-    ResetPasswordRequest, UserOut, VerifyEmailRequest, validate_strong_password,
+    ResetPasswordRequest, SignupEmailChallengeRequest, SignupEmailChallengeVerifyRequest,
+    UserOut, VerifyEmailRequest, validate_strong_password,
 )
 from app.schemas.validation import RequestModel
 from app.services.audit import log_action
 from app.services.auth_security import (
     clear_auth_cookies, client_ip, consume_auth_code, create_auth_code, identifier_hash,
-    new_csrf_token, set_auth_cookies, token_hash,
+    new_csrf_token, set_auth_cookies, token_hash, valid_csrf_token,
 )
 from app.services.email import send_auth_code_email
 from app.services.billing import (
@@ -35,6 +39,11 @@ from app.services.signup import (
     ACTIVE_CHECKOUT_STATUSES, CHECKOUT_TTL, checkout_response, expire_stale_checkouts,
     finalize_signup, hash_signup_password, organization_modules, public_plan_pair,
     public_tax_quote, trial_signup_available, valid_checkout_token, lock_organization_slug,
+)
+from app.services.signup_email import (
+    bind_signup_email_challenge, consume_signup_email_challenge,
+    create_signup_email_challenge, require_signup_email_proof,
+    verify_signup_email_challenge,
 )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -77,6 +86,19 @@ def _deliver_code(db: Session, user: User, purpose: str, request: Request) -> tu
     return sent, code if settings.AUTH_EXPOSE_TEST_CODES else None
 
 
+def _session_user_data(db: Session, user: User) -> dict:
+    user_data = UserOut.model_validate(user).model_dump()
+    if user.organization_id:
+        from app.services.user_security import mfa_requirement
+        mfa_state = mfa_requirement(db, user)
+        user_data.update({
+            "mfa_enabled": mfa_state["enabled"],
+            "mfa_required": mfa_state["required"],
+            "mfa_enrollment_required": False,
+        })
+    return user_data
+
+
 def _session_response(
     db: Session,
     user: User,
@@ -110,15 +132,9 @@ def _session_response(
     user.last_login = datetime.now(timezone.utc)
     db.commit()
     set_auth_cookies(response, access, refresh, csrf)
-    user_data = UserOut.model_validate(user).model_dump()
+    user_data = _session_user_data(db, user)
     if user.organization_id:
-        from app.services.user_security import mfa_requirement
-        mfa_state = mfa_requirement(db, user)
-        user_data.update({
-            "mfa_enabled": mfa_state["enabled"],
-            "mfa_required": mfa_state["required"],
-            "mfa_enrollment_required": mfa_pending,
-        })
+        user_data["mfa_enrollment_required"] = mfa_pending
     return LoginResponse(user=user_data, csrf_token=csrf)
 
 
@@ -187,8 +203,63 @@ def organization_id_availability(value: str, db: Session = Depends(get_db)):
     return {"value": business_id, "available": not unavailable, "valid": True, "message": "Available" if not unavailable else "Already used or reserved by another business", "suggestions": suggestions}
 
 
-@router.post("/register", status_code=201)
-def register_organization(body: RegisterOrgRequest, request: Request, db: Session = Depends(get_db)):
+@router.post("/registration/email/challenges", status_code=201)
+def request_signup_email_challenge(
+    body: SignupEmailChallengeRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    challenge, challenge_token, code = create_signup_email_challenge(db, str(body.email), request)
+    db.commit()
+    try:
+        sent = send_auth_code_email(challenge.email, code, "email_verification")
+    except Exception:
+        sent = False
+    if not sent and not settings.AUTH_EXPOSE_TEST_CODES:
+        challenge = db.get(SignupEmailChallenge, challenge.id)
+        challenge.status = "delivery_failed"
+        db.commit()
+        raise HTTPException(503, "Verification email could not be sent. Please try again")
+    return {
+        "challenge_id": challenge.id,
+        "challenge_token": challenge_token,
+        "email": challenge.email,
+        "expires_at": challenge.expires_at,
+        "resend_at": challenge.resend_at,
+        "resend_after_seconds": settings.SIGNUP_EMAIL_RESEND_SECONDS,
+        "email_sent": sent,
+        **({"test_code": code} if settings.AUTH_EXPOSE_TEST_CODES else {}),
+    }
+
+
+@router.post("/registration/email/challenges/{challenge_id}/verify")
+def confirm_signup_email_challenge(
+    challenge_id: str,
+    body: SignupEmailChallengeVerifyRequest,
+    db: Session = Depends(get_db),
+):
+    challenge, proof = verify_signup_email_challenge(
+        db,
+        challenge_id,
+        body.challenge_token,
+        body.code,
+    )
+    db.commit()
+    return {
+        "challenge_id": challenge.id,
+        "email": challenge.email,
+        "verification_proof": proof,
+        "proof_expires_at": challenge.proof_expires_at,
+    }
+
+
+@router.post("/register", status_code=201, response_model=LoginResponse)
+def register_organization(
+    body: RegisterOrgRequest,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+):
     expire_stale_checkouts(db)
     legal_documents = validate_legal_acceptance(db, body.legal_acceptance)
     if not trial_signup_available(db):
@@ -204,6 +275,7 @@ def register_organization(body: RegisterOrgRequest, request: Request, db: Sessio
         SignupCheckout.expires_at > datetime.now(timezone.utc),
     )).first():
         raise HTTPException(status.HTTP_409_CONFLICT, "Organization slug is reserved by a pending checkout")
+    email_challenge = require_signup_email_proof(db, body.email_verification, str(body.admin_email))
     try: industry = IndustryEnum(body.industry)
     except ValueError: raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid industry")
     org = Organization(name=body.organization_name, slug=slug, industry=industry, enabled_modules=organization_modules(industry.value), contact_email=body.admin_email.lower())
@@ -211,7 +283,7 @@ def register_organization(body: RegisterOrgRequest, request: Request, db: Sessio
     admin = User(
         organization_id=org.id, email=body.admin_email.lower(), hashed_password=hash_password(body.admin_password),
         first_name=body.admin_first_name, last_name=body.admin_last_name, phone=body.admin_phone,
-        is_active=True, email_verified=False,
+        is_active=True, email_verified=True,
     )
     db.add(admin); db.flush()
     location = Location(organization_id=org.id, name=body.location_name, code="MAIN", city=body.city, state=body.state, is_primary=True)
@@ -227,9 +299,8 @@ def register_organization(body: RegisterOrgRequest, request: Request, db: Sessio
         user_agent=request.headers.get("user-agent"),
     )
     log_action(db, organization_id=org.id, user_id=admin.id, action="organization.register", resource_type="organization", resource_id=org.id, ip_address=client_ip(request))
-    db.commit()
-    sent, test_code = _deliver_code(db, admin, "email_verification", request)
-    return {"requires_verification": True, "email": admin.email, "organization_slug": org.slug, "email_sent": sent, **({"test_code": test_code} if test_code else {})}
+    consume_signup_email_challenge(email_challenge)
+    return _session_response(db, admin, request, response)
 
 
 def _authorized_checkout(db: Session, checkout_id: str, checkout_token: str, *, lock: bool = False) -> SignupCheckout:
@@ -273,12 +344,13 @@ def _completed_signup_payload(
     email_sent: bool | None = None,
     test_code: str | None = None,
 ) -> dict:
+    verified_owner = bool(checkout.email_challenge_id and owner.email_verified)
     payload = {
         **_checkout_status_payload(checkout),
         "ok": True,
         "status": "completed",
-        "next_action": "verify_email",
-        "requires_verification": True,
+        "next_action": "open_workspace" if verified_owner else "verify_email",
+        "requires_verification": not verified_owner,
         "email": owner.email,
         "organization_slug": organization.slug,
         **({"test_code": test_code} if test_code else {}),
@@ -365,7 +437,11 @@ def _reconcile_signup_checkout(
             return _checkout_status_payload(checkout)
         raise
     db.commit()
-    sent, test_code = _send_signup_verification(db, checkout, owner, request) if created else (True, None)
+    sent, test_code = (
+        _send_signup_verification(db, checkout, owner, request)
+        if created and not owner.email_verified
+        else (True, None)
+    )
     return _completed_signup_payload(
         checkout,
         organization,
@@ -412,6 +488,7 @@ def create_registration_checkout(
         SignupCheckout.expires_at > now,
     )).first():
         raise HTTPException(409, "Organization slug is reserved by a pending checkout")
+    email_challenge = require_signup_email_proof(db, body.email_verification, str(body.admin_email))
     try:
         industry = IndustryEnum(body.industry)
         organization_modules(industry.value)
@@ -452,6 +529,7 @@ def create_registration_checkout(
         city=body.city.strip() if body.city else None,
         state=body.state.strip() if body.state else None,
         plan_version_id=version.id,
+        email_challenge_id=email_challenge.id,
         plan_snapshot={
             "slug": definition.slug,
             "name": definition.name,
@@ -470,6 +548,7 @@ def create_registration_checkout(
         provider_mode=config.mode,
         expires_at=now + CHECKOUT_TTL,
     )
+    bind_signup_email_challenge(email_challenge)
     db.add(checkout)
     db.add(AuthAttempt(
         identifier_hash=identifier_hash(str(body.admin_email)),
@@ -508,7 +587,7 @@ def create_registration_checkout(
             },
             idempotency_key=checkout.idempotency_key,
             expires_at=checkout.expires_at,
-            return_url=f"{settings.APP_URL.rstrip('/')}/register/payment/{checkout.id}?returned=1",
+            return_url=f"{settings.APP_URL.rstrip('/')}/register?payment_return={checkout.id}",
         )
         checkout.provider_order_id = order["order_id"]
         checkout.provider_session_id = order.get("session_id")
@@ -551,6 +630,43 @@ def reconcile_registration_checkout(
     return _reconcile_signup_checkout(db, checkout, request)
 
 
+@router.post("/registration/checkouts/{checkout_id}/session", response_model=LoginResponse)
+def create_registration_checkout_session(
+    checkout_id: str,
+    request: Request,
+    response: Response,
+    checkout_token: str = Header(alias="X-Signup-Token", min_length=20, max_length=200),
+    db: Session = Depends(get_db),
+):
+    checkout = _authorized_checkout(db, checkout_id, checkout_token, lock=True)
+    if checkout.status != "completed" or not checkout.organization_id:
+        raise HTTPException(409, "The workspace is not ready yet")
+    owner = db.execute(select(User).where(
+        User.organization_id == checkout.organization_id,
+        User.email == checkout.admin_email,
+    )).scalar_one_or_none()
+    if not owner or not owner.is_active:
+        raise HTTPException(409, "The workspace owner is unavailable")
+    if not checkout.email_challenge_id or not owner.email_verified:
+        raise HTTPException(409, "Complete email verification before opening the workspace")
+
+    raw_access = request.cookies.get(settings.ACCESS_COOKIE_NAME)
+    csrf = request.cookies.get(settings.CSRF_COOKIE_NAME)
+    if raw_access and valid_csrf_token(csrf):
+        try:
+            payload = decode_token(raw_access)
+        except Exception:
+            payload = {}
+        if (
+            payload.get("type") == "access"
+            and payload.get("sub") == owner.id
+            and payload.get("sv") == owner.session_version
+            and payload.get("av", owner.access_version) == owner.access_version
+        ):
+            return LoginResponse(user=_session_user_data(db, owner), csrf_token=csrf)
+    return _session_response(db, owner, request, response)
+
+
 @router.post("/registration/checkouts/{checkout_id}/cancel")
 def cancel_registration_checkout(
     checkout_id: str,
@@ -577,6 +693,10 @@ def cancel_registration_checkout(
     checkout.status = "cancelled"
     checkout.last_error = "cancelled_by_user"
     checkout.admin_password_hash = None
+    if checkout.email_challenge_id:
+        challenge = db.get(SignupEmailChallenge, checkout.email_challenge_id)
+        if challenge and challenge.status == "bound" and challenge.consumed_at is None:
+            consume_signup_email_challenge(challenge)
     db.commit()
     return _checkout_status_payload(checkout)
 
@@ -612,7 +732,11 @@ def mock_registration_payment(
         ip_address=client_ip(request),
     )
     db.commit()
-    sent, test_code = _send_signup_verification(db, checkout, owner, request) if created else (True, None)
+    sent, test_code = (
+        _send_signup_verification(db, checkout, owner, request)
+        if created and not owner.email_verified
+        else (True, None)
+    )
     return _completed_signup_payload(
         checkout,
         organization,

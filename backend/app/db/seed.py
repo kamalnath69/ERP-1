@@ -423,7 +423,6 @@ def seed_organization_defaults(
             plan_version_id=trial_version.id if trial_version else None,
         )
         db.add(start_trial(subscription))
-    from datetime import datetime, timezone
     db.add(Job(organization_id=org.id, kind="refresh_client_signals", payload={"organization_id": org.id}, run_at=datetime.now(timezone.utc), idempotency_key="client-signals-bootstrap"))
     for module in org.enabled_modules:
         db.add(FeatureFlag(organization_id=org.id, flag=module, enabled=True, meta={}))
@@ -658,7 +657,6 @@ def seed_platform(db: Session) -> None:
 
 
 def seed_client_signal_jobs(db: Session) -> None:
-    from datetime import datetime, timezone
     organizations = db.execute(select(Organization.id)).scalars().all()
     for organization_id in organizations:
         exists = db.execute(select(Job.id).where(Job.organization_id == organization_id, Job.kind == "refresh_client_signals", Job.status.in_(["queued", "running"]))).first()

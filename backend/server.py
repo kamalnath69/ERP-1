@@ -119,7 +119,9 @@ async def csrf_protection(request: Request, call_next):
         "/api/public/demo-requests",
     }
     public_signup_mock = request.url.path.startswith("/api/auth/registration/checkouts/") and request.url.path.endswith("/mock-pay")
-    if unsafe and cookie_authenticated and not bearer_authenticated and request.url.path not in public_auth_paths and not public_signup_mock:
+    public_signup_challenge = request.url.path.startswith("/api/auth/registration/email/challenges")
+    public_signup_session = request.url.path.startswith("/api/auth/registration/checkouts/") and request.url.path.endswith("/session")
+    if unsafe and cookie_authenticated and not bearer_authenticated and request.url.path not in public_auth_paths and not public_signup_mock and not public_signup_challenge and not public_signup_session:
         cookie_token = request.cookies.get(settings.CSRF_COOKIE_NAME)
         header_token = request.headers.get("x-csrf-token")
         if not cookie_token or not header_token or cookie_token != header_token or not valid_csrf_token(cookie_token):

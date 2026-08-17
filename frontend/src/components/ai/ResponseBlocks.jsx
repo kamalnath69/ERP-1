@@ -49,9 +49,10 @@ export default function ResponseBlocks({
   onConfirm,
   onUndo,
   onSelectEntity,
+  compact = false,
 }) {
   return (
-    <div className="space-y-4 mt-4">
+    <div className={compact ? "mt-3 space-y-3" : "mt-4 space-y-4"}>
       {(message.blocks || []).map((block) => (
         <Block
           key={block.id}
@@ -61,19 +62,20 @@ export default function ResponseBlocks({
           onConfirm={onConfirm}
           onUndo={onUndo}
           onSelectEntity={onSelectEntity}
+          compact={compact}
         />
       ))}
       {!!message.citations?.length && (
         <section className="overflow-hidden rounded-2xl border bg-card/85 shadow-[0_8px_26px_hsl(var(--primary)/.04)]">
-          <div className="flex items-center justify-between border-b bg-secondary/35 px-4 py-3"><div><div className="overline">Reference material</div><div className="mt-0.5 text-sm font-semibold">Sources used</div></div><span className="rounded-full bg-background px-2.5 py-1 text-[10px] font-semibold text-muted-foreground">{message.citations.length}</span></div>
-          <div className="mt-3 space-y-2">
+          <div className={`flex items-center justify-between border-b bg-secondary/35 ${compact ? "px-3 py-2.5" : "px-4 py-3"}`}><div><div className="overline">Reference material</div><div className="mt-0.5 text-sm font-semibold">Sources used</div></div><span className="rounded-full bg-background px-2.5 py-1 text-[10px] font-semibold text-muted-foreground">{message.citations.length}</span></div>
+          <div className={compact ? "mt-2 space-y-1.5" : "mt-3 space-y-2"}>
             {message.citations.map((item, index) => (
               <a
                 key={`${item.document_id}-${index}`}
                 href={item.href}
                 target="_blank"
                 rel="noreferrer"
-                className="group mx-3 mb-3 block rounded-xl border bg-background/60 p-3 transition hover:border-accent/50 hover:shadow-sm"
+                className={`group mx-3 block rounded-xl border bg-background/60 transition hover:border-accent/50 hover:shadow-sm ${compact ? "mb-2 p-2.5" : "mb-3 p-3"}`}
               >
                 <div className="flex items-center justify-between gap-3 text-sm font-medium">
                   <span className="flex min-w-0 items-center gap-2"><span className="text-[10px] text-muted-foreground">{String(index + 1).padStart(2, "0")}</span><span className="truncate">{item.document}</span></span>
@@ -91,19 +93,19 @@ export default function ResponseBlocks({
   );
 }
 
-function Block({ block, onViewAll, onPin, onConfirm, onUndo, onSelectEntity }) {
+function Block({ block, onViewAll, onPin, onConfirm, onUndo, onSelectEntity, compact }) {
   const data = block.data || {};
   if (block.type === "text") return null;
   if (block.type === "kpi_grid")
     return (
       <section className="overflow-hidden rounded-2xl border bg-card/85 shadow-[0_8px_26px_hsl(var(--primary)/.04)]">
-        <div className="border-b bg-secondary/30 px-4 py-3"><div className="overline">Live business view</div><h3 className="mt-0.5 font-display text-lg font-semibold">{block.title || "Business snapshot"}</h3></div>
-        <div className="grid grid-cols-1 gap-px bg-border sm:grid-cols-2 xl:grid-cols-3">
+        <div className={`border-b bg-secondary/30 ${compact ? "px-3 py-2.5" : "px-4 py-3"}`}><div className="overline">Live business view</div><h3 className="mt-0.5 font-display text-lg font-semibold">{block.title || "Business snapshot"}</h3></div>
+        <div className={`grid gap-px bg-border ${compact ? "grid-cols-2" : "grid-cols-1 sm:grid-cols-2 xl:grid-cols-3"}`}>
         {(data.items || []).map((item, index) => (
-          <div key={item.label} className="relative bg-card p-4 md:p-5">
+          <div key={item.label} className={`relative bg-card ${compact ? "p-3" : "p-4 md:p-5"}`}>
             <span className={`absolute left-0 top-4 h-8 w-0.5 rounded-full ${index === 0 ? "bg-accent" : "bg-border"}`} />
             <div className="text-[11px] font-medium text-muted-foreground">{item.label}</div>
-            <div className="font-display text-2xl font-bold mt-2 md:text-3xl">
+            <div className={`mt-2 font-display font-bold ${compact ? "text-xl" : "text-2xl md:text-3xl"}`}>
               {item.format === "money"
                 ? valueText(item.value, "amount_paise")
                 : Number(item.value || 0).toLocaleString("en-IN")}
@@ -115,14 +117,14 @@ function Block({ block, onViewAll, onPin, onConfirm, onUndo, onSelectEntity }) {
     );
   if (block.type === "chart")
     return (
-      <section className="rounded-2xl border bg-card/85 p-4 shadow-[0_8px_26px_hsl(var(--primary)/.04)] md:p-5">
+      <section className={`rounded-2xl border bg-card/85 shadow-[0_8px_26px_hsl(var(--primary)/.04)] ${compact ? "p-3" : "p-4 md:p-5"}`}>
         <div className="overline">Trend and comparison</div><h3 className="mt-1 font-display text-xl font-semibold">{block.title}</h3>
         <Suspense
           fallback={
-            <div className="h-72 animate-pulse bg-secondary rounded-xl mt-3" />
+            <div className={`${compact ? "h-44" : "h-72"} mt-3 animate-pulse rounded-xl bg-secondary`} />
           }
         >
-          <AIChart data={data} />
+          <AIChart data={data} className={compact ? "h-44" : undefined} />
         </Suspense>
       </section>
     );
@@ -133,10 +135,11 @@ function Block({ block, onViewAll, onPin, onConfirm, onUndo, onSelectEntity }) {
         onViewAll={onViewAll}
         onPin={onPin}
         onSelectEntity={onSelectEntity}
+        compact={compact}
       />
     );
   if (block.type === "table")
-    return <Records block={block} onViewAll={onViewAll} onPin={onPin} />;
+    return <Records block={block} onViewAll={onViewAll} onPin={onPin} compact={compact} />;
   if (block.type === "action")
     return (
       <ActionCard
@@ -144,6 +147,7 @@ function Block({ block, onViewAll, onPin, onConfirm, onUndo, onSelectEntity }) {
         title={block.title}
         onConfirm={onConfirm}
         onUndo={onUndo}
+        compact={compact}
       />
     );
   if (block.type === "alert")
@@ -156,7 +160,7 @@ function Block({ block, onViewAll, onPin, onConfirm, onUndo, onSelectEntity }) {
   return null;
 }
 
-function EntityCards({ block, onViewAll, onPin, onSelectEntity }) {
+function EntityCards({ block, onViewAll, onPin, onSelectEntity, compact = false }) {
   const data = block.data || {};
   const rawItems = data.items || [];
   const items = canonicalEntityCards(rawItems);
@@ -178,6 +182,7 @@ function EntityCards({ block, onViewAll, onPin, onSelectEntity }) {
         onPin={onPin}
         visibleCount={canonicalCount}
         hasHiddenOverflow={hasHiddenOverflow}
+        compact={compact}
       />
       {items.length ? (
         <div
@@ -189,12 +194,12 @@ function EntityCards({ block, onViewAll, onPin, onSelectEntity }) {
           }}
         >
           {items.map((item, index) => {
-            const details = visibleProfileFields(item, 6)
+            const details = visibleProfileFields(item, compact ? 4 : 6)
               .filter(
                 ([key]) =>
                   !["name", "status", "active", "phone", "type"].includes(key),
               )
-              .slice(0, 3)
+              .slice(0, compact ? 2 : 3)
               .map(([key, value]) => [key, valueText(value, key)]);
             return (
               <div
@@ -228,7 +233,7 @@ function EntityCards({ block, onViewAll, onPin, onSelectEntity }) {
   );
 }
 
-function RecordsHeader({ block, onViewAll, onPin, visibleCount, hasHiddenOverflow = false, embedded = false }) {
+function RecordsHeader({ block, onViewAll, onPin, visibleCount, hasHiddenOverflow = false, embedded = false, compact = false }) {
   const data = block.data || {};
   const count = visibleCount ?? data.total ?? data.items?.length ?? 0;
   const canPin = Boolean(data.result_session_id && onPin);
@@ -238,10 +243,10 @@ function RecordsHeader({ block, onViewAll, onPin, visibleCount, hasHiddenOverflo
     ),
   );
   return (
-    <header className={`${embedded ? "border-b bg-secondary/30" : "rounded-2xl border bg-card/85 shadow-[0_8px_26px_hsl(var(--primary)/.04)]"} p-4 flex flex-wrap justify-between gap-3 items-center`}>
+    <header className={`${embedded ? "border-b bg-secondary/30" : "rounded-2xl border bg-card/85 shadow-[0_8px_26px_hsl(var(--primary)/.04)]"} ${compact ? "p-3" : "p-4"} flex flex-wrap justify-between gap-3 items-center`}>
       <div>
         <div className="overline">Current records</div>
-        <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2"><h3 className="font-display text-xl font-semibold">{block.title}</h3><p className="text-xs text-muted-foreground">{Number(count).toLocaleString("en-IN")} found</p></div>
+        <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2"><h3 className={`font-display font-semibold ${compact ? "text-lg" : "text-xl"}`}>{block.title}</h3><p className="text-xs text-muted-foreground">{Number(count).toLocaleString("en-IN")} found</p></div>
       </div>
       {(canPin || canViewAll) && (
         <div className="flex gap-2">
@@ -343,7 +348,7 @@ function canonicalEntityCards(items) {
   });
 }
 
-function Records({ block, onViewAll, onPin }) {
+function Records({ block, onViewAll, onPin, compact = false }) {
   const data = block.data || {};
   const items = data.items || [];
   const columns = (
@@ -353,6 +358,37 @@ function Records({ block, onViewAll, onPin }) {
   )
     .filter((key) => !PROFILE_INTERNAL_FIELDS.has(key) && !key.endsWith("_id"))
     .slice(0, 6);
+  if (compact) {
+    const preview = items.slice(0, 3);
+    return (
+      <section className="overflow-hidden rounded-2xl border bg-card/85 shadow-[0_8px_26px_hsl(var(--primary)/.04)]">
+        <RecordsHeader
+          block={block}
+          onViewAll={onViewAll}
+          onPin={onPin}
+          embedded
+          compact
+          hasHiddenOverflow={items.length > preview.length || Number(data.total || 0) > items.length}
+        />
+        {preview.length ? <div className="divide-y">
+          {preview.map((item, index) => {
+            const titleKey = columns[0];
+            const title = item.display_name || item.name || valueText(item[titleKey], titleKey);
+            const details = columns.slice(1, 3).map((key) => `${key.replaceAll("_", " ")}: ${valueText(item[key], key)}`);
+            const content = <>
+              <span className="block truncate text-sm font-semibold">{title}</span>
+              {!!details.length && <span className="mt-1 block line-clamp-2 text-xs text-muted-foreground">{details.join(" / ")}</span>}
+            </>;
+            return item.profile_ref ? (
+              <EntityProfileLink key={item.id || index} profileRef={item.profile_ref} className="block px-3 py-3 transition-colors hover:bg-secondary/50">
+                {content}
+              </EntityProfileLink>
+            ) : <div key={item.id || index} className="px-3 py-3">{content}</div>;
+          })}
+        </div> : <EmptyState variant="inline" icon={Warning} title="No matching records" description="Try changing the name, date, or filter in your question." />}
+      </section>
+    );
+  }
   return (
     <section className="rounded-2xl border bg-card/85 overflow-hidden shadow-[0_8px_26px_hsl(var(--primary)/.04)]">
       <RecordsHeader block={block} onViewAll={onViewAll} onPin={onPin} embedded />
@@ -431,19 +467,19 @@ function Records({ block, onViewAll, onPin }) {
   );
 }
 
-function ActionCard({ data, title, onConfirm, onUndo }) {
+function ActionCard({ data, title, onConfirm, onUndo, compact = false }) {
   const completed = ["completed", "undone"].includes(data.status);
   return (
     <section className="overflow-hidden rounded-2xl border bg-card/90 shadow-[0_8px_26px_hsl(var(--primary)/.05)]">
       <div className="border-b bg-gradient-to-r from-accent/10 via-transparent to-emerald-500/10 px-4 py-3"><div className="overline">Ready for your review</div><div className="mt-0.5 text-sm font-semibold">Business action</div></div>
-      <div className="p-4 md:p-5">
+      <div className={compact ? "p-3" : "p-4 md:p-5"}>
       <div className="flex gap-3">
         <div className={`w-10 h-10 shrink-0 rounded-xl grid place-items-center ${completed ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300" : "bg-accent/15 text-accent"}`}>
           {completed ? <CheckCircle /> : <ClockCounterClockwise />}
         </div>
         <div className="flex-1">
           <h3 className="font-semibold">{title || data.preview?.title}</h3>
-          <div className="mt-2 grid sm:grid-cols-2 gap-2 text-xs">
+          <div className={`mt-2 grid gap-2 text-xs ${compact ? "grid-cols-1" : "sm:grid-cols-2"}`}>
             {Object.entries(data.preview?.changes || {})
               .slice(0, 8)
               .map(([key, value]) => (

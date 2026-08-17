@@ -116,7 +116,11 @@ def test_exchange_codes_are_normalized_for_dynamic_scheme_and_cycle_imports() ->
 
 
 def test_catalog_hides_write_methods_when_role_cannot_commit_resource() -> None:
-    read_only_catalog = resource_catalog({"college.imports.manage"})
+    read_only_catalog = resource_catalog({
+        "college.imports.manage",
+        "college.academics.view",
+        "college.assessments.view",
+    })
     structure = next(item for item in read_only_catalog if item["key"] == "academic_structure")
     marks = next(item for item in read_only_catalog if item["key"] == "assessment_marks")
 
@@ -124,7 +128,11 @@ def test_catalog_hides_write_methods_when_role_cannot_commit_resource() -> None:
     assert structure["importable"] is False
     assert marks["methods"] == []
 
-    academic_admin_catalog = resource_catalog({"college.imports.manage", "college.academics.manage"})
+    academic_admin_catalog = resource_catalog({
+        "college.imports.manage",
+        "college.academics.view",
+        "college.academics.manage",
+    })
     structure = next(item for item in academic_admin_catalog if item["key"] == "academic_structure")
     assert structure["methods"] == ["excel", "csv"]
 

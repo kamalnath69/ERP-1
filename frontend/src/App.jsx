@@ -4,6 +4,7 @@ import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import { BusinessProvider, useBusiness } from "@/contexts/BusinessContext";
 import { Toaster } from "@/components/ui/sonner";
 import AppLayout from "@/components/layout/AppLayout";
+import { AIConversationProvider } from "@/components/ai/AIConversationProvider";
 import PublicSiteLayout from "@/components/public/PublicSiteLayout";
 import RouteGate from "@/components/routing/RouteGate";
 import { NotFoundPage } from "@/pages/SystemPages";
@@ -69,7 +70,7 @@ function SecurityEnrollment({ children }) {
 }
 
 function ProtectedAppShell() {
-  return <RequireAuth><SecurityEnrollment><TrialAccess><AppLayout><Suspense fallback={<PageSkeleton />}><Outlet /></Suspense></AppLayout></TrialAccess></SecurityEnrollment></RequireAuth>;
+  return <RequireAuth><SecurityEnrollment><TrialAccess><AIConversationProvider><AppLayout><Suspense fallback={<PageSkeleton />}><Outlet /></Suspense></AppLayout></AIConversationProvider></TrialAccess></SecurityEnrollment></RequireAuth>;
 }
 
 const gated = (key, element) => <RouteGate routeKey={key}>{element}</RouteGate>;

@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   ArrowClockwise, ArrowLeft, Barbell, CalendarBlank, Camera, CaretRight, CheckCircle,
   Clock, DotsThree, Envelope, FileArrowUp, GraduationCap, Heartbeat, IdentificationCard,
@@ -42,6 +42,7 @@ import {
 } from "@/features/gym/gymApi";
 import { PaymentDrawer, VoidInvoiceDrawer } from "@/features/sales/InvoiceActions";
 import CollegeStudentProfile from "@/components/college/CollegeStudentProfile";
+import { useRegisterAIPageContext } from "@/components/ai/AIConversationProvider";
 import { useGetCollegeStudentPlacementProfileQuery } from "@/features/college/collegeApi";
 import { QUERY_POLICIES, withSkip } from "@/store/api/queryPolicies";
 import useCursorPagination from "@/hooks/useCursorPagination";
@@ -59,6 +60,7 @@ const EMPTY_ACTION = { type: "", values: {} };
 export default function ClientProfile() {
   const { clientId } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const { can } = useAuth();
   const { locationId, industry: businessIndustry } = useBusiness();
   const [activeTab, setActiveTab] = useState("overview");
@@ -74,6 +76,11 @@ export default function ClientProfile() {
 
   const workspaceQuery = useGetClientWorkspaceQuery({ clientId, range: "30d" }, QUERY_POLICIES.operational);
   const { data: workspace } = workspaceQuery;
+  useRegisterAIPageContext(workspace?.client ? {
+    kind: "client",
+    id: workspace.client.id || clientId,
+    label: `${workspace.industry === "college" ? "Student" : "Client"}: ${`${workspace.client.first_name || ""} ${workspace.client.last_name || ""}`.trim()}`,
+  } : null);
   const collegeStudentProfileId = workspace?.industry === "college" ? workspace.industry_data?.profile?.id : null;
   const collegePlacementQuery = useGetCollegeStudentPlacementProfileQuery(
     collegeStudentProfileId,
@@ -129,6 +136,10 @@ export default function ClientProfile() {
   const currentMembership = industry.current_membership || industry.active_membership;
   const scheduledMembership = industry.scheduled_membership;
   const fullName = `${client.first_name} ${client.last_name}`.trim();
+  const profileFrom = typeof location.state?.profileFrom === "string"
+    && location.state.profileFrom.startsWith("/app/clients")
+    ? location.state.profileFrom
+    : "/app/clients";
   const identityNumber = workspace.industry === "college"
     ? industry.profile?.admission_number || client.client_number
     : client.client_number;
@@ -248,7 +259,7 @@ export default function ClientProfile() {
 
   return <PageShell className="reveal">
     <div className="flex items-center justify-between gap-3">
-      <Button asChild variant="ghost" className="-ml-3"><Link to="/app/clients"><ArrowLeft className="mr-2" />{pluralLabel}</Link></Button>
+      <Button asChild variant="ghost" className="-ml-3"><Link to={profileFrom}><ArrowLeft className="mr-2" />{pluralLabel}</Link></Button>
       <span className="text-xs text-muted-foreground">{workspace.industry === "college" ? "Student profile" : "Operational profile"}</span>
     </div>
 

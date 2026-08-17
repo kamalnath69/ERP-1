@@ -11,15 +11,24 @@ function mergeById(current, incoming) {
   });
 }
 
-export default function useCursorPagination(filterKey) {
-  const [pageState, setPageState] = useState({ key: filterKey, cursor: null, items: [] });
+export default function useCursorPagination(filterKey, initialState = null) {
+  const seed = initialState?.key === filterKey ? initialState : null;
+  const [pageState, setPageState] = useState({
+    key: filterKey,
+    cursor: seed?.cursor || null,
+    items: seed?.items || [],
+  });
   const accepted = useRef(null);
   const current = pageState.key === filterKey ? pageState : { key: filterKey, cursor: null, items: [] };
 
   useEffect(() => {
     if (pageState.key === filterKey) return;
     accepted.current = null;
-    setPageState({ key: filterKey, cursor: null, items: [] });
+    const nextSeed = initialState?.key === filterKey ? initialState : null;
+    setPageState({ key: filterKey, cursor: nextSeed?.cursor || null, items: nextSeed?.items || [] });
+    // The key is the reset boundary. Seed changes for the same key must not
+    // overwrite records already accepted from the network.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filterKey, pageState.key]);
 
   const accept = useCallback((page) => {
@@ -37,6 +46,7 @@ export default function useCursorPagination(filterKey) {
   return {
     cursor: current.cursor,
     items: current.items,
+    snapshot: current,
     accept,
     reset: useCallback(() => {
       accepted.current = null;

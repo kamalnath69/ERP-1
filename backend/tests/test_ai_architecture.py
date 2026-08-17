@@ -188,6 +188,25 @@ def test_follow_up_context_keeps_live_query_definition_not_result_data():
     assert "items" not in state
 
 
+def test_college_page_scope_is_preserved_without_becoming_a_business_entity():
+    scope = {
+        "kind": "college_scope",
+        "id": "graduation:2027",
+        "display_name": "2027 batch",
+        "graduation_year": 2027,
+        "department_id": None,
+        "program_id": None,
+        "cohort_id": None,
+        "cohort_ids": [],
+    }
+
+    state = _updated_context_state({}, {"tool_calls": []}, scope)
+
+    assert state["college_scope"] == scope
+    assert state.get("primary_entity") is None
+    assert state["recent_entities"] == []
+
+
 def test_client_record_arguments_are_normalized_before_querying():
     client_spec = _normalize_record_spec(
         "clients", query="all clients", location_id="location-1", days=365,

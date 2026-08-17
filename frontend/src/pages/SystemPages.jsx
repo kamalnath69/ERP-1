@@ -31,7 +31,7 @@ export function NoLocationPage({ embedded = false }) {
 }
 
 export function PlanUnavailablePage({ embedded = false, module, title, description, retry }) {
-  return <SystemPage embedded={embedded} icon={Buildings} eyebrow="Availability" title={title || `${module || "This feature"} is not enabled`} description={description || "Your current plan or business setup does not include this area. Existing records remain safe."} actions={<>{retry && <Button variant="outline" onClick={retry}>Try again</Button>}<Button asChild><Link to="/app/billing">View plan</Link></Button></>} />;
+  return <SystemPage embedded={embedded} icon={Buildings} eyebrow="Availability" title={title || `${module || "This feature"} is not enabled`} description={description || "Your current plan or business setup does not include this area. Existing records remain safe."} actions={<>{retry && <Button variant="outline" onClick={retry}>Try again</Button>}<Button asChild><Link to="/app/billing?section=plans">View plan</Link></Button></>} />;
 }
 
 export function OfflinePage({ embedded = false }) {

@@ -11,10 +11,10 @@ import { useForm } from "react-hook-form";
 import { useDispatch, useSelector } from "react-redux";
 import { useSearchParams } from "react-router-dom";
 import api from "@/lib/api";
-import { streamAI } from "@/lib/aiStream";
 import { cn } from "@/lib/utils";
 import { useBusiness } from "@/contexts/BusinessContext";
-import BrandLogo from "@/components/brand/BrandLogo";
+import AIMessage from "@/components/ai/AIMessage";
+import { useAIConversation } from "@/components/ai/AIConversationProvider";
 import SecondarySidebarLayout, { SecondarySidebarTrigger } from "@/components/layout/SecondarySidebarLayout";
 import AssistantPersonalizationSheet from "@/components/ai/AssistantPersonalizationSheet";
 import { Button } from "@/components/ui/button";
@@ -53,8 +53,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import ResponseBlocks from "@/components/ai/ResponseBlocks";
-import RichText from "@/components/ai/RichText";
 import {
   EntityAvatar,
   EntityCard,
@@ -66,31 +64,17 @@ import {
   visibleProfileFields,
 } from "@/lib/profileNavigation";
 import {
-  appendStreamAction,
-  appendStreamBlock,
-  appendTextDelta,
-  appendUserMessage,
   closeResultDrawer,
-  cancelStreaming,
-  completeStreaming,
-  failStreaming,
   openResultDrawer,
-  selectAIWorkspace,
-  setActiveConversation,
   prependMessages,
   removeConversation,
   removeTurn,
   setMessageFeedback,
   setMessages,
-  setStreamStatus,
-  startStreaming,
-  updateAction,
 } from "@/store/slices/aiSlice";
 import {
   Archive,
   ChatCircleDots,
-  CircleNotch,
-  Copy,
   DotsThreeVertical,
   FileArrowUp,
   List,
@@ -103,14 +87,11 @@ import {
   SlidersHorizontal,
   Sparkle,
   Stop,
-  ThumbsDown,
-  ThumbsUp,
   Trash,
   WarningCircle,
 } from "@phosphor-icons/react";
 import { toast } from "sonner";
 import {
-  aiCacheApi,
   useDeleteAIConversationMutation,
   useDeleteAIConversationTurnMutation,
   useGetAIConversationQuery,
@@ -121,7 +102,6 @@ import {
   useSubmitAIMessageFeedbackMutation,
   useUpdateAIConversationMutation,
 } from "@/store/api/aiCacheApi";
-import { baseApi } from "@/store/api/baseApi";
 import { QUERY_POLICIES, withSkip } from "@/store/api/queryPolicies";
 import {
   conversationRenameSchema, feedbackReasonSchema, FORM_OPTIONS, validateFile,
@@ -161,7 +141,15 @@ export default function AIChat() {
     pendingHistoryMessageId,
     pendingHistoryConversationId,
     resultDrawer,
-  } = useSelector(selectAIWorkspace);
+    draft: input,
+    setDraft: setInput,
+    sendMessage,
+    stopGeneration,
+    selectConversation,
+    startNewConversation,
+    confirmAction: confirm,
+    undoAction: undo,
+  } = useAIConversation();
   const workspaceQuery = useGetAIWorkspaceQuery(
     undefined,
     QUERY_POLICIES.operational,
@@ -211,7 +199,6 @@ export default function AIChat() {
   const documents = sidebar?.documents || EMPTY_ITEMS;
   const savedViews = sidebar?.savedViews || EMPTY_ITEMS;
   const sidebarLoading = workspaceLoading || conversationsLoading;
-  const [input, setInput] = useState("");
   const [uploading, setUploading] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [renameTarget, setRenameTarget] = useState(null);
@@ -232,8 +219,6 @@ export default function AIChat() {
   const inputRef = useRef(null);
   const keepAtBottom = useRef(true);
   const historyRefreshKey = useRef(null);
-  const requestController = useRef(null);
-  const stopRequested = useRef(false);
   const conversationCache = useRef(new Map());
   const initialSent = useRef(false);
   const startingNewConversation = useRef(false);
@@ -264,9 +249,17 @@ export default function AIChat() {
     }
     if (startingNewConversation.current) return;
     if (requestedConversation && requestedConversation !== active) {
-      dispatch(setActiveConversation(requestedConversation));
+      selectConversation(requestedConversation);
     }
-  }, [active, dispatch, requestedConversation]);
+  }, [active, requestedConversation, selectConversation]);
+
+  useEffect(() => {
+    if (!active || startingNewConversation.current || requestedConversation === active) return;
+    const next = new URLSearchParams(searchParams);
+    next.set("chat", active);
+    next.delete("ask");
+    setSearchParams(next, { replace: true });
+  }, [active, requestedConversation, searchParams, setSearchParams]);
 
   useEffect(() => {
     setMessageCursor(null);
@@ -353,125 +346,29 @@ export default function AIChat() {
 
   const send = useCallback(
     async (text, explicitContext = null) => {
-      const question = (text || input).trim();
-      if (!question || streaming) return;
-      if (question.length > 5000) {
-        toast.error("Keep your message within 5,000 characters");
-        inputRef.current?.focus();
-        return;
-      }
+      const question = String(text ?? input).trim();
+      if (!question || streaming) return false;
       if (activeConversation?.archived_at) {
         toast.error("Restore this chat before sending a new message");
-        return;
+        return false;
       }
       keepAtBottom.current = true;
-      const requestId = crypto.randomUUID();
-      const userMessageId = `user-${requestId}`;
-      const assistantId = `stream-${requestId}`;
       const contextKind = searchParams.get("context_kind");
       const contextId = searchParams.get("context_id");
-      dispatch(
-        appendUserMessage({
-          id: userMessageId,
-          role: "user",
-          content: question,
-        }),
-      );
-      dispatch(startStreaming({ assistantId, userId: userMessageId }));
-      setInput("");
-      const controller = new AbortController();
-      requestController.current = controller;
-      stopRequested.current = false;
-      try {
-        await streamAI(
-          {
-            conversation_id: active,
-            message: question,
-            location_id: locationId,
-            idempotency_key: requestId,
-            context:
-              explicitContext ||
-              (contextKind && contextId
-                ? { kind: contextKind, id: contextId }
-                : null),
-          },
-          (event, data) => {
-            if (event === "accepted")
-              dispatch(setStreamStatus("Request received"));
-            else if (event === "status")
-              dispatch(setStreamStatus(data.message));
-            else if (event === "text_delta")
-              dispatch(appendTextDelta(data.text));
-            else if (event === "block") dispatch(appendStreamBlock(data));
-            else if (event === "action") dispatch(appendStreamAction(data));
-            else if (event === "complete") {
-              dispatch(completeStreaming(data));
-              if (data.ai_wallet)
-                dispatch(
-                  baseApi.util.updateQueryData(
-                    "get",
-                    { url: "/organization/context" },
-                    (draft) => {
-                      if (draft?.data) draft.data.ai_wallet = data.ai_wallet;
-                    },
-                  ),
-                );
-              if (data.conversation) {
-                conversationCache.current.set(
-                  data.conversation.id,
-                  data.conversation,
-                );
-                dispatch(
-                  aiCacheApi.util.invalidateTags([
-                    { type: "Resource", id: "ai" },
-                  ]),
-                );
-              }
-              const next = new URLSearchParams(searchParams);
-              if (data.conversation_id) next.set("chat", data.conversation_id);
-              next.delete("ask");
-              setSearchParams(next, { replace: true });
-            } else if (event === "error") throw new Error(data.message);
-          },
-          controller.signal,
-        );
-      } catch (error) {
-        if (error.name === "AbortError") {
-          const explicitlyStopped = stopRequested.current;
-          dispatch(cancelStreaming());
-          if (explicitlyStopped) {
-            setInput(question);
-            toast.info("Response stopped. Your question is ready to retry.");
-          }
-        } else {
-          dispatch(failStreaming(error.message));
-          setInput(question);
-          toast.error(error.message || "Edvatiq could not respond");
-        }
-      } finally {
-        if (requestController.current === controller) {
-          requestController.current = null;
-        }
-        stopRequested.current = false;
-      }
+      return sendMessage(question, {
+        context: explicitContext || (contextKind && contextId
+          ? { kind: contextKind, id: contextId }
+          : null),
+      });
     },
     [
-      active,
       activeConversation?.archived_at,
-      dispatch,
       input,
-      locationId,
       searchParams,
-      setSearchParams,
+      sendMessage,
       streaming,
     ],
   );
-
-  const stopGeneration = () => {
-    if (!requestController.current || !streaming) return;
-    stopRequested.current = true;
-    requestController.current.abort();
-  };
 
   useEffect(() => {
     const requested = searchParams.get("ask");
@@ -482,26 +379,17 @@ export default function AIChat() {
   }, [searchParams, send, streaming]);
 
   const chooseConversation = (id) => {
-    stopRequested.current = false;
-    requestController.current?.abort();
     startingNewConversation.current = false;
     keepAtBottom.current = true;
-    dispatch(setActiveConversation(id));
+    selectConversation(id);
     const next = new URLSearchParams(searchParams);
     next.set("chat", id);
     setSearchParams(next, { replace: true });
   };
   const newConversation = () => {
     startingNewConversation.current = true;
-    stopRequested.current = false;
-    requestController.current?.abort();
-    requestController.current = null;
     keepAtBottom.current = true;
-    if (streaming) dispatch(cancelStreaming());
-    dispatch(setActiveConversation(null));
-    dispatch(setMessages({ conversationId: null, messages: [] }));
-    dispatch(closeResultDrawer());
-    setInput("");
+    startNewConversation();
     setConversationScope("active");
     setConversationSearch("");
     const next = new URLSearchParams(searchParams);
@@ -658,38 +546,6 @@ export default function AIChat() {
     }
   };
 
-  const confirm = async (action) => {
-    try {
-      let current = action;
-      if (!current.confirmation_token)
-        current = (
-          await api.post(`/ai/actions/${action.action_id}/confirmation`)
-        ).data;
-      const result = (
-        await api.post(`/ai/actions/${action.action_id}/confirm`, {
-          confirmation_token: current.confirmation_token,
-        })
-      ).data;
-      dispatch(updateAction(result));
-      toast.success("Action completed");
-    } catch (error) {
-      toast.error(
-        error.response?.data?.detail || "Could not complete the action",
-      );
-    }
-  };
-  const undo = async (action) => {
-    try {
-      const result = (await api.post(`/ai/actions/${action.action_id}/undo`))
-        .data;
-      dispatch(updateAction(result));
-      toast.success("Action undone");
-    } catch (error) {
-      toast.error(
-        error.response?.data?.detail || "This action could not be undone",
-      );
-    }
-  };
   const pin = async ({ sessionId, querySpec, title }) => {
     try {
       await api.post("/ai/views", {
@@ -911,7 +767,7 @@ export default function AIChat() {
             </div>
           )}
           {messages.map((message) => (
-            <Message
+            <AIMessage
               key={message.id}
               message={message}
               isCollege={isCollege}
@@ -1360,85 +1216,6 @@ function Welcome({ send, isCollege = false }) {
     </div>
   );
 }
-function Message({ message, isCollege = false, isStreaming, streamStatus, onDelete, onCopy, onFeedback, ...actions }) {
-  const user = message.role === "user";
-  return (
-    <div className={`group mx-auto flex w-full max-w-5xl ${user ? "justify-end" : "justify-start"}`}>
-      <div
-        className={`relative ${user ? "max-w-[88%] rounded-[1.4rem] rounded-br-md bg-primary px-4 py-3 text-primary-foreground shadow-sm md:max-w-[72%]" : "w-full min-w-0"}`}
-      >
-        {user && onDelete && (
-          <HistoryMenu
-            onDelete={onDelete}
-            label="Message options"
-            className="absolute -left-10 top-0"
-          />
-        )}
-        {user ? (
-          <div className="whitespace-pre-wrap text-sm leading-7">
-            {message.content}
-          </div>
-        ) : (
-          <>
-            <div className="mb-2.5 flex items-center gap-2.5">
-              <BrandLogo showName={false} markClassName="h-8 w-8 rounded-xl" />
-              <div className="min-w-0"><div className="text-sm font-semibold">Edvatiq</div><div className="text-[10px] text-muted-foreground">{isCollege ? "Your placement assistant" : "Your business assistant"}</div></div>
-              {onDelete && <HistoryMenu onDelete={onDelete} label="Message options" className="ml-auto" />}
-            </div>
-            {message.content ? <div className="rounded-2xl rounded-tl-md border bg-card/80 px-4 py-3.5 shadow-[0_8px_26px_hsl(var(--primary)/.04)] md:px-5"><RichText>{message.content}</RichText></div> : isStreaming && <Thinking status={streamStatus} />}
-            {isStreaming && message.content && (
-              <div className="mt-2 flex items-center gap-2 px-1 text-xs text-muted-foreground">
-                <CircleNotch className="animate-spin text-accent" />
-                {streamStatus || "Preparing your answer"}
-              </div>
-            )}
-            <ResponseBlocks message={message} {...actions} />
-            {!isStreaming && message.content && (
-              <div className="mt-2 flex items-center gap-0.5 px-1 text-muted-foreground">
-                <MessageAction label="Copy response" onClick={onCopy}>
-                  <Copy size={15} />
-                </MessageAction>
-                <MessageAction
-                  label="Helpful"
-                  active={message.feedback_rating === "helpful"}
-                  onClick={() => onFeedback("helpful")}
-                >
-                  <ThumbsUp size={15} weight={message.feedback_rating === "helpful" ? "fill" : "regular"} />
-                </MessageAction>
-                <MessageAction
-                  label="Not helpful"
-                  active={message.feedback_rating === "not_helpful"}
-                  onClick={() => onFeedback("not_helpful")}
-                >
-                  <ThumbsDown size={15} weight={message.feedback_rating === "not_helpful" ? "fill" : "regular"} />
-                </MessageAction>
-              </div>
-            )}
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function MessageAction({ label, active = false, onClick, children }) {
-  return (
-    <button
-      type="button"
-      title={label}
-      aria-label={label}
-      aria-pressed={active || undefined}
-      onClick={onClick}
-      className={cn(
-        "grid h-8 w-8 place-items-center rounded-lg transition-colors hover:bg-secondary hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-        active && "bg-secondary text-foreground",
-      )}
-    >
-      {children}
-    </button>
-  );
-}
-
 function ConversationMenu({ item, active, archiveDisabled, onPin, onRename, onArchive, onDelete }) {
   return (
     <DropdownMenu>
@@ -1479,42 +1256,6 @@ function ConversationMenu({ item, active, archiveDisabled, onPin, onRename, onAr
         >
           <Trash />
           Delete chat
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-}
-
-function HistoryMenu({
-  onDelete,
-  disabled = false,
-  label,
-  className = "",
-  compact = false,
-  menuText = "Delete question and answer",
-}) {
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          disabled={disabled}
-          aria-label={label}
-          className={cn(
-            "grid h-8 w-8 shrink-0 place-items-center rounded-lg border bg-card text-muted-foreground opacity-60 transition-opacity hover:text-foreground disabled:opacity-30 md:pointer-events-none md:opacity-0 md:group-hover:pointer-events-auto md:group-hover:opacity-100 md:group-focus-within:pointer-events-auto md:group-focus-within:opacity-100 focus:pointer-events-auto focus:opacity-100",
-            className,
-          )}
-        >
-          <DotsThreeVertical size={compact ? 14 : 18} weight="bold" />
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="z-[100]">
-        <DropdownMenuItem
-          onSelect={onDelete}
-          className="text-red-600 focus:text-red-700"
-        >
-          <Trash className="mr-2" />
-          {menuText}
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
@@ -1629,18 +1370,6 @@ function DeleteHistoryDialog({ target, busy, close, confirm }) {
   );
 }
 
-function Thinking({ status }) {
-  return (
-    <div className="inline-flex items-center gap-3 rounded-2xl rounded-tl-md border bg-card/80 px-4 py-3 text-sm text-muted-foreground shadow-sm">
-      <span className="flex gap-1" aria-hidden="true">
-        <i className="h-1.5 w-1.5 rounded-full bg-accent animate-bounce" />
-        <i className="h-1.5 w-1.5 rounded-full bg-accent animate-bounce [animation-delay:120ms]" />
-        <i className="h-1.5 w-1.5 rounded-full bg-accent animate-bounce [animation-delay:240ms]" />
-      </span>
-      {status || "Working on your answer"}
-    </div>
-  );
-}
 function ConversationSkeleton() {
   return (
     <div className="mx-auto w-full max-w-5xl space-y-5" aria-label="Loading conversation">

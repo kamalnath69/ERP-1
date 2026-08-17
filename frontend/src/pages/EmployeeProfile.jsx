@@ -22,6 +22,7 @@ import { useUpdateEmployeeMutation } from "@/features/team/teamApi";
 import { applyApiErrors, employeeProfileSchema, FORM_OPTIONS } from "@/lib/validation";
 import { useGetEmployeeProfileQuery } from "@/store/api/workspaceApi";
 import { QUERY_POLICIES } from "@/store/api/queryPolicies";
+import { useRegisterAIPageContext } from "@/components/ai/AIConversationProvider";
 
 const weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
@@ -45,6 +46,11 @@ export default function EmployeeProfile() {
   const { employeeId } = useParams();
   const { can } = useAuth();
   const { data, error } = useGetEmployeeProfileQuery(employeeId, QUERY_POLICIES.reference);
+  useRegisterAIPageContext(data?.employee ? {
+    kind: "employee",
+    id: data.employee.id || employeeId,
+    label: `Team member: ${`${data.employee.first_name || ""} ${data.employee.last_name || ""}`.trim()}`,
+  } : null);
   const [editing, setEditing] = useState(false);
   const [updateEmployee, updateState] = useUpdateEmployeeMutation();
   const editForm = useForm({

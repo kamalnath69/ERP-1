@@ -1567,6 +1567,92 @@ def student_intelligence(db: Session, organization_id: str, student_id: str) -> 
     }
 
 
+def student_directory_summary(
+    db: Session,
+    organization_id: str,
+    *,
+    graduation_year: int | None = None,
+    department_id: str | None = None,
+    program_id: str | None = None,
+    cohort_id: str | None = None,
+    cohort_ids: set[str] | list[str] | tuple[str, ...] | None = None,
+    allowed_student_ids: set[str] | None = None,
+    include_readiness: bool = False,
+    readiness_allowed_student_ids: set[str] | None = None,
+    include_placements: bool = False,
+    placement_allowed_student_ids: set[str] | None = None,
+) -> dict:
+    """Return directory metrics without widening any optional evidence domain."""
+    student_ids = set(db.execute(
+        student_query(
+            organization_id,
+            graduation_year=graduation_year,
+            department_id=department_id,
+            program_id=program_id,
+            cohort_id=cohort_id,
+            cohort_ids=cohort_ids,
+            allowed_student_ids=allowed_student_ids,
+        )
+        .with_only_columns(CollegeStudentProfile.id)
+        .order_by(None)
+    ).scalars())
+
+    def narrowed(allowed_ids: set[str] | None) -> set[str]:
+        return set(student_ids) if allowed_ids is None else student_ids & set(allowed_ids)
+
+    placement_scope_ids = narrowed(placement_allowed_student_ids) if include_placements else set()
+    placed_ids: set[str] = set()
+    if placement_scope_ids:
+        careers = list(db.execute(select(CollegeCareerProfile).where(
+            CollegeCareerProfile.organization_id == organization_id,
+            CollegeCareerProfile.student_profile_id.in_(placement_scope_ids),
+        )).scalars())
+        applications = list(db.execute(select(CollegePlacementApplication).where(
+            CollegePlacementApplication.organization_id == organization_id,
+            CollegePlacementApplication.student_profile_id.in_(placement_scope_ids),
+        )).scalars())
+        placed_ids = {
+            row.student_profile_id for row in applications
+            if row.outcome in {"selected", "offered", "joined"}
+        } | {
+            row.student_profile_id for row in careers
+            if row.placement_status in {"placed", "joined"}
+        }
+
+    readiness_metrics_available = include_readiness and include_placements
+    placement_ready = None
+    needs_support = None
+    if readiness_metrics_available:
+        readiness_scope_ids = narrowed(readiness_allowed_student_ids)
+        metric_scope_ids = readiness_scope_ids & placement_scope_ids
+        policy = active_readiness_policy(db, organization_id)
+        snapshots = latest_readiness(db, organization_id, list(metric_scope_ids))
+        minimum_coverage = float(policy.minimum_coverage_percent)
+        ready_ids = {
+            student_id for student_id, snapshot in snapshots.items()
+            if snapshot.band == "ready" and float(snapshot.coverage_percent) >= minimum_coverage
+        } - placed_ids
+        support_ids = {
+            student_id for student_id, snapshot in snapshots.items()
+            if snapshot.band == "needs_support" and float(snapshot.coverage_percent) >= minimum_coverage
+        } - placed_ids
+        placement_ready = len(ready_ids)
+        needs_support = len(support_ids)
+
+    return {
+        "total_students": len(student_ids),
+        "placement_ready": placement_ready,
+        "needs_support": needs_support,
+        "placed_students": len(placed_ids) if include_placements else None,
+        "scope": {
+            "readiness_students": len(
+                narrowed(readiness_allowed_student_ids)
+            ) if include_readiness else None,
+            "placement_students": len(placement_scope_ids) if include_placements else None,
+        },
+    }
+
+
 def student_roster(
     db: Session,
     organization_id: str,
@@ -1620,6 +1706,12 @@ def student_roster(
         ).label("position"),
     ).where(CollegeTermResult.organization_id == organization_id).subquery()
     academic_value = func.coalesce(latest_term_rows.c.cgpa, Decimal("-1"))
+    placed_application_students = select(
+        CollegePlacementApplication.student_profile_id.label("student_profile_id"),
+    ).where(
+        CollegePlacementApplication.organization_id == organization_id,
+        CollegePlacementApplication.outcome.in_(("selected", "offered", "joined")),
+    ).distinct().subquery()
     query = (
         select(CollegeStudentProfile, Client, CollegeProgram, CollegeDepartment, CollegeCohort)
         .join(Client, Client.id == CollegeStudentProfile.client_id)
@@ -1637,6 +1729,10 @@ def student_roster(
         .outerjoin(
             CollegeCareerProfile,
             CollegeCareerProfile.student_profile_id == CollegeStudentProfile.id,
+        )
+        .outerjoin(
+            placed_application_students,
+            placed_application_students.c.student_profile_id == CollegeStudentProfile.id,
         )
         .where(
             CollegeStudentProfile.organization_id == organization_id,
@@ -1668,16 +1764,26 @@ def student_roster(
     if readiness_band:
         query = query.where(effective_band == readiness_band)
     if placement_status == "placed":
-        query = query.where(CollegeCareerProfile.placement_status.in_(("placed", "joined")))
-    elif placement_status == "unplaced":
         query = query.where(or_(
-            CollegeCareerProfile.id.is_(None),
-            CollegeCareerProfile.placement_status.notin_(("placed", "joined")),
+            CollegeCareerProfile.placement_status.in_(("placed", "joined")),
+            placed_application_students.c.student_profile_id.is_not(None),
+        ))
+    elif placement_status == "unplaced":
+        query = query.where(and_(
+            or_(
+                CollegeCareerProfile.id.is_(None),
+                CollegeCareerProfile.placement_status.notin_(("placed", "joined")),
+            ),
+            placed_application_students.c.student_profile_id.is_(None),
         ))
     elif placement_status == "not_participating":
         query = query.where(CollegeCareerProfile.participation_status == "not_participating")
-    elif placement_status and placement_status != "all":
-        query = query.where(CollegeCareerProfile.placement_status == placement_status)
+    elif placement_status == "seeking":
+        query = query.where(
+            CollegeCareerProfile.placement_status == "seeking",
+            placed_application_students.c.student_profile_id.is_(None),
+        )
+    total = db.scalar(select(func.count()).select_from(query.order_by(None).subquery())) or 0
     if cursor_values:
         first = str(cursor_values.get("first") or "")
         last = str(cursor_values.get("last") or "")
@@ -1692,7 +1798,6 @@ def student_roster(
             query = query.where(or_(academic_value < metric, and_(academic_value == metric, name_after)))
         else:
             query = query.where(name_after)
-    total = db.scalar(select(func.count()).select_from(query.order_by(None).subquery())) or 0
     page_size = min(max(int(limit), 1), 100)
     order_by = (
         (academic_value.desc(), func.lower(Client.first_name), func.lower(Client.last_name), CollegeStudentProfile.id)
@@ -1741,6 +1846,17 @@ def student_roster(
             CollegeCareerProfile.student_profile_id.in_(ids) if ids else CollegeCareerProfile.id.is_(None),
         )).scalars()
     }
+    placement_outcomes: dict[str, str] = {}
+    outcome_priority = {"selected": 1, "offered": 2, "joined": 3}
+    if ids:
+        for application in db.execute(select(CollegePlacementApplication).where(
+            CollegePlacementApplication.organization_id == organization_id,
+            CollegePlacementApplication.student_profile_id.in_(ids),
+            CollegePlacementApplication.outcome.in_(tuple(outcome_priority)),
+        )).scalars():
+            current = placement_outcomes.get(application.student_profile_id)
+            if current is None or outcome_priority[application.outcome] > outcome_priority[current]:
+                placement_outcomes[application.student_profile_id] = application.outcome
     fee_clearance = fee_clearance_by_student(db, organization_id, ids)
     items = []
     for student, client, program, department, cohort in pairs:
@@ -1751,6 +1867,9 @@ def student_roster(
         attendance_row = attendance.get(student.id)
         coding_row = coding.get(student.id)
         career = careers.get(student.id)
+        placement_outcome = career.placement_status if career else "seeking"
+        if placement_outcome not in {"placed", "joined"} and student.id in placement_outcomes:
+            placement_outcome = placement_outcomes[student.id]
         items.append({
             "id": student.id,
             "client_id": student.client_id,
@@ -1779,7 +1898,7 @@ def student_roster(
             "coding_total": coding_row.total_solved if coding_row else None,
             "coding_fresh_at": coding_row.captured_at.isoformat() if coding_row else None,
             "resume_status": career.resume_status if career else "missing",
-            "placement_status": career.placement_status if career else "seeking",
+            "placement_status": placement_outcome,
             "fee_clearance_status": fee_clearance[student.id]["status"],
             "readiness": serialize_snapshot(snapshot, policy),
             "readiness_band": effective_band,

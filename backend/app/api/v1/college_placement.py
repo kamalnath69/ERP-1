@@ -39,7 +39,7 @@ from app.services.college_placement import (
     DEFAULT_BANDS, DEFAULT_WEIGHTS, active_readiness_policy, eligibility_context,
     ensure_default_pipeline, evaluate_eligibility, fee_clearance_by_student, placement_dashboard,
     opportunity_eligibility_rules, placement_leaderboards, recompute_readiness,
-    student_intelligence, student_roster,
+    student_directory_summary, student_intelligence, student_roster,
 )
 from app.services.cursor_pagination import decode_cursor, encode_cursor, page_response, page_size
 from app.services.platform_security import encrypt_secret
@@ -681,9 +681,13 @@ def _sanitize_student_intelligence(db: Session, user: User, student_id: str, pay
     return payload
 
 
-def _sanitize_roster_items(db: Session, user: User, payload: dict) -> dict:
+def _student_directory_domains(
+    db: Session,
+    user: User,
+) -> tuple[set[str], dict[str, CollegeAccess | None]]:
     permissions = get_user_permissions(db, user)
     domain_permissions = {
+        "readiness": "college.readiness.view",
         "assessments": "college.assessments.view",
         "attendance": "college.attendance.view",
         "coding": "college.coding.view",
@@ -695,6 +699,34 @@ def _sanitize_roster_items(db: Session, user: User, payload: dict) -> dict:
         domain: _optional_domain_access(db, user, permissions, domain, permission)
         for domain, permission in domain_permissions.items()
     }
+    return permissions, domains
+
+
+def _student_directory_capabilities(
+    permissions: set[str],
+    domains: dict[str, CollegeAccess | None],
+) -> dict[str, bool]:
+    return {
+        "readiness": domains.get("readiness") is not None,
+        "placements": domains.get("placements") is not None,
+        "assessments": domains.get("assessments") is not None,
+        "attendance": domains.get("attendance") is not None,
+        "coding": domains.get("coding") is not None,
+        "documents": domains.get("documents") is not None,
+        "clearance": domains.get("clearance") is not None,
+        "contact": "college.students.contact.view" in permissions,
+        "create": "college.students.manage" in permissions,
+    }
+
+
+def _sanitize_roster_items(
+    db: Session,
+    user: User,
+    payload: dict,
+    *,
+    resolved: tuple[set[str], dict[str, CollegeAccess | None]] | None = None,
+) -> dict:
+    permissions, domains = resolved or _student_directory_domains(db, user)
     for item in payload.get("items", []):
         student_id = item.get("id")
 
@@ -702,6 +734,9 @@ def _sanitize_roster_items(db: Session, user: User, payload: dict) -> dict:
             access = domains.get(domain)
             return bool(access and access.allows_student(student_id))
 
+        if not can("readiness"):
+            item["readiness"] = None
+            item["readiness_band"] = None
         if not can("assessments"):
             item["cgpa"] = None
             item["active_backlogs"] = None
@@ -716,6 +751,7 @@ def _sanitize_roster_items(db: Session, user: User, payload: dict) -> dict:
             item["placement_status"] = None
         if not can("clearance"):
             item["fee_clearance_status"] = None
+    payload["capabilities"] = _student_directory_capabilities(permissions, domains)
     return payload
 
 
@@ -828,6 +864,153 @@ def get_student_intelligence(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Student not found")
     payload = _sanitize_student_intelligence(db, user, student_id, payload)
     db.commit()
+    return payload
+
+
+@router.get("/students/summary")
+def get_student_directory_summary(
+    graduation_year: int | None = Query(default=None, ge=2000, le=2200),
+    department_id: str | None = None,
+    program_id: str | None = None,
+    cohort_id: str | None = None,
+    cohort_ids: list[str] | None = Query(default=None),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_permissions("college.students.view")),
+):
+    require_college(db, user)
+    student_access = resolve_college_access(db, user, "students")
+    selected_cohort_ids = list(dict.fromkeys(cohort_ids or []))
+    if len(selected_cohort_ids) > 50:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Compare at most 50 cohorts")
+    validate_college_filters(
+        student_access,
+        department_id=department_id,
+        program_id=program_id,
+        cohort_id=cohort_id,
+        cohort_ids=selected_cohort_ids,
+    )
+    permissions, domains = _student_directory_domains(db, user)
+    readiness_access = domains.get("readiness")
+    placement_access = domains.get("placements")
+    payload = student_directory_summary(
+        db,
+        user.organization_id,
+        graduation_year=graduation_year,
+        department_id=department_id,
+        program_id=program_id,
+        cohort_id=cohort_id,
+        cohort_ids=selected_cohort_ids,
+        allowed_student_ids=student_access.constrained_student_ids,
+        include_readiness=readiness_access is not None,
+        readiness_allowed_student_ids=(
+            readiness_access.constrained_student_ids if readiness_access else None
+        ),
+        include_placements=placement_access is not None,
+        placement_allowed_student_ids=(
+            placement_access.constrained_student_ids if placement_access else None
+        ),
+    )
+    payload["capabilities"] = _student_directory_capabilities(permissions, domains)
+    return payload
+
+
+@router.get("/students/page")
+def get_student_directory_page(
+    q: str | None = Query(default=None, max_length=120),
+    graduation_year: int | None = Query(default=None, ge=2000, le=2200),
+    graduation_years: list[int] | None = Query(default=None),
+    department_id: str | None = None,
+    program_id: str | None = None,
+    cohort_id: str | None = None,
+    cohort_ids: list[str] | None = Query(default=None),
+    section: str | None = Query(default=None, max_length=20),
+    readiness_band: Literal["ready", "developing", "needs_support", "insufficient_evidence"] | None = None,
+    placement_status: Literal["placed", "unplaced", "seeking", "not_participating"] | None = None,
+    sort: Literal["name", "academics_desc"] = "name",
+    limit: int = Query(default=25, ge=1, le=100),
+    cursor: str | None = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_permissions("college.students.view")),
+):
+    require_college(db, user)
+    student_access = resolve_college_access(db, user, "students")
+    selected_cohort_ids = list(dict.fromkeys(cohort_ids or []))
+    if len(selected_cohort_ids) > 50:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Compare at most 50 cohorts")
+    validate_college_filters(
+        student_access,
+        department_id=department_id,
+        program_id=program_id,
+        cohort_id=cohort_id,
+        cohort_ids=selected_cohort_ids,
+    )
+    requested_years = [*(graduation_years or []), *([graduation_year] if graduation_year else [])]
+    if any(year < 2000 or year > 2200 for year in requested_years):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Graduation year must be between 2000 and 2200")
+    years = sorted({int(year) for year in requested_years})
+    resolved_domains = _student_directory_domains(db, user)
+    _, domains = resolved_domains
+    query_access = student_access
+    if readiness_band:
+        readiness_access = domains.get("readiness")
+        if readiness_access is None:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Readiness filtering is not included in your access")
+        query_access = _intersect_access(query_access, readiness_access, domain="student-directory")
+    if placement_status:
+        placement_access = domains.get("placements")
+        if placement_access is None:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Placement filtering is not included in your access")
+        query_access = _intersect_access(query_access, placement_access, domain="student-directory")
+    if sort == "academics_desc":
+        assessment_access = domains.get("assessments")
+        if assessment_access is None:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Academic sorting is not included in your access")
+        query_access = _intersect_access(query_access, assessment_access, domain="student-directory")
+
+    filters = {
+        "q": q,
+        "department_id": department_id,
+        "program_id": program_id,
+        "cohort_id": cohort_id,
+        "cohort_ids": selected_cohort_ids,
+        "graduation_years": years,
+        "section": section,
+        "readiness_band": readiness_band,
+        "placement_status": placement_status,
+        "sort": sort,
+    }
+    cursor_values = decode_cursor(
+        cursor,
+        scope="college.students.page",
+        organization_id=user.organization_id,
+        filters=filters,
+    )
+    payload = student_roster(
+        db,
+        user.organization_id,
+        q=q,
+        department_id=department_id,
+        program_id=program_id,
+        cohort_id=cohort_id,
+        cohort_ids=selected_cohort_ids,
+        graduation_years=years,
+        section=section,
+        readiness_band=readiness_band,
+        placement_status=placement_status,
+        sort=sort,
+        limit=limit,
+        cursor_values=cursor_values,
+        allowed_student_ids=query_access.constrained_student_ids,
+    )
+    payload = _sanitize_roster_items(db, user, payload, resolved=resolved_domains)
+    next_values = payload.pop("_next_values", None)
+    payload["next_cursor"] = encode_cursor(
+        scope="college.students.page",
+        organization_id=user.organization_id,
+        filters=filters,
+        values=next_values,
+    ) if next_values else None
+    payload["has_more"] = bool(payload["next_cursor"])
     return payload
 
 

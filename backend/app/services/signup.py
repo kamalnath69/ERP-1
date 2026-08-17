@@ -12,12 +12,14 @@ from app.core.security import hash_password
 from app.db.seed import seed_organization_defaults
 from app.models import (
     BillingProfile, FeatureDefinition, IndustryEnum, Invoice, Location, Organization,
-    PlanDefinition, PlanEntitlement, PlanVersion, PlatformSetting, SignupCheckout, User,
+    PlanDefinition, PlanEntitlement, PlanVersion, PlatformSetting, SignupCheckout,
+    SignupEmailChallenge, User,
 )
 from app.services.audit import log_action
 from app.services.auth_security import token_hash
 from app.services.billing import fulfill_invoice
 from app.services.public_site import attach_checkout_acceptance
+from app.services.signup_email import consume_signup_email_challenge
 
 
 ACTIVE_CHECKOUT_STATUSES = {"creating", "ready", "paid"}
@@ -178,8 +180,9 @@ def valid_checkout_token(checkout: SignupCheckout, value: str) -> bool:
 
 
 def checkout_response(checkout: SignupCheckout, access_token: str | None = None, key_id: str | None = None) -> dict:
+    owner_verified = bool(checkout.email_challenge_id)
     next_action = {
-        "completed": "verify_email",
+        "completed": "open_workspace" if owner_verified else "verify_email",
         "manual_review": "support",
         "cancelled": "restart",
         "expired": "restart",
@@ -209,10 +212,11 @@ def checkout_response(checkout: SignupCheckout, access_token: str | None = None,
         "expires_at": checkout.expires_at,
         "plan": checkout.plan_snapshot,
         "billing_interval": checkout.billing_interval,
+        "billing_state": checkout.state,
         "organization_name": checkout.organization_name,
         "organization_slug": checkout.organization_slug,
         "email": checkout.admin_email if checkout.status == "completed" else None,
-        "requires_verification": checkout.status == "completed",
+        "requires_verification": checkout.status == "completed" and not owner_verified,
         "failure_code": checkout.last_error if checkout.last_error in safe_failure_codes else None,
     }
     if access_token:
@@ -245,6 +249,25 @@ def finalize_signup(
         checkout.last_error = "Account credentials are no longer available after payment"
         db.commit()
         raise HTTPException(409, "Payment was received, but account creation needs support review")
+
+    email_challenge = None
+    if checkout.email_challenge_id:
+        email_challenge = db.execute(
+            select(SignupEmailChallenge)
+            .where(SignupEmailChallenge.id == checkout.email_challenge_id)
+            .with_for_update()
+        ).scalar_one_or_none()
+        if (
+            not email_challenge
+            or email_challenge.status != "bound"
+            or email_challenge.consumed_at is not None
+            or email_challenge.email != checkout.admin_email.strip().lower()
+        ):
+            checkout.status = "manual_review"
+            checkout.provider_payment_id = payment_id
+            checkout.last_error = "Verified owner email proof is unavailable"
+            db.commit()
+            raise HTTPException(409, "Payment was received, but owner verification needs support review")
     lock_organization_slug(db, checkout.organization_slug)
     if db.execute(select(Organization.id).where(Organization.slug == checkout.organization_slug)).first():
         checkout.status = "manual_review"
@@ -285,10 +308,12 @@ def finalize_signup(
         last_name=checkout.admin_last_name,
         phone=checkout.admin_phone,
         is_active=True,
-        email_verified=False,
+        email_verified=email_challenge is not None,
     )
     db.add(owner)
     db.flush()
+    if email_challenge:
+        consume_signup_email_challenge(email_challenge)
     attach_checkout_acceptance(db, checkout.id, organization.id, owner.id)
     location = Location(
         organization_id=organization.id,

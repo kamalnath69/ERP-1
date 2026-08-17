@@ -1,4 +1,4 @@
-import { createSlice } from "@reduxjs/toolkit";
+import { createSelector, createSlice } from "@reduxjs/toolkit";
 
 const initialState = {
   activeConversationId: null,
@@ -148,8 +148,7 @@ export const {
   appendTextDelta, appendStreamBlock, appendStreamAction, completeStreaming, failStreaming, cancelStreaming,
   removeConversation, removeTurn, setMessageFeedback, updateAction, openResultDrawer, closeResultDrawer, resetAIWorkspace,
 } = aiSlice.actions;
-export const selectAIWorkspace = (state) => {
-  const workspace = state.aiWorkspace;
+export const selectAIWorkspace = createSelector([(state) => state.aiWorkspace], (workspace) => {
   return { ...workspace, messages: workspace.messagesByConversation[workspace.activeConversationId || "__new__"] || [] };
-};
+});
 export default aiSlice.reducer;

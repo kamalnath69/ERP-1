@@ -3,11 +3,11 @@ import reducer, {
   setAISidebarCollapsed,
   setAppearance,
   setLocationId,
-  setSidebarCompact,
+  setSidebarPinned,
 } from "./preferencesSlice";
 
 describe("preferences slice", () => {
-  const initial = { locationId: null, sidebarCompact: false };
+  const initial = { locationId: null, sidebarPinned: false };
 
   test("defaults first-time appearance to light", () => {
     expect(reducer(undefined, { type: "preferences/init" }).appearance).toBe("light");
@@ -18,9 +18,9 @@ describe("preferences slice", () => {
   });
 
   test("keeps shell layout separate from tenant reset", () => {
-    const state = { locationId: "location-1", sidebarCompact: true };
-    expect(reducer(state, clearTenantPreferences())).toEqual({ locationId: null, sidebarCompact: true });
-    expect(reducer(initial, setSidebarCompact(true)).sidebarCompact).toBe(true);
+    const state = { locationId: "location-1", sidebarPinned: true };
+    expect(reducer(state, clearTenantPreferences())).toEqual({ locationId: null, sidebarPinned: true });
+    expect(reducer(initial, setSidebarPinned(true)).sidebarPinned).toBe(true);
   });
 
   test("stores the AI history layout independently", () => {

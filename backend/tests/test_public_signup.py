@@ -8,7 +8,11 @@ from sqlalchemy import select
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.services.auth_security import token_hash
-from app.models import Invoice, Organization, PlanDefinition, PlatformPayment, SignupCheckout, Subscription, User
+from app.services.payment_gateways import gateway_config
+from app.models import (
+    Invoice, LegalDocument, Organization, PlatformPayment, SignupCheckout,
+    SignupEmailChallenge, Subscription, User,
+)
 from server import app
 
 
@@ -32,6 +36,41 @@ def registration_body(slug: str, **overrides) -> dict:
     return body
 
 
+def verified_registration_body(slug: str) -> dict:
+    body = registration_body(slug)
+    with SessionLocal() as db:
+        legal = {
+            row.document_type: row.id
+            for row in db.execute(select(LegalDocument).where(LegalDocument.status == "published")).scalars()
+        }
+    body["legal_acceptance"] = {
+        "accepted": True,
+        "terms_document_id": legal["terms"],
+        "privacy_document_id": legal["privacy"],
+        "refund_document_id": legal["refund"],
+    }
+    requested = client.post("/api/auth/registration/email/challenges", json={"email": body["admin_email"]})
+    assert requested.status_code == 201, requested.text
+    challenge = requested.json()
+    verified = client.post(
+        f"/api/auth/registration/email/challenges/{challenge['challenge_id']}/verify",
+        json={"challenge_token": challenge["challenge_token"], "code": challenge["test_code"]},
+    )
+    assert verified.status_code == 200, verified.text
+    proof = verified.json()
+    body["email_verification"] = {
+        "challenge_id": proof["challenge_id"],
+        "proof": proof["verification_proof"],
+    }
+    return body
+
+
+def delete_signup_challenges(email: str) -> None:
+    with SessionLocal() as db:
+        db.query(SignupEmailChallenge).filter(SignupEmailChallenge.email == email.lower()).delete()
+        db.commit()
+
+
 def test_public_catalog_contains_only_available_published_plans():
     response = client.get("/api/billing/public/plans")
     assert response.status_code == 200, response.text
@@ -42,34 +81,82 @@ def test_public_catalog_contains_only_available_published_plans():
     assert all("version_id" in plan for plan in payload["plans"])
 
 
-def test_disabled_trial_blocks_free_account_creation():
-    slug = f"paid-only-{uuid4().hex[:10]}"
-    with SessionLocal() as db:
-        trial = db.execute(select(PlanDefinition).where(PlanDefinition.slug == "trial")).scalar_one()
-        original = (trial.is_active, trial.is_public)
-        trial.is_active = False
-        db.commit()
+def test_signup_email_challenge_hashes_secrets_and_verifies_once(monkeypatch):
+    monkeypatch.setattr(settings, "AUTH_EXPOSE_TEST_CODES", True)
+    email = f"signup-proof-{uuid4().hex[:10]}@example.com"
+    other_email = f"signup-proof-{uuid4().hex[:10]}@example.com"
     try:
-        response = client.post("/api/auth/register", json=registration_body(slug))
+        requested = client.post("/api/auth/registration/email/challenges", json={"email": email})
+        assert requested.status_code == 201, requested.text
+        challenge = requested.json()
+        cooldown = client.post("/api/auth/registration/email/challenges", json={"email": email})
+        assert cooldown.status_code == 429
+        separate_address = client.post(
+            "/api/auth/registration/email/challenges",
+            json={"email": other_email},
+        )
+        assert separate_address.status_code == 201, separate_address.text
+        wrong_code = "999999" if challenge["test_code"] == "000000" else "000000"
+        incorrect = client.post(
+            f"/api/auth/registration/email/challenges/{challenge['challenge_id']}/verify",
+            json={"challenge_token": challenge["challenge_token"], "code": wrong_code},
+        )
+        assert incorrect.status_code == 400
+
+        verified = client.post(
+            f"/api/auth/registration/email/challenges/{challenge['challenge_id']}/verify",
+            json={"challenge_token": challenge["challenge_token"], "code": challenge["test_code"]},
+        )
+        assert verified.status_code == 200, verified.text
+        proof = verified.json()["verification_proof"]
+        with SessionLocal() as db:
+            row = db.get(SignupEmailChallenge, challenge["challenge_id"])
+            assert row.status == "verified" and row.attempts == 1
+            assert row.code_hash != challenge["test_code"]
+            assert row.browser_token_hash != challenge["challenge_token"]
+            assert row.proof_hash != proof
+
+        replay = client.post(
+            f"/api/auth/registration/email/challenges/{challenge['challenge_id']}/verify",
+            json={"challenge_token": challenge["challenge_token"], "code": challenge["test_code"]},
+        )
+        assert replay.status_code == 400
+    finally:
+        delete_signup_challenges(email)
+        delete_signup_challenges(other_email)
+        client.cookies.clear()
+
+
+def test_disabled_trial_blocks_free_account_creation(monkeypatch):
+    monkeypatch.setattr(settings, "AUTH_EXPOSE_TEST_CODES", True)
+    monkeypatch.setattr("app.api.v1.auth.trial_signup_available", lambda _db: False)
+    slug = f"paid-only-{uuid4().hex[:10]}"
+    body = verified_registration_body(slug)
+    try:
+        response = client.post("/api/auth/register", json=body)
         assert response.status_code == 409, response.text
         assert "paid plan" in response.json()["detail"].lower()
         with SessionLocal() as db:
             assert not db.execute(select(Organization.id).where(Organization.slug == slug)).first()
     finally:
-        with SessionLocal() as db:
-            trial = db.execute(select(PlanDefinition).where(PlanDefinition.slug == "trial")).scalar_one()
-            trial.is_active, trial.is_public = original
-            db.commit()
+        delete_signup_challenges(body["admin_email"])
+        client.cookies.clear()
 
 
 def test_mock_payment_creates_account_only_after_completion(monkeypatch):
     monkeypatch.setattr(settings, "RAZORPAY_MODE", "mock")
+    monkeypatch.setattr(settings, "AUTH_EXPOSE_TEST_CODES", True)
+    monkeypatch.setattr(
+        "app.api.v1.auth.active_gateway",
+        lambda _db: gateway_config("razorpay", "mock"),
+    )
     slug = f"paid-signup-{uuid4().hex[:10]}"
+    body = verified_registration_body(slug)
     checkout_id = None
     organization_id = None
     try:
         response = client.post("/api/auth/registration/checkout", json={
-            **registration_body(slug),
+            **body,
             "plan": "growth",
             "billing_interval": "monthly",
             "idempotency_key": str(uuid4()),
@@ -90,7 +177,8 @@ def test_mock_payment_creates_account_only_after_completion(monkeypatch):
             json={"checkout_token": checkout["checkout_token"]},
         )
         assert completed.status_code == 200, completed.text
-        assert completed.json()["requires_verification"] is True
+        assert completed.json()["requires_verification"] is False
+        assert completed.json()["next_action"] == "open_workspace"
 
         with SessionLocal() as db:
             organization = db.execute(select(Organization).where(Organization.slug == slug)).scalar_one()
@@ -99,7 +187,7 @@ def test_mock_payment_creates_account_only_after_completion(monkeypatch):
             subscription = db.execute(select(Subscription).where(Subscription.organization_id == organization.id)).scalar_one()
             invoice = db.execute(select(Invoice).where(Invoice.organization_id == organization.id)).scalar_one()
             pending = db.get(SignupCheckout, checkout_id)
-            assert owner.email_verified is False
+            assert owner.email_verified is True
             assert subscription.plan == "growth" and subscription.status == "active"
             assert invoice.status == "paid" and invoice.fulfillment_status == "fulfilled"
             assert pending.status == "completed" and pending.admin_password_hash is None
@@ -112,6 +200,13 @@ def test_mock_payment_creates_account_only_after_completion(monkeypatch):
         with SessionLocal() as db:
             assert len(db.execute(select(Organization.id).where(Organization.slug == slug)).all()) == 1
             assert len(db.execute(select(Invoice).where(Invoice.organization_id == organization_id)).scalars().all()) == 1
+
+        session = client.post(
+            f"/api/auth/registration/checkouts/{checkout_id}/session",
+            headers={"X-Signup-Token": checkout["checkout_token"]},
+        )
+        assert session.status_code == 200, session.text
+        assert session.json()["user"]["email_verified"] is True
     finally:
         with SessionLocal() as db:
             if checkout_id:
@@ -125,6 +220,8 @@ def test_mock_payment_creates_account_only_after_completion(monkeypatch):
                 if organization:
                     db.delete(organization)
             db.commit()
+        delete_signup_challenges(body["admin_email"])
+        client.cookies.clear()
 
 
 def test_cancelled_checkout_clears_credentials_and_quarantines_a_late_payment(monkeypatch):

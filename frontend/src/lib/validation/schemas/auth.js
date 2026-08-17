@@ -65,6 +65,20 @@ export const registrationOrganizationSchema = registrationFields.pick({
   city: true,
 });
 
+export const registrationEmailSchema = registrationFields.pick({ admin_email: true });
+
+export const registrationOwnerProfileSchema = registrationFields.pick({
+  admin_first_name: true,
+  admin_last_name: true,
+  admin_email: true,
+  admin_phone: true,
+});
+
+export const registrationPasswordSchema = matchesField(z.object({
+  admin_password: password(),
+  admin_password_confirm: z.string().min(1, "Confirm your password"),
+}), "admin_password", "admin_password_confirm", "Passwords do not match");
+
 export const registrationOwnerSchema = matchesField(registrationFields.pick({
   admin_first_name: true,
   admin_last_name: true,

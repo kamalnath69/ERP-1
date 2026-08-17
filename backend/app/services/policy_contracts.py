@@ -64,6 +64,12 @@ def college_route_contract(path: str, method: str) -> RoutePolicyContract | None
     if path.startswith("/college/readiness/"):
         return _contract("readiness", method, manage_writes=True)
 
+    if path in {
+        "/college/students/hierarchy",
+        "/college/students/summary",
+        "/college/students/page",
+    }:
+        return _contract("students", method)
     if path.startswith("/college/students/"):
         if path.endswith("/intelligence"):
             return _contract("readiness", method)

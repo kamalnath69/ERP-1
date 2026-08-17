@@ -3,6 +3,7 @@ import * as echarts from "echarts/core";
 import { BarChart, LineChart, PieChart } from "echarts/charts";
 import { GridComponent, LegendComponent, TitleComponent, ToolboxComponent, TooltipComponent } from "echarts/components";
 import { SVGRenderer } from "echarts/renderers";
+import { cn } from "@/lib/utils";
 
 echarts.use([BarChart, LineChart, PieChart, GridComponent, LegendComponent, TitleComponent, ToolboxComponent, TooltipComponent, SVGRenderer]);
 
@@ -43,7 +44,7 @@ const resizeWithoutAnimation = (chart) => {
   chart.resize({ animation: { duration: 0 } });
 };
 
-export default function AIChart({ data }) {
+export default function AIChart({ data, className }) {
   const root = useRef(null);
   const chartRef = useRef(null);
 
@@ -121,5 +122,5 @@ export default function AIChart({ data }) {
     resizeWithoutAnimation(chart);
     return undefined;
   }, [data]);
-  return <div ref={root} className="h-72 w-full" role="img" aria-label="Interactive business chart" />;
+  return <div ref={root} className={cn("h-72 w-full", className)} role="img" aria-label="Interactive business chart" />;
 }

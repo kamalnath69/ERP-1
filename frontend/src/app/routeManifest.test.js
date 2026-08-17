@@ -46,3 +46,11 @@ test("requires the scoped College reporting permission for Home and reports", ()
   expect(authorizedKeys).toContain("home");
   expect(authorizedKeys).toContain("reports");
 });
+
+test("keeps Notifications routable while excluding it from sidebar navigation", () => {
+  const notificationRoute = visibleRoutes(context).find((route) => route.key === "notifications");
+
+  expect(notificationRoute).toBeDefined();
+  expect(notificationRoute.hideFromSidebar).toBe(true);
+  expect(routeAvailable(notificationRoute, context)).toBe(true);
+});

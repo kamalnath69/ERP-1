@@ -18,6 +18,7 @@ import { ProfileBackLink } from "@/components/entities/EntityProfile";
 import { EmptyState, PageShell, Surface } from "@/components/system";
 import { useUpdateCatalogItemMutation } from "@/features/catalog/catalogApi";
 import { applyApiErrors, catalogProfileSchema, FORM_OPTIONS } from "@/lib/validation";
+import { useRegisterAIPageContext } from "@/components/ai/AIConversationProvider";
 
 function catalogValues(item = {}) {
   return {
@@ -39,6 +40,7 @@ function catalogValues(item = {}) {
 
 export default function CatalogProfile() {
   const { itemId } = useParams(); const { locationId, location } = useBusiness(); const { data, error, refetch } = useGetCatalogProfileQuery({ itemId, locationId }, QUERY_POLICIES.operational); const [editing, setEditing] = useState(false); const [adjustment, setAdjustment] = useState(null); const [updateItem, updateState] = useUpdateCatalogItemMutation();
+  useRegisterAIPageContext(data?.item ? { kind: "catalog", id: data.item.id || itemId, label: `Catalog item: ${data.item.name}` } : null);
   const editForm = useForm({ resolver: zodResolver(catalogProfileSchema), defaultValues: catalogValues(), ...FORM_OPTIONS });
   const { clearErrors, control, formState, handleSubmit, reset, setError, setValue, watch } = editForm;
   const taxInclusive = watch("tax_inclusive"); const active = watch("is_active");

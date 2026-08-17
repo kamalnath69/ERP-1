@@ -88,6 +88,9 @@ class Settings:
     AUTH_CODE_TTL_MINUTES: int = int(os.environ.get("AUTH_CODE_TTL_MINUTES", 10))
     PASSWORD_RESET_TTL_MINUTES: int = int(os.environ.get("PASSWORD_RESET_TTL_MINUTES", 15))
     AUTH_CODE_MAX_ATTEMPTS: int = int(os.environ.get("AUTH_CODE_MAX_ATTEMPTS", 5))
+    SIGNUP_EMAIL_PROOF_TTL_MINUTES: int = int(os.environ.get("SIGNUP_EMAIL_PROOF_TTL_MINUTES", 30))
+    SIGNUP_EMAIL_RESEND_SECONDS: int = int(os.environ.get("SIGNUP_EMAIL_RESEND_SECONDS", 60))
+    SIGNUP_EMAIL_MAX_SENDS_15_MINUTES: int = int(os.environ.get("SIGNUP_EMAIL_MAX_SENDS_15_MINUTES", 3))
     AUTH_EXPOSE_TEST_CODES: bool = os.environ.get("AUTH_EXPOSE_TEST_CODES", "false").lower() == "true"
     SUPER_ADMIN_EMAIL: str = os.environ.get("SUPER_ADMIN_EMAIL", "superadmin@edvatiq.com").strip().lower()
     SUPER_ADMIN_INITIAL_PASSWORD: str = os.environ.get("SUPER_ADMIN_INITIAL_PASSWORD", "" if ENVIRONMENT == "production" else "SuperAdmin@123")

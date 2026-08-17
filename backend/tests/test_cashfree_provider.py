@@ -191,13 +191,13 @@ def test_cashfree_order_uses_the_signup_checkout_expiry(monkeypatch):
         notes={"description": "Test checkout"},
         idempotency_key="checkout-key",
         expires_at=datetime(2026, 8, 15, tzinfo=timezone.utc),
-        return_url="https://edvatiq.app/register/payment/checkout-id?returned=1",
+        return_url="https://edvatiq.app/register?payment_return=checkout-id",
     )
 
     assert result["session_id"] == "session-1"
     assert captured["order_expiry_time"] == "2026-08-15T00:00:00+00:00"
     assert captured["order_meta"] == {
-        "return_url": "https://edvatiq.app/register/payment/checkout-id?returned=1",
+        "return_url": "https://edvatiq.app/register?payment_return=checkout-id",
     }
 
 

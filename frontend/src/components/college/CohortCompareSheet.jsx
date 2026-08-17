@@ -20,7 +20,7 @@ function flattenCohorts(data) {
   ));
 }
 
-export default function CohortCompareSheet({ data, selectedIds = [], onApply }) {
+export default function CohortCompareSheet({ data, selectedIds = [], onApply, trigger = null }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [draft, setDraft] = useState(selectedIds);
@@ -41,13 +41,13 @@ export default function CohortCompareSheet({ data, selectedIds = [], onApply }) 
     : current.length < 50 ? [...current, id] : current);
 
   return <>
-    <Surface className="overflow-hidden">
+    {trigger ? React.cloneElement(trigger, { onClick: () => setOpen(true) }) : <Surface className="overflow-hidden">
       <div className="flex flex-col gap-3 px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between sm:px-5">
         <div className="flex min-w-0 items-center gap-3"><span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-primary/10 text-primary"><Scales /></span><div className="min-w-0"><div className="font-semibold">Compare cohorts</div><p className="mt-0.5 text-xs text-muted-foreground">Combine sections or graduation years without changing the college hierarchy.</p></div></div>
         <Button variant="outline" onClick={() => setOpen(true)}>{selected.length ? "Change comparison" : <><Plus className="mr-2" />Select cohorts</>}</Button>
       </div>
       {selected.length > 0 && <div className="flex flex-wrap gap-2 border-t bg-surface-subtle/45 px-4 py-3 sm:px-5">{selected.map((row) => <button key={row.id} type="button" onClick={() => onApply(selectedIds.filter((id) => id !== row.id))} className="inline-flex max-w-full items-center gap-2 rounded-full border bg-card px-3 py-1.5 text-xs font-semibold transition-colors hover:border-primary/30"><span className="truncate">{row.department_code} / {row.program_code} / {row.section || "GENERAL"} / {row.graduation_year}</span><X size={13} className="shrink-0 text-muted-foreground" /></button>)}<Button size="sm" variant="ghost" onClick={() => onApply([])}>Clear comparison</Button></div>}
-    </Surface>
+    </Surface>}
 
     <DrawerForm open={open} onOpenChange={setOpen} title="Compare student cohorts" description="Choose up to 50 institution-defined batches or sections. Your selection is preserved in the page URL.">
       <div className="space-y-4">

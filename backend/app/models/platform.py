@@ -55,6 +55,32 @@ class PlanVersion(TimestampMixin, Base):
     version_lock: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
 
+class SignupEmailChallenge(TimestampMixin, Base):
+    """Browser-bound proof that a prospective owner controls an email address."""
+
+    __tablename__ = "signup_email_challenges"
+    __table_args__ = (
+        Index("ix_signup_email_challenges_email_created", "email_hash", "created_at"),
+        Index("ix_signup_email_challenges_ip_created", "request_ip", "created_at"),
+        Index("ix_signup_email_challenges_status_expiry", "status", "expires_at"),
+    )
+
+    id: Mapped[str] = uuid_pk()
+    email: Mapped[str] = mapped_column(String(254), nullable=False)
+    email_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    browser_token_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    code_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    proof_hash: Mapped[str | None] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(30), default="pending", nullable=False, index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    request_ip: Mapped[str | None] = mapped_column(String(64))
+    resend_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    proof_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class SignupCheckout(TimestampMixin, Base):
     """Short-lived paid signup state; this is not an organization account."""
 
@@ -62,6 +88,7 @@ class SignupCheckout(TimestampMixin, Base):
     __table_args__ = (
         Index("ix_signup_checkouts_slug_status_expiry", "organization_slug", "status", "expires_at"),
         Index("ix_signup_checkouts_status_expiry", "status", "expires_at"),
+        Index("uq_signup_checkouts_email_challenge_id", "email_challenge_id", unique=True),
     )
 
     id: Mapped[str] = uuid_pk()
@@ -81,6 +108,10 @@ class SignupCheckout(TimestampMixin, Base):
     state: Mapped[str | None] = mapped_column(String(100))
     plan_version_id: Mapped[str | None] = mapped_column(
         UUID_STR, ForeignKey("plan_versions.id", ondelete="SET NULL"), index=True
+    )
+    email_challenge_id: Mapped[str | None] = mapped_column(
+        UUID_STR,
+        ForeignKey("signup_email_challenges.id", ondelete="SET NULL"),
     )
     plan_snapshot: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     billing_interval: Mapped[str] = mapped_column(String(20), nullable=False)

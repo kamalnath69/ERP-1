@@ -14,9 +14,19 @@ function storedAppearance() {
   return ["light", "dark", "system"].includes(value) ? value : "light";
 }
 
+function storedSidebarPinned() {
+  if (typeof window === "undefined") return false;
+  try {
+    localStorage.removeItem("edvatiq.sidebar");
+    return sessionStorage.getItem("edvatiq.sidebar.pinned.v2") === "true";
+  } catch {
+    return false;
+  }
+}
+
 const initialState = {
   locationId: stored("edvatiq.location"),
-  sidebarCompact: stored("edvatiq.sidebar") === "compact",
+  sidebarPinned: storedSidebarPinned(),
   aiSidebarCollapsed: stored("edvatiq.ai.sidebar") === "collapsed",
   appearance: storedAppearance(),
   dashboardLayouts: storedJSON("edvatiq.dashboard.layouts", {}),
@@ -27,7 +37,7 @@ const preferencesSlice = createSlice({
   initialState,
   reducers: {
     setLocationId: (state, action) => { state.locationId = action.payload || null; },
-    setSidebarCompact: (state, action) => { state.sidebarCompact = Boolean(action.payload); },
+    setSidebarPinned: (state, action) => { state.sidebarPinned = Boolean(action.payload); },
     setAISidebarCollapsed: (state, action) => { state.aiSidebarCollapsed = Boolean(action.payload); },
     setAppearance: (state, action) => {
       state.appearance = ["light", "dark", "system"].includes(action.payload) ? action.payload : "light";
@@ -41,9 +51,9 @@ const preferencesSlice = createSlice({
   },
 });
 
-export const { setLocationId, setSidebarCompact, setAISidebarCollapsed, setAppearance, setDashboardLayout, resetDashboardLayout, clearTenantPreferences } = preferencesSlice.actions;
+export const { setLocationId, setSidebarPinned, setAISidebarCollapsed, setAppearance, setDashboardLayout, resetDashboardLayout, clearTenantPreferences } = preferencesSlice.actions;
 export const selectLocationId = (state) => state.preferences.locationId;
-export const selectSidebarCompact = (state) => state.preferences.sidebarCompact;
+export const selectSidebarPinned = (state) => state.preferences.sidebarPinned;
 export const selectAISidebarCollapsed = (state) => state.preferences.aiSidebarCollapsed;
 export const selectAppearance = (state) => state.preferences.appearance;
 export const selectDashboardLayout = (key = "default") => (state) => state.preferences.dashboardLayouts[key] || null;

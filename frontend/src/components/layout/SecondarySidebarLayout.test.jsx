@@ -28,8 +28,9 @@ test("defaults to an expanded rail narrower than the 232px primary sidebar", () 
   expect(html).not.toContain("w-60");
 });
 
-test("settings and chat explicitly opt into secondary workspace layouts", () => {
+test("settings, placement, and chat explicitly opt into secondary workspace layouts", () => {
   expect(routeForPath("/app/settings").layout).toBe("secondary");
+  expect(routeForPath("/app/college", "college").layout).toBe("secondary");
   expect(routeForPath("/app/ai").layout).toBe("secondary-fixed");
   expect(routeForPath("/app/clients").layout).toBeUndefined();
 });

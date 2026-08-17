@@ -52,6 +52,11 @@ export const collegeApi = baseApi.injectEndpoints({
       providesTags: resourceTags("college"),
       keepUnusedDataFor: 120,
     }),
+    getCollegeStudentHierarchy: builder.query({
+      queryFn: (_arg, api) => domainRequest({ url: "/college/students/hierarchy", method: "GET" }, api),
+      providesTags: resourceTags("college"),
+      keepUnusedDataFor: 120,
+    }),
     getCollegeCohortsPage: builder.query({
       queryFn: ({ q, departmentId, programId, cohortId, graduationYear, section, active, cursor, limit = 25 } = {}, api) => domainRequest({
         url: "/college/cohorts/page", method: "GET",
@@ -175,6 +180,22 @@ export const collegeApi = baseApi.injectEndpoints({
     getCollegeStudentIntelligence: builder.query({
       queryFn: (filters = {}, api) => domainRequest({
         url: "/college/student-intelligence",
+        method: "GET",
+        params: collegeFilterParams(filters),
+      }, api),
+      providesTags: resourceTags("college"),
+    }),
+    getCollegeStudentSummary: builder.query({
+      queryFn: (filters = {}, api) => domainRequest({
+        url: "/college/students/summary",
+        method: "GET",
+        params: collegeFilterParams(filters),
+      }, api),
+      providesTags: resourceTags("college"),
+    }),
+    getCollegeStudentsPage: builder.query({
+      queryFn: (filters = {}, api) => domainRequest({
+        url: "/college/students/page",
         method: "GET",
         params: collegeFilterParams(filters),
       }, api),
@@ -445,6 +466,7 @@ export const {
   useGetCollegeWorkspaceQuery,
   useGetCollegeReferencesQuery,
   useGetCollegeAcademicHierarchyQuery,
+  useGetCollegeStudentHierarchyQuery,
   useGetCollegeCohortsPageQuery,
   useGetCollegeDepartmentsPageQuery,
   useGetCollegeProgramsPageQuery,
@@ -463,6 +485,8 @@ export const {
   useGetCollegeInternshipClearancePageQuery,
   useGetCollegePlacementDashboardQuery,
   useGetCollegeStudentIntelligenceQuery,
+  useGetCollegeStudentSummaryQuery,
+  useGetCollegeStudentsPageQuery,
   useGetCollegeReadinessPolicyQuery,
   useGetCollegeStudentPlacementProfileQuery,
   useGetCollegeLeaderboardsQuery,
