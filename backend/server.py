@@ -177,7 +177,15 @@ async def http_error(_request: Request, exc: HTTPException):
         exc.detail.get("message", "The request could not be completed")
         if isinstance(exc.detail, dict) else "The request could not be completed"
     )
-    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail, "error": {"code": f"http_{exc.status_code}", "message": message}})
+    code = (
+        str(exc.detail.get("code"))
+        if isinstance(exc.detail, dict) and exc.detail.get("code")
+        else f"http_{exc.status_code}"
+    )
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail, "error": {"code": code, "message": message}},
+    )
 
 
 def _validation_payload(errors: list[dict]) -> dict:

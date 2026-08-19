@@ -146,12 +146,10 @@ def require_permissions(*codes: str):
         if organization and getattr(organization.industry, "value", organization.industry) == "college":
             from app.services.access_policy import (
                 COLLEGE_POLICY_RELEVANT_PERMISSIONS,
-                policy_v2_enabled,
                 resolve_policy_context,
             )
             if (
                 set(codes).intersection(COLLEGE_POLICY_RELEVANT_PERMISSIONS)
-                and policy_v2_enabled(db, organization.id)
                 and not resolve_policy_context(db, user).active
             ):
                 raise HTTPException(
@@ -205,12 +203,10 @@ def require_any_permission(*codes: str):
         if organization and getattr(organization.industry, "value", organization.industry) == "college":
             from app.services.access_policy import (
                 COLLEGE_POLICY_RELEVANT_PERMISSIONS,
-                policy_v2_enabled,
                 resolve_policy_context,
             )
             if (
                 matched.intersection(COLLEGE_POLICY_RELEVANT_PERMISSIONS)
-                and policy_v2_enabled(db, organization.id)
                 and not resolve_policy_context(db, user).active
             ):
                 raise HTTPException(

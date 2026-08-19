@@ -26,12 +26,18 @@ class Permission(TimestampMixin, Base):
 
 class Role(TimestampMixin, Base):
     __tablename__ = "roles"
-    __table_args__ = (UniqueConstraint("organization_id", "name", name="uq_role_org_name"),)
+    __table_args__ = (
+        UniqueConstraint("organization_id", "name", name="uq_role_org_name"),
+        UniqueConstraint("organization_id", "system_key", name="uq_role_org_system_key"),
+    )
 
     id: Mapped[str] = uuid_pk()
     organization_id: Mapped[str] = tenant_fk()
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     slug: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    # Stable machine identity for built-in roles. Display names and slugs are
+    # presentation values and must never be used as authorization identities.
+    system_key: Mapped[str | None] = mapped_column(String(100), index=True)
     description: Mapped[str | None] = mapped_column(Text)
     is_system: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)

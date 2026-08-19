@@ -10,6 +10,18 @@ Edvatiq is a multi-tenant, multi-location SaaS operations platform for Indian gy
 - OpenAI Responses API with tenant-scoped tools
 - S3-compatible storage, SMTP, Meta WhatsApp Cloud, Razorpay
 
+## AI architecture
+
+The canonical engineering guide for the governed, unversioned assistant is
+[`backend/app/ai/README.md`](backend/app/ai/README.md). It documents the complete
+request lifecycle, semantic catalog and query contracts, Owner/RBAC invariants,
+evidence, conversation context, background processing, actions, APIs, examples,
+and extension rules.
+
+Any change to AI contracts, catalog entries, compilation, authorization,
+execution, provider behavior, persistence, API routes, or frontend AI behavior
+must update that architecture README in the same change.
+
 ## Development
 
 Backend configuration lives in `backend/.env`.

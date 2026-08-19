@@ -3,7 +3,9 @@ from uuid import uuid4
 
 from sqlalchemy import select
 
-from app.ai.fast_queries import deterministic_query_plan
+from app.ai.catalog import catalog_for
+from app.ai.compiler import deterministic_compile
+from app.ai.contracts import ConversationState, QueryGoal
 from app.core.database import SessionLocal
 from app.models import AIWallet, Organization, WalletCreditGrant
 from app.services import ai_metering
@@ -43,28 +45,17 @@ def test_cached_input_receives_lower_charge(monkeypatch):
     assert cached.credits < uncached.credits
 
 
-def test_common_live_business_queries_use_the_free_database_path():
-    assert deterministic_query_plan("34 clients yaar yaaru")["arguments"]["subject"] == "clients"
-    assert deterministic_query_plan("evlo customers irukaanga")["arguments"] == {
-        "subject": "clients", "location_id": None, "status": "active",
-    }
-    assert deterministic_query_plan("Who bought what?")["arguments"]["subject"] == "purchases"
-    resistance_band = deterministic_query_plan("Who bought the Resistance Band?")
-    assert resistance_band["arguments"] == {
-        "subject": "purchases", "query": "resistance band", "location_id": None, "days": 365,
-    }
-    assert deterministic_query_plan("Show today's business summary")["tool"] == "business_summary"
-    assert deterministic_query_plan("Explain why revenue dropped") is None
-    assert deterministic_query_plan("list clients and sales") is None
-    follow_up = deterministic_query_plan("who are they", context_state={
-        "last_read": {
-            "tool": "business_records",
-            "arguments": {"subject": "clients", "status": "active", "location_id": "loc-1"},
-        },
-    })
-    assert follow_up["arguments"] == {
-        "subject": "clients", "status": "active", "location_id": "loc-1",
-    }
+def test_common_live_business_queries_compile_without_a_provider_request():
+    catalog = catalog_for("gym")
+    state = ConversationState()
+    clients = deterministic_compile("Show active clients", catalog, context=None, state=state)
+    sales = deterministic_compile("Show revenue", catalog, context=None, state=state)
+    complex_question = deterministic_compile("Explain why revenue dropped", catalog, context=None, state=state)
+
+    assert clients.entity == "client"
+    assert clients.goal == QueryGoal.LIST
+    assert sales.entity == "sale"
+    assert complex_question is None
 
 
 def test_low_balance_can_reserve_a_bounded_request():

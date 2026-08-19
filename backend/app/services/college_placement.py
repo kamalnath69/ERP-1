@@ -774,6 +774,9 @@ def placement_dashboard(
     cohort_id: str | None = None,
     cohort_ids: list[str] | set[str] | None = None,
     allowed_student_ids: set[str] | None = None,
+    include_assessments: bool = True,
+    include_attendance: bool = True,
+    include_coding: bool = True,
 ) -> dict:
     students = list(db.execute(student_query(
         organization_id,
@@ -788,9 +791,6 @@ def placement_dashboard(
     student_ids = [row.id for row in students]
     policy = active_readiness_policy(db, organization_id)
     snapshots = latest_readiness(db, organization_id, student_ids)
-    if len(snapshots) < len(student_ids):
-        recompute_readiness(db, organization_id, [student_id for student_id in student_ids if student_id not in snapshots])
-        snapshots = latest_readiness(db, organization_id, student_ids)
 
     clients = {
         row.id: row for row in db.execute(
@@ -824,7 +824,7 @@ def placement_dashboard(
             CollegeTermResult.student_profile_id.in_(student_ids) if student_ids else CollegeTermResult.id.is_(None),
         )
         .order_by(CollegeTermResult.student_profile_id, CollegeTermResult.semester.desc())
-    ).scalars())
+    ).scalars()) if include_assessments else []
     latest_terms = _first_by_student(term_rows)
     attendance_rows = list(db.execute(
         select(CollegeAttendanceSnapshot)
@@ -834,7 +834,7 @@ def placement_dashboard(
             CollegeAttendanceSnapshot.course_id.is_(None),
         )
         .order_by(CollegeAttendanceSnapshot.student_profile_id, CollegeAttendanceSnapshot.as_of.desc())
-    ).scalars())
+    ).scalars()) if include_attendance else []
     latest_attendance = _first_by_student(attendance_rows)
     coding_rows = list(db.execute(
         select(CollegeCodingSnapshot)
@@ -843,7 +843,7 @@ def placement_dashboard(
             CollegeCodingSnapshot.student_profile_id.in_(student_ids) if student_ids else CollegeCodingSnapshot.id.is_(None),
         )
         .order_by(CollegeCodingSnapshot.student_profile_id, CollegeCodingSnapshot.captured_at.desc())
-    ).scalars())
+    ).scalars()) if include_coding else []
     latest_coding = _first_by_student(coding_rows)
 
     applications = list(db.execute(
@@ -1116,7 +1116,7 @@ def placement_dashboard(
             "tone": "neutral",
         })
     filters = {
-        "academic_years": list(db.execute(select(CollegeTerm.academic_year).where(CollegeTerm.organization_id == organization_id).distinct().order_by(CollegeTerm.academic_year.desc())).scalars()),
+        "academic_years": list(db.execute(select(CollegeTerm.academic_year).where(CollegeTerm.organization_id == organization_id).distinct().order_by(CollegeTerm.academic_year.desc())).scalars()) if include_assessments else [],
         "graduation_years": sorted({cohort.graduation_year for cohort in cohort_rows.values()}, reverse=True),
         "departments": [{"id": row.id, "name": row.name, "code": row.code} for row in departments.values() if row.is_active and (scoped_department_ids is None or row.id in scoped_department_ids)],
         "programs": [{"id": row.id, "department_id": row.department_id, "name": row.name, "code": row.code} for row in programs.values() if row.is_active and (scoped_program_ids is None or row.id in scoped_program_ids)],
@@ -1184,15 +1184,22 @@ def placement_leaderboards(
     db: Session,
     organization_id: str,
     *,
+    graduation_year: int | None = None,
     department_id: str | None = None,
     program_id: str | None = None,
     cohort_id: str | None = None,
     window_days: int = 30,
     limit: int = 25,
+    metric: str | None = None,
     allowed_student_ids: set[str] | None = None,
 ) -> dict:
+    supported_metrics = {"academics", "readiness", "coding", "improvement"}
+    if metric is not None and metric not in supported_metrics:
+        raise ValueError("Unsupported College leaderboard metric")
+    requested_metrics = supported_metrics if metric is None else {metric}
     students = list(db.execute(student_query(
         organization_id,
+        graduation_year=graduation_year,
         department_id=department_id,
         program_id=program_id,
         cohort_id=cohort_id,
@@ -1200,14 +1207,39 @@ def placement_leaderboards(
     )).scalars().unique())
     ids = [row.id for row in students]
     client_ids = [row.client_id for row in students]
-    clients = {row.id: row for row in db.execute(select(Client).where(Client.id.in_(client_ids))).scalars()} if client_ids else {}
-    programs = {row.id: row for row in db.execute(select(CollegeProgram).where(CollegeProgram.organization_id == organization_id)).scalars()}
-    departments = {row.id: row for row in db.execute(select(CollegeDepartment).where(CollegeDepartment.organization_id == organization_id)).scalars()}
-    policy = active_readiness_policy(db, organization_id)
-    latest_scores = latest_readiness(db, organization_id, ids)
-    if len(latest_scores) < len(ids):
-        recompute_readiness(db, organization_id, [student_id for student_id in ids if student_id not in latest_scores])
-        latest_scores = latest_readiness(db, organization_id, ids)
+    clients = {
+        row.id: row
+        for row in db.execute(select(Client).where(
+            Client.organization_id == organization_id,
+            Client.id.in_(client_ids),
+        )).scalars()
+    } if client_ids else {}
+    program_ids = {row.program_id for row in students}
+    programs = {
+        row.id: row
+        for row in db.execute(select(CollegeProgram).where(
+            CollegeProgram.organization_id == organization_id,
+            CollegeProgram.id.in_(program_ids),
+        )).scalars()
+    } if program_ids else {}
+    department_ids = {row.department_id for row in programs.values()}
+    departments = {
+        row.id: row
+        for row in db.execute(select(CollegeDepartment).where(
+            CollegeDepartment.organization_id == organization_id,
+            CollegeDepartment.id.in_(department_ids),
+        )).scalars()
+    } if department_ids else {}
+    policy = (
+        active_readiness_policy(db, organization_id)
+        if requested_metrics & {"readiness", "improvement"}
+        else None
+    )
+    latest_scores = (
+        latest_readiness(db, organization_id, ids)
+        if "readiness" in requested_metrics
+        else {}
+    )
 
     term_rows = list(db.execute(
         select(CollegeTermResult)
@@ -1218,13 +1250,13 @@ def placement_leaderboards(
             CollegeTermResult.published_on.desc().nullslast(),
             CollegeTermResult.created_at.desc(),
         )
-    ).scalars())
+    ).scalars()) if "academics" in requested_metrics else []
     latest_terms = _first_by_student(term_rows)
     coding_rows = list(db.execute(
         select(CollegeCodingSnapshot)
         .where(CollegeCodingSnapshot.organization_id == organization_id, CollegeCodingSnapshot.student_profile_id.in_(ids) if ids else CollegeCodingSnapshot.id.is_(None))
         .order_by(CollegeCodingSnapshot.student_profile_id, CollegeCodingSnapshot.captured_at.desc())
-    ).scalars())
+    ).scalars()) if requested_metrics & {"coding", "improvement"} else []
     coding_groups = defaultdict(list)
     for row in coding_rows:
         coding_groups[row.student_profile_id].append(row)
@@ -1232,7 +1264,7 @@ def placement_leaderboards(
         select(CollegeReadinessSnapshot)
         .where(CollegeReadinessSnapshot.organization_id == organization_id, CollegeReadinessSnapshot.student_profile_id.in_(ids) if ids else CollegeReadinessSnapshot.id.is_(None))
         .order_by(CollegeReadinessSnapshot.student_profile_id, CollegeReadinessSnapshot.calculated_at.desc())
-    ).scalars())
+    ).scalars()) if "improvement" in requested_metrics else []
     readiness_groups = defaultdict(list)
     for row in readiness_rows:
         readiness_groups[row.student_profile_id].append(row)
@@ -1258,7 +1290,7 @@ def placement_leaderboards(
     for student in students:
         base = identity(student)
         coding = coding_groups[student.id][0] if coding_groups[student.id] else None
-        if coding:
+        if "coding" in requested_metrics and coding:
             difficulty_points = (coding.easy_solved or 0) + 2 * (coding.medium_solved or 0) + 3 * (coding.hard_solved or 0)
             coding_board.append({
                 **base,
@@ -1271,7 +1303,7 @@ def placement_leaderboards(
                 "captured_at": coding.captured_at.isoformat(),
             })
         term = latest_terms.get(student.id)
-        if term and term.cgpa is not None:
+        if "academics" in requested_metrics and term and term.cgpa is not None:
             academic_board.append({
                 **base,
                 "score": round(float(term.cgpa) * 10 - min(25, (term.active_backlogs or 0) * 5), 2),
@@ -1281,7 +1313,7 @@ def placement_leaderboards(
                 "semester": term.semester,
             })
         readiness = latest_scores.get(student.id)
-        if readiness:
+        if "readiness" in requested_metrics and readiness:
             readiness_board.append({
                 **base,
                 "score": _float(readiness.score),
@@ -1289,6 +1321,8 @@ def placement_leaderboards(
                 "band": readiness.band,
                 "rankable": readiness.score is not None and float(readiness.coverage_percent) >= float(policy.minimum_coverage_percent),
             })
+        if "improvement" not in requested_metrics:
+            continue
         coding_history = coding_groups[student.id]
         current_coding = coding_history[0] if coding_history else None
         previous_coding = next((row for row in coding_history if row.captured_at <= cutoff), None)
@@ -1310,11 +1344,23 @@ def placement_leaderboards(
                 "window_days": window_days,
             })
 
-    coding_board.sort(key=lambda row: (row["score"], row["total_solved"] or 0), reverse=True)
-    academic_board.sort(key=lambda row: (row["score"], row["cgpa"] or 0), reverse=True)
-    readiness_board.sort(key=lambda row: (row["rankable"], row["score"] or -1, row["coverage_percent"]), reverse=True)
-    improvement_board.sort(key=lambda row: row["score"], reverse=True)
-    for board in (coding_board, academic_board, readiness_board, improvement_board):
+    if "coding" in requested_metrics:
+        coding_board.sort(key=lambda row: (row["score"], row["total_solved"] or 0), reverse=True)
+    if "academics" in requested_metrics:
+        academic_board.sort(key=lambda row: (row["score"], row["cgpa"] or 0), reverse=True)
+    if "readiness" in requested_metrics:
+        readiness_board.sort(key=lambda row: (row["rankable"], row["score"] or -1, row["coverage_percent"]), reverse=True)
+    if "improvement" in requested_metrics:
+        improvement_board.sort(key=lambda row: row["score"], reverse=True)
+    boards = {
+        "coding": coding_board,
+        "academics": academic_board,
+        "readiness": readiness_board,
+        "improvement": improvement_board,
+    }
+    for key, board in boards.items():
+        if key not in requested_metrics:
+            continue
         for rank, row in enumerate(board[:limit], start=1):
             row["rank"] = rank
     return {
@@ -1322,10 +1368,14 @@ def placement_leaderboards(
         "academics": academic_board[:limit],
         "readiness": readiness_board[:limit],
         "improvement": improvement_board[:limit],
+        "ranked_counts": {key: len(board) for key, board in boards.items()},
+        "total_students": len(students),
+        "metric": metric,
+        "graduation_year": graduation_year,
         "policy": {
             "version": policy.version,
             "minimum_coverage_percent": _float(policy.minimum_coverage_percent),
-        },
+        } if policy else None,
     }
 
 

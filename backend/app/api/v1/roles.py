@@ -10,7 +10,7 @@ from app.core.deps import require_entitlements, require_permissions
 from app.models import AccessPolicy, Organization, Permission, Role, RolePermission, User, UserRole
 from app.schemas import PermissionOut, RoleCreate, RoleOut, RoleUpdate
 from app.services.audit import log_action
-from app.services.access_policy import grantable_permission_codes, policy_v2_enabled, require_access_administrator
+from app.services.access_policy import college_policy_applies, grantable_permission_codes, require_access_administrator
 from app.services.rbac import get_user_permissions
 
 router = APIRouter(prefix="/roles", tags=["roles"])
@@ -56,7 +56,7 @@ def _uses_college_policy(db: Session, user: User) -> bool:
     return bool(
         organization
         and organization.industry.value == "college"
-        and policy_v2_enabled(db, user.organization_id)
+        and college_policy_applies(db, user.organization_id)
     )
 
 

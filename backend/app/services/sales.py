@@ -35,7 +35,7 @@ from app.services.business_access import (
     organization_for,
 )
 from app.services.cursor_pagination import decode_cursor_or_legacy_id, encode_cursor
-from app.services.access_policy import policy_v2_enabled, require_policy_domain, resolve_policy_context
+from app.services.access_policy import college_policy_applies, require_policy_domain, resolve_policy_context
 from app.services.rbac import get_user_permissions
 
 
@@ -53,7 +53,7 @@ def _scoped_statement(db: Session, user: User):
     is_college_policy = bool(
         organization
         and organization.industry.value == "college"
-        and policy_v2_enabled(db, user.organization_id)
+        and college_policy_applies(db, user.organization_id)
     )
     if is_college_policy:
         context = require_policy_domain(db, user, "clearance", "view")
@@ -84,7 +84,7 @@ def _ensure_sale_client_access(db: Session, user: User, client: Client) -> None:
     if (
         organization
         and organization.industry.value == "college"
-        and policy_v2_enabled(db, user.organization_id)
+        and college_policy_applies(db, user.organization_id)
     ):
         context = require_policy_domain(db, user, "clearance", "view")
         profile = db.execute(select(CollegeStudentProfile).where(
@@ -125,7 +125,7 @@ def _filtered_statement(
         organization = db.get(Organization, user.organization_id)
         college_context = (
             resolve_policy_context(db, user)
-            if organization and organization.industry.value == "college" and policy_v2_enabled(db, user.organization_id)
+            if organization and organization.industry.value == "college" and college_policy_applies(db, user.organization_id)
             else None
         )
         client_fields = [Client.first_name, Client.last_name]

@@ -21,13 +21,17 @@ def organization_for(db: Session, user: User) -> Organization:
 def allowed_location_ids(db: Session, user: User) -> set[str] | None:
     """None means all tenant locations; a set is an explicit location boundary."""
     from app.models import Organization
-    from app.services.access_policy import policy_v2_enabled, resolve_policy_context
+    from app.services.access_policy import college_policy_applies, resolve_policy_context
+    from app.services.rbac import is_system_owner
+
+    if is_system_owner(db, user):
+        return None
 
     organization = db.get(Organization, user.organization_id) if user.organization_id else None
     if (
         organization
         and getattr(organization.industry, "value", organization.industry) == "college"
-        and policy_v2_enabled(db, user.organization_id)
+        and college_policy_applies(db, user.organization_id)
     ):
         context = resolve_policy_context(db, user)
         if not context.active:
@@ -65,13 +69,17 @@ def client_scope_mode(db: Session, user: User) -> str:
 def allowed_client_ids(db: Session, user: User) -> set[str] | None:
     """None means all clients in allowed locations; a set is an explicit boundary."""
     from app.models import CollegeStudentProfile, Organization
-    from app.services.access_policy import policy_v2_enabled, resolve_policy_context
+    from app.services.access_policy import college_policy_applies, resolve_policy_context
+    from app.services.rbac import is_system_owner
+
+    if is_system_owner(db, user):
+        return None
 
     organization = db.get(Organization, user.organization_id) if user.organization_id else None
     if (
         organization
         and getattr(organization.industry, "value", organization.industry) == "college"
-        and policy_v2_enabled(db, user.organization_id)
+        and college_policy_applies(db, user.organization_id)
     ):
         context = resolve_policy_context(db, user)
         if not context.active:
@@ -120,7 +128,7 @@ def allowed_client_ids(db: Session, user: User) -> set[str] | None:
 
 
 def ensure_location(db: Session, user: User, location_id: str) -> Location:
-    from app.services.access_policy import policy_v2_enabled
+    from app.services.access_policy import college_policy_applies
 
     location = db.execute(select(Location).where(
         Location.id == location_id, Location.organization_id == user.organization_id, Location.is_active.is_(True)
@@ -133,7 +141,7 @@ def ensure_location(db: Session, user: User, location_id: str) -> Location:
         is_college_policy = (
             organization
             and getattr(organization.industry, "value", organization.industry) == "college"
-            and policy_v2_enabled(db, user.organization_id)
+            and college_policy_applies(db, user.organization_id)
         )
         if is_college_policy:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Location not found")
@@ -145,13 +153,13 @@ def ensure_client_access(db: Session, user: User, client):
     if client.organization_id != user.organization_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Client not found")
     from app.models import CollegeStudentProfile, Organization
-    from app.services.access_policy import policy_v2_enabled, resolve_policy_context
+    from app.services.access_policy import college_policy_applies, resolve_policy_context
 
     organization = db.get(Organization, user.organization_id) if user.organization_id else None
     if (
         organization
         and getattr(organization.industry, "value", organization.industry) == "college"
-        and policy_v2_enabled(db, user.organization_id)
+        and college_policy_applies(db, user.organization_id)
     ):
         context = resolve_policy_context(db, user)
         scope = context.scope("students")
@@ -172,7 +180,7 @@ def ensure_client_access(db: Session, user: User, client):
 
 def filter_clients(statement, db: Session, user: User, model=None):
     from app.models import Client, CollegeStudentProfile, Organization
-    from app.services.access_policy import policy_v2_enabled, resolve_policy_context
+    from app.services.access_policy import college_policy_applies, resolve_policy_context
     model = model or Client
     # Tenant isolation is mandatory here so callers cannot accidentally rely on
     # location/client scopes as a substitute for the organization boundary.
@@ -181,7 +189,7 @@ def filter_clients(statement, db: Session, user: User, model=None):
     if (
         organization
         and getattr(organization.industry, "value", organization.industry) == "college"
-        and policy_v2_enabled(db, user.organization_id)
+        and college_policy_applies(db, user.organization_id)
     ):
         context = resolve_policy_context(db, user)
         if not context.active or context.level("students") == "none":

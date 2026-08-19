@@ -3,114 +3,115 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { configureStore } from "@reduxjs/toolkit";
 import { Provider } from "react-redux";
 import { MemoryRouter } from "react-router-dom";
-import ResponseBlocks, { measureFirstRow } from "./ResponseBlocks";
+
+import ResponseBlocks from "./ResponseBlocks";
 import { baseApi } from "@/store/api/baseApi";
 
-const store = configureStore({ reducer: { [baseApi.reducerPath]: baseApi.reducer }, middleware: (getDefault) => getDefault().concat(baseApi.middleware) });
-const render = (children) => renderToStaticMarkup(<Provider store={store}><MemoryRouter>{children}</MemoryRouter></Provider>);
-
-test("renders structured records without passing objects to React", () => {
-  const html = render(<ResponseBlocks message={{ blocks: [{
-    id: "clients", type: "table", title: "Clients",
-    data: { total: 12, result_session_id: "result-1", items: [{ id: "1", name: "Kamal", details: { status: "active" } }] },
-  }] }} onViewAll={() => {}} onPin={() => {}} onConfirm={() => {}} onUndo={() => {}} />);
-  expect(html).toContain("status: active");
-  expect(html).toContain("View all");
+const store = configureStore({
+  reducer: { [baseApi.reducerPath]: baseApi.reducer },
+  middleware: (getDefault) => getDefault().concat(baseApi.middleware),
 });
+const render = (children) => renderToStaticMarkup(
+  <Provider store={store}><MemoryRouter>{children}</MemoryRouter></Provider>,
+);
 
-test("does not expose internal tool traces", () => {
-  const html = render(<ResponseBlocks message={{ blocks: [{ id: "summary", type: "text", data: { text: "Safe" } }] }} />);
-  expect(html.toLowerCase()).not.toContain("tool trace");
-});
+const studentPresentation = {
+  layout: "cards",
+  entity: "student",
+  preview_limit: 4,
+  fields: [
+    { key: "name", label: "Student name", format: "text", group: "Identity", role: "title", priority: 0 },
+    { key: "program", label: "Program", format: "relation", group: "Enrollment", role: "subtitle", priority: 10 },
+    { key: "status", label: "Status", format: "status", group: "Identity", role: "badge", priority: 5 },
+    { key: "cgpa", label: "Current CGPA", format: "decimal", group: "Academics", role: "metric", priority: 10 },
+    { key: "attendance_percent", label: "Attendance", format: "percent", group: "Attendance", role: "metric", priority: 20 },
+  ],
+};
 
-test("renders entity results as allowlisted profile cards", () => {
-  const html = render(<ResponseBlocks message={{ blocks: [{
-    id: "employees", type: "entity_cards", title: "Employees",
-    data: { total: 1, entity_kind: "employee", items: [{
-      id: "employee-1", display_name: "Gopal Vaarma", display_meta: "Manager",
-      status: "active", profile_ref: { kind: "employee", id: "employee-1" },
-      selection_ref: { kind: "employee", id: "employee-1" }, confidence: 100,
-    }] },
-  }] }} onSelectEntity={() => {}} />);
-  expect(html).toContain("Gopal Vaarma");
-  expect(html).toContain("Open profile");
-  expect(html).toContain('/app/team/employee-1');
-  expect(html).toContain("Use this record");
-  expect(html).not.toContain("profile_ref");
-  expect(html).not.toContain("confidence");
-});
-
-test("collapses catalog and stock-level matches into one product profile", () => {
-  const catalogRef = { kind: "catalog", id: "product-1" };
-  const html = render(<ResponseBlocks message={{ blocks: [{
-    id: "product", type: "entity_cards", title: "Matching business records",
-    data: { total: 3, items: [
-      { id: "product-1", kind: "catalog", display_name: "Whey Protein 1 kg", display_meta: "WHEY-1", status: "active", profile_ref: catalogRef },
-      { id: "stock-1", kind: "inventory", display_name: "Whey Protein 1 kg", status: "low", profile_ref: catalogRef, snapshot: { quantity_milli: 3000 } },
-      { id: "stock-2", kind: "inventory", display_name: "Whey Protein 1 kg", status: "available", profile_ref: catalogRef, snapshot: { quantity_milli: 18000 } },
-    ] },
-  }] }} />);
-
-  expect(html.match(/Open profile/g)).toHaveLength(1);
-  expect(html).toContain("1 found");
-  expect(html).toContain("21");
-  expect(html).toContain('/app/catalog/product-1');
-});
-
-test("measures only cards in the first visual row", () => {
-  expect(measureFirstRow([
-    { offsetTop: 0, offsetHeight: 120 },
-    { offsetTop: 0, offsetHeight: 132 },
-    { offsetTop: 144, offsetHeight: 120 },
-  ])).toEqual({ visibleCount: 2, rowHeight: 132 });
-});
-
-test("offers query-backed view all without requiring a live session", () => {
-  const html = render(<ResponseBlocks message={{ blocks: [{
-    id: "clients", type: "entity_cards", title: "Clients",
+test("renders four record cards and opens complete pagination without a table", () => {
+  const items = ["Kamal", "Asha", "Bala", "Deepa", "Eshan"].map((name, index) => ({
+    name, cgpa: 8.7 - index / 10, profile_ref: { kind: "client", id: `client-${index}` },
+  }));
+  const html = render(<ResponseBlocks message={{ artifacts: [{
+    id: "students", type: "records", title: "Matching students",
+    presentation: studentPresentation,
     data: {
-      total: 3,
-      query_spec: { engine: "local_v1", subject: "clients" },
-      items: [
-        { id: "1", display_name: "One", profile_ref: { kind: "client", id: "1" } },
-        { id: "2", display_name: "Two", profile_ref: { kind: "client", id: "2" } },
-      ],
+      total: 12, has_more: true, result_session_id: "result-1",
+      query: { goal: "list", entity: "student" }, items,
     },
   }] }} onViewAll={() => {}} onPin={() => {}} />);
 
-  expect(html).toContain("View all");
-  expect(html).not.toContain("Pin");
+  expect(html).toContain("Kamal");
+  expect(html).toContain("Deepa");
+  expect(html).not.toContain("Eshan");
+  expect(html).toContain("View all 12");
+  expect(html).not.toContain("<table");
 });
 
-test("does not hide candidate cards when no result drawer can be opened", () => {
-  const html = render(<ResponseBlocks message={{ blocks: [{
-    id: "candidates", type: "entity_cards", title: "Choose a record",
-    data: { total: 2, items: [
-      { id: "1", display_name: "First candidate" },
-      { id: "2", display_name: "Second candidate" },
-    ] },
+test("renders a human profile with safe relations and a working client link", () => {
+  const relationId = "f94d1b70-cf8e-42e4-8177-6781a6de3602";
+  const html = render(<ResponseBlocks message={{ artifacts: [{
+    id: "profile", type: "profile", title: "Lokesh Menon",
+    presentation: { ...studentPresentation, layout: "profile" },
+    data: {
+      id: "student-internal",
+      name: "Lokesh Menon",
+      status: "active",
+      cgpa: 7.03,
+      attendance_percent: 84,
+      program: { id: relationId, name: "B.Sc. Computer Science", code: "BSC-CS" },
+      profile_ref: { kind: "client", id: "client-lokesh" },
+    },
   }] }} />);
 
-  expect(html).toContain("First candidate");
-  expect(html).toContain("Second candidate");
-  expect(html).not.toContain("View all");
+  expect(html).toContain("Verified profile");
+  expect(html).toContain("Lokesh Menon");
+  expect(html).toContain("B.Sc. Computer Science (BSC-CS)");
+  expect(html).toContain('href="/app/clients/client-lokesh"');
+  expect(html).toContain("Open full profile");
+  expect(html).not.toContain(relationId);
+  expect(html).not.toContain("student-internal");
 });
 
-test("hands large compact tables to the full AI even after a result session expires", () => {
-  const html = render(<ResponseBlocks compact message={{ blocks: [{
-    id: "students",
-    type: "table",
-    title: "Students",
-    data: {
-      total: 18,
-      query_spec: { tool: "college_students", graduation_year: 2027 },
-      items: [
-        { id: "1", name: "Anika" },
-        { id: "2", name: "Bharat" },
-      ],
-    },
-  }] }} onViewAll={() => {}} />);
+test("does not render an inert profile action for a semantic student reference", () => {
+  const html = render(<ResponseBlocks message={{ artifacts: [{
+    id: "profile", type: "profile", title: "Lokesh Menon",
+    presentation: { ...studentPresentation, layout: "profile" },
+    data: { name: "Lokesh Menon", profile_ref: { kind: "student", id: "student-1" } },
+  }] }} />);
 
-  expect(html).toContain("View all");
-  expect(html).toContain("18 found");
+  expect(html).not.toContain("Open full profile");
+});
+
+test("renders canonical ambiguity choices without a synthetic query", () => {
+  const html = render(<ResponseBlocks message={{ artifacts: [{
+    id: "clarification", type: "clarification", title: "Which student did you mean?",
+    data: {
+      clarification_id: "clarify-1",
+      options: [{ label: "Kamal Raj", entity: { kind: "student", id: "student-7", label: "Kamal Raj" } }],
+    },
+  }] }} onSelectEntity={() => {}} />);
+
+  expect(html).toContain("Choose one");
+  expect(html).toContain("Kamal Raj");
+  expect(html).not.toContain("Tell me about");
+});
+
+test("labels contextual suggestions and keeps evidence secondary", () => {
+  const html = render(<ResponseBlocks message={{
+    artifacts: [],
+    suggestions: [{ id: "next", label: "Academic history", prompt: "Show academic history" }],
+    evidence: [{
+      source: "Edvatiq College records",
+      authorized_scope: "your 34 authorized records",
+      sample_size: 34,
+      coverage_percent: 88,
+      definitions: { high: "CGPA at least 8.0" },
+    }],
+  }} onSuggestion={() => {}} />);
+
+  expect(html).toContain("You could also ask");
+  expect(html).toContain("Academic history");
+  expect(html).toContain("Evidence and scope");
+  expect(html).toContain("your 34 authorized records");
 });

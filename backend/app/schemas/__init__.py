@@ -1,7 +1,7 @@
 """Shared API request and response contracts."""
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 from typing import Literal
 
 from app.schemas.validation import RequestModel, valid_phone
@@ -224,6 +224,7 @@ class RoleOut(ORMBase):
     id: str
     name: str
     slug: str
+    system_key: str | None = None
     description: str | None = None
     is_system: bool
     is_active: bool
@@ -250,10 +251,16 @@ class AssignRolesRequest(RequestModel):
 
 class ChatRequest(RequestModel):
     conversation_id: str | None = Field(default=None, max_length=100)
-    message: str = Field(min_length=1, max_length=5000)
-    location_id: str | None = Field(default=None, max_length=100)
+    message: str | None = Field(default=None, min_length=1, max_length=5000)
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=160)
-    context: dict | None = Field(default=None, max_length=100)
+    context: dict | None = None
+    interaction: dict | None = None
+
+    @model_validator(mode="after")
+    def message_or_interaction(self):
+        if bool(self.message) == bool(self.interaction):
+            raise ValueError("Provide either a message or an interaction")
+        return self
 
 
 class ChatMessageOut(ORMBase):
@@ -262,9 +269,12 @@ class ChatMessageOut(ORMBase):
     turn_id: str
     role: str
     content: str
-    response_schema_version: int = 1
-    blocks: list = []
-    citations: list = []
+    outcome: str | None = None
+    artifacts: list = Field(default_factory=list)
+    suggestions: list = Field(default_factory=list)
+    evidence: list = Field(default_factory=list)
+    scope: dict = Field(default_factory=dict)
+    semantic_query: dict | None = None
     feedback_rating: str | None = None
     created_at: datetime
 

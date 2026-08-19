@@ -10,7 +10,12 @@ from sqlalchemy.orm import object_session
 
 from app.core.database import SessionLocal
 from app.core.config import settings
-from app.models import AIUsage, AuditLog, ChatConversation, ChatMessage, ChatTurn, Client, Organization, PlanDefinition, PlanVersion, Subscription, User, WalletReservation
+from app.models import (
+    AIUsage, AIWallet, AuditLog, ChatConversation, ChatMessage, ChatTurn, Client,
+    Organization, Permission, PlanDefinition, PlanVersion, Role, RolePermission,
+    Subscription, User, UserPermissionOverride, UserRole, WalletReservation,
+)
+from app.services.rbac import get_user_permissions
 from conftest import delete_signup_challenge, verified_signup_body
 from server import app
 
@@ -188,6 +193,163 @@ class TestSecureAuthentication:
 
 
 class TestSharedPlatform:
+    def test_owner_permissions_are_runtime_invariant_and_tenant_isolated(self, organizations):
+        _headers_a, context_a = register(organizations, "gym")
+        _headers_b, context_b = register(organizations, "salon")
+        organization_a = context_a["organization"]["id"]
+        organization_b = context_b["organization"]["id"]
+
+        with SessionLocal() as db:
+            owner_a = db.execute(select(User).where(User.organization_id == organization_a)).scalar_one()
+            owner_b = db.execute(select(User).where(User.organization_id == organization_b)).scalar_one()
+            owner_role = db.execute(
+                select(Role)
+                .join(UserRole, UserRole.role_id == Role.id)
+                .where(UserRole.user_id == owner_a.id, Role.system_key == "owner")
+            ).scalar_one()
+            assert owner_role.is_system is True
+            assert {"ai.use", "ai.actions", "clients.media.view"}.issubset(
+                get_user_permissions(db, owner_a)
+            )
+
+            owner_role.name = "Workspace Principal"
+            owner_role.slug = f"workspace-principal-{uuid4().hex[:6]}"
+            permission = Permission(
+                code=f"future.sensitive.{uuid4().hex}",
+                label="Future sensitive capability",
+                module="future",
+                organization_id=organization_a,
+            )
+            db.add(permission)
+            db.flush()
+            assert db.execute(select(RolePermission).where(
+                RolePermission.role_id == owner_role.id,
+                RolePermission.permission_id == permission.id,
+            )).scalar_one_or_none() is None
+            db.add(UserPermissionOverride(
+                user_id=owner_a.id,
+                permission_id=permission.id,
+                granted=False,
+            ))
+            db.flush()
+
+            assert permission.code in get_user_permissions(db, owner_a)
+            assert permission.code not in get_user_permissions(db, owner_b)
+
+    def test_owner_billing_and_module_limits_are_not_authorization_errors(
+        self, organizations, monkeypatch,
+    ):
+        headers, context = register(organizations, "gym")
+        organization_id = context["organization"]["id"]
+        monkeypatch.setattr(settings, "AI_API_KEY", "test-key")
+
+        with SessionLocal() as db:
+            wallet = db.execute(select(AIWallet).where(
+                AIWallet.organization_id == organization_id,
+            )).scalar_one()
+            wallet.balance_credits = 0
+            wallet.reserved_credits = 0
+            wallet.cycle_grant_credits = 0
+            wallet.cycle_end = datetime.now(timezone.utc) + timedelta(days=1)
+            db.commit()
+
+        exhausted = client.post("/api/ai/chat", headers=headers, json={
+            "message": "Analyze current client activity",
+            "idempotency_key": f"owner-quota-{uuid4().hex}",
+        })
+        assert exhausted.status_code == 200, exhausted.text
+        assert exhausted.json()["message"]["outcome"] == "quota_exhausted"
+        assert exhausted.json()["message"]["scope"]["owner"] is True
+
+        with SessionLocal() as db:
+            organization = db.get(Organization, organization_id)
+            organization.enabled_modules = [
+                module for module in organization.enabled_modules if module != "ai"
+            ]
+            db.commit()
+
+        unavailable = client.post("/api/ai/chat", headers=headers, json={
+            "message": "Analyze current client activity",
+            "idempotency_key": f"owner-entitlement-{uuid4().hex}",
+        })
+        assert unavailable.status_code == 200, unavailable.text
+        assert unavailable.json()["message"]["outcome"] == "entitlement_required"
+
+    def test_owner_ai_actions_require_confirmation_and_are_idempotent(self, organizations):
+        headers, context = register(organizations, "gym")
+        organization_id = context["organization"]["id"]
+        with SessionLocal() as db:
+            organization = db.get(Organization, organization_id)
+            action_plan = db.execute(
+                select(PlanVersion).join(PlanDefinition, PlanDefinition.id == PlanVersion.plan_id)
+                .where(PlanDefinition.slug == "business", PlanVersion.status == "published")
+                .order_by(PlanVersion.version.desc())
+            ).scalars().first()
+            subscription = db.execute(select(Subscription).where(
+                Subscription.organization_id == organization_id,
+            )).scalars().first()
+            organization.plan = "business"
+            subscription.plan = "business"
+            subscription.plan_version_id = action_plan.id
+            db.commit()
+        key = f"owner-action-{uuid4().hex}"
+        body = {
+            "action_type": "create_task",
+            "payload": {"title": "Review placement readiness evidence"},
+            "idempotency_key": key,
+        }
+
+        prepared = client.post("/api/ai/actions/prepare", headers=headers, json=body)
+        assert prepared.status_code == 200, prepared.text
+        first = prepared.json()
+        assert first["status"] == "pending_confirmation"
+        assert first["preview"]["requires_confirmation"] is True
+
+        replay = client.post("/api/ai/actions/prepare", headers=headers, json=body)
+        assert replay.status_code == 200, replay.text
+        refreshed = replay.json()
+        assert refreshed["action_id"] == first["action_id"]
+        assert refreshed["confirmation_token"] != first["confirmation_token"]
+
+        stale = client.post(
+            f"/api/ai/actions/{first['action_id']}/confirm", headers=headers,
+            json={"confirmation_token": first["confirmation_token"]},
+        )
+        assert stale.status_code == 403
+
+        confirmed = client.post(
+            f"/api/ai/actions/{first['action_id']}/confirm", headers=headers,
+            json={"confirmation_token": refreshed["confirmation_token"]},
+        )
+        assert confirmed.status_code == 200, confirmed.text
+        assert confirmed.json()["status"] == "completed"
+
+        confirmation_replay = client.post(
+            f"/api/ai/actions/{first['action_id']}/confirm", headers=headers,
+            json={"confirmation_token": refreshed["confirmation_token"]},
+        )
+        assert confirmation_replay.status_code == 200
+        assert confirmation_replay.json()["status"] == "completed"
+
+        undone = client.post(
+            f"/api/ai/actions/{first['action_id']}/undo", headers=headers,
+        )
+        assert undone.status_code == 200, undone.text
+        assert undone.json()["status"] == "undone"
+        assert client.post(
+            f"/api/ai/actions/{first['action_id']}/undo", headers=headers,
+        ).status_code == 409
+
+        with SessionLocal() as db:
+            assert db.execute(select(AuditLog.id).where(
+                AuditLog.organization_id == organization_id,
+                AuditLog.action == "ai_action.create_task",
+            )).scalar_one_or_none()
+            assert db.execute(select(AuditLog.id).where(
+                AuditLog.organization_id == organization_id,
+                AuditLog.action == "ai_action.undo.create_task",
+            )).scalar_one_or_none()
+
     def test_catalog_and_inventory_use_filter_bound_cursor_pages(self, organizations):
         headers, context = register(organizations, "gym")
         location_id = context["locations"][0]["id"]
@@ -356,9 +518,7 @@ class TestSharedPlatform:
         async def cancel_response(*_args, **_kwargs):
             raise asyncio.CancelledError()
 
-        monkeypatch.setattr("app.api.v1.ai._local_intent_mode", lambda *_args: "disabled")
-        monkeypatch.setattr("app.api.v1.ai.deterministic_query_plan", lambda *_args: None)
-        monkeypatch.setattr("app.api.v1.ai.run_ai_turn_v3", cancel_response)
+        monkeypatch.setattr("app.api.v1.ai.run_assistant_turn", cancel_response)
 
         with SessionLocal() as db:
             owner = db.execute(select(User).where(User.organization_id == organization_id)).scalar_one()
@@ -376,7 +536,7 @@ class TestSharedPlatform:
             )).scalar_one()
             assert turn.status == "cancelled"
             assert turn.error_code == "cancelled"
-            assert db.scalar(select(func.count(ChatMessage.id)).where(ChatMessage.turn_id == turn.id)) == 0
+            assert db.scalar(select(func.count(ChatMessage.id)).where(ChatMessage.turn_id == turn.id)) == 1
 
     def test_ai_stream_owns_session_and_attaches_user(self, organizations, monkeypatch):
         headers, _context = register(organizations, "gym")
@@ -385,11 +545,11 @@ class TestSharedPlatform:
         async def streamed_response(_body, stream_user, stream_db, emit=None):
             observed["attached"] = object_session(stream_user) is stream_db
             if emit:
-                await emit("text_delta", {"text": "Ready"})
+                await emit("answer_delta", {"text": "Ready"})
             return {
                 "conversation_id": "stream-session-test",
                 "conversation": {"id": "stream-session-test"},
-                "message": {"blocks": [], "actions": []},
+                "message": {"artifacts": [], "suggestions": [], "evidence": []},
                 "credits_used": 0,
                 "ai_wallet": {},
             }
@@ -663,7 +823,10 @@ class TestSharedPlatform:
         assert branch["name"] == "Settings Audit Branch"
 
     def test_ai_active_client_list_matches_summary_count(self, organizations):
-        from app.ai.tools import tool_business_records, tool_business_summary
+        from app.ai.access import resolve_access_envelope
+        from app.ai.catalog import catalog_for
+        from app.ai.contracts import FilterOperator, QueryFilter, QueryGoal, SemanticQuery
+        from app.ai.execution import execute_semantic_query
 
         headers, context = register(organizations, "gym")
         location_id = context["locations"][0]["id"]
@@ -679,28 +842,24 @@ class TestSharedPlatform:
             db.commit()
             owner = db.execute(select(User).where(User.organization_id == context["organization"]["id"])).scalar_one()
 
-            summary = tool_business_summary(db, owner, location_id)
-            organization_summary = tool_business_summary(db, owner)
-            records = tool_business_records(
-                db, owner, "clients", query="active clients", location_id=location_id, days=365,
-                conversation_id=None,
+            envelope = resolve_access_envelope(db, owner)
+            catalog = catalog_for(envelope.industry)
+            active_query = SemanticQuery(
+                goal=QueryGoal.LIST, entity="client",
+                fields=["id", "name", "status"],
+                filters=[QueryFilter(field="status", operator=FilterOperator.EQ, value="active")],
+                limit=5,
             )
-            organization_records = tool_business_records(db, owner, "clients", query="active clients")
-            all_records = tool_business_records(
-                db, owner, "clients", query="all clients", location_id=location_id,
-            )
+            all_query = active_query.model_copy(update={"filters": [], "limit": 25})
+            records = execute_semantic_query(db, owner, active_query, catalog, envelope)
+            all_records = execute_semantic_query(db, owner, all_query, catalog, envelope)
 
-        assert summary["active_clients"] == 6
-        assert records["count"] == summary["active_clients"]
-        assert organization_summary["active_clients"] == 6
-        assert organization_records["count"] == organization_summary["active_clients"]
-        assert all_records["count"] == 7
-        assert len(records["items"]) == 5
-        assert records["result_session_id"]
-        assert records["query_spec"] == {
-            "subject": "clients", "query": None, "location_id": location_id, "days": None,
-            "status": "active", "created_within_days": None,
-        }
+        active_artifact = records.artifacts[0]
+        all_artifact = all_records.artifacts[0]
+        assert active_artifact.data["total"] == 6
+        assert len(active_artifact.data["items"]) == 5
+        assert active_artifact.data["has_more"] is True
+        assert all_artifact.data["total"] == 7
 
     def test_entity_resolution_handles_spacing_phone_and_ambiguity(self, organizations):
         from app.services.entity_resolution import resolve_entities
@@ -783,8 +942,10 @@ class TestSharedPlatform:
         assert typo_response.json()["clients"][0]["id"] == expected["id"]
 
     def test_ai_client_numbers_and_tool_failures_keep_transactions_healthy(self, organizations, monkeypatch):
-        from sqlalchemy import text
-        from app.ai.tools import TOOL_REGISTRY, execute_tool, tool_client_workspace
+        from app.ai.access import resolve_access_envelope
+        from app.ai.catalog import catalog_for
+        from app.ai.contracts import EntityRef, QueryGoal, SemanticQuery
+        from app.ai.execution import execute_semantic_query
 
         headers, context = register(organizations, "gym")
         location_id = context["locations"][0]["id"]
@@ -792,16 +953,22 @@ class TestSharedPlatform:
 
         with SessionLocal() as db:
             owner = db.execute(select(User).where(User.organization_id == context["organization"]["id"])).scalar_one()
-            workspace = tool_client_workspace(db, owner, expected["client_number"])
-            assert workspace["client"]["id"] == expected["id"]
+            envelope = resolve_access_envelope(db, owner)
+            query = SemanticQuery(
+                goal=QueryGoal.PROFILE, entity="client",
+                fields=["id", "name", "client_number"],
+                entities=[EntityRef(kind="client", label=expected["client_number"])],
+            )
+            result = execute_semantic_query(db, owner, query, catalog_for(envelope.industry), envelope)
 
-            def broken_tool(session, _user):
-                session.execute(text("SELECT * FROM table_that_does_not_exist"))
-
-            monkeypatch.setitem(TOOL_REGISTRY, "broken_for_test", broken_tool)
-            result = execute_tool("broken_for_test", db, owner, {})
-
-            assert result == {"error": "The business request could not be completed safely."}
+            assert "id" not in result.artifacts[0].data
+            assert result.artifacts[0].data["profile_ref"] == {
+                "kind": "client", "id": expected["id"],
+            }
+            assert all(
+                field.key != "id"
+                for field in result.artifacts[0].presentation.fields
+            )
             assert db.scalar(select(func.count()).select_from(User).where(User.organization_id == owner.organization_id)) >= 1
 
     def test_simple_greeting_skips_provider_wallet_and_usage(self, organizations, monkeypatch):
@@ -811,17 +978,18 @@ class TestSharedPlatform:
             reservations_before = db.scalar(select(func.count()).select_from(WalletReservation).where(WalletReservation.organization_id == organization_id))
             usage_before = db.scalar(select(func.count()).select_from(AIUsage).where(AIUsage.organization_id == organization_id))
 
-        def provider_must_not_run():
-            raise AssertionError("Simple greetings must not call the AI provider")
+        class ProviderMustNotRun:
+            async def respond(self, **_kwargs):
+                raise AssertionError("Simple greetings must not call the AI provider")
 
-        monkeypatch.setattr("app.ai.orchestrator.provider", provider_must_not_run)
+        monkeypatch.setattr("app.ai.engine.configured_provider", lambda: ProviderMustNotRun())
         response = client.post("/api/ai/chat", headers=headers, json={
             "message": "Vanakkam!", "idempotency_key": f"greeting-{uuid4().hex}",
         })
 
         assert response.status_code == 200, response.text
         assert response.json()["credits_used"] == 0
-        assert response.json()["message"]["content"].startswith("Vanakkam!")
+        assert response.json()["message"]["content"].startswith("Vanakkam")
         conversation_id = response.json()["conversation_id"]
         messages = client.get(f"/api/ai/conversations/{conversation_id}/messages", headers=headers)
         assert messages.status_code == 200
@@ -831,7 +999,7 @@ class TestSharedPlatform:
             assert db.scalar(select(func.count()).select_from(WalletReservation).where(WalletReservation.organization_id == organization_id)) == reservations_before
             assert db.scalar(select(func.count()).select_from(AIUsage).where(AIUsage.organization_id == organization_id)) == usage_before
             assistant = db.execute(select(ChatMessage).where(ChatMessage.conversation_id == conversation_id, ChatMessage.role == "assistant")).scalar_one()
-            assert assistant.meta["route"] == "conversation"
+            assert assistant.outcome == "success"
             turn_id = assistant.turn_id
             assert db.get(ChatTurn, turn_id).status == "completed"
 
@@ -897,11 +1065,12 @@ class TestSharedPlatform:
         assert client.get(f"/api/clients/{visible_client['id']}", headers=other_tenant).status_code == 404
 
         ai = client.post("/api/ai/chat", headers=owner, json={
-            "message": "Innaiku collection evlo?", "location_id": main,
+            "message": "Innaiku collection evlo?",
+            "context": {"location_id": main},
         })
         assert ai.status_code == 200, ai.text
         assert "INR" in ai.json()["message"]["content"]
-        assert ai.json()["message"]["blocks"][0]["type"] == "kpi_grid"
+        assert ai.json()["message"]["artifacts"][0]["type"] == "metric"
 
     def test_atomic_gst_sale_and_appointment_conflict(self, organizations):
         headers, context = register(organizations, "salon")
@@ -949,13 +1118,13 @@ class TestSharedPlatform:
         assert paid["status"] == "paid"
 
         ai = client.post("/api/ai/chat", headers=headers, json={
-            "message": "Innaiku collection evlo?", "location_id": location_id,
+            "message": "Innaiku collection evlo?",
+            "context": {"location_id": location_id},
         })
         assert ai.status_code == 200, ai.text
         assert ai.json()["credits_used"] == 0
         assert "236.00" in ai.json()["message"]["content"]
-        revenue = next(item for item in ai.json()["message"]["blocks"][0]["data"]["items"] if item["label"] == "Today revenue")
-        assert revenue["value"] == 23600
+        assert ai.json()["message"]["artifacts"][0]["data"]["revenue_paise"] == 23600
 
         client_profile = client.get(f"/api/clients/{buyer['id']}/profile", headers=headers)
         assert client_profile.status_code == 200, client_profile.text

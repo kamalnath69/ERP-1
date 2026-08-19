@@ -314,27 +314,39 @@ def sync_granular_role_permissions(db: Session, permissions: list[Permission]) -
             select(RolePermission.role_id, RolePermission.permission_id)
         )
     }
+    pending_grants = []
     for role in role_rows:
+        if role.is_system and not role.system_key:
+            role.system_key = role.slug
         codes = set(db.execute(select(Permission.code).join(RolePermission, RolePermission.permission_id == Permission.id).where(RolePermission.role_id == role.id)).scalars())
         grants = set()
         if "gym.view" in codes: grants |= GYM_READ
         if "gym.manage" in codes: grants |= GYM_READ | GYM_WRITE
         if "clients.view" in codes: grants |= {"client_memory.view", "client_signals.view"}
         if "clients.manage" in codes: grants |= {"client_memory.manage", "clients.media.view", "clients.media.manage"}
-        if role.is_system and role.slug in {"owner", "manager"}: grants |= {"client_signals.manage", "clients.media.view", "salon.notes.view", "salon.notes.manage", "ai.views.share", "settings.view"}
-        if role.is_system and role.slug in COLLEGE_ROLE_GRANTS: grants |= COLLEGE_ROLE_GRANTS[role.slug]
+        if role.is_system and role.system_key in {"owner", "manager"}: grants |= {"client_signals.manage", "clients.media.view", "salon.notes.view", "salon.notes.manage", "ai.views.share", "settings.view"}
+        if role.is_system and role.system_key in COLLEGE_ROLE_GRANTS: grants |= COLLEGE_ROLE_GRANTS[role.system_key]
         # The owner role is authoritative and must inherit capabilities introduced
         # after an organization was created. Entitlements still gate paid modules.
-        if role.is_system and role.slug == "owner": grants |= set(by_code)
-        if role.is_system and role.slug == "manager": grants |= {
+        if role.is_system and role.system_key == "owner": grants |= set(by_code)
+        if role.is_system and role.system_key == "manager": grants |= {
             "settings.identity.manage", "settings.locations.manage", "settings.operations.manage",
             "settings.communication.manage",
         }
         for code in grants:
             permission = by_code.get(code)
             if permission and (role.id, permission.id) not in existing:
-                db.add(RolePermission(role_id=role.id, permission_id=permission.id))
+                pending_grants.append({
+                    "role_id": role.id,
+                    "permission_id": permission.id,
+                })
                 existing.add((role.id, permission.id))
+    if pending_grants:
+        db.execute(
+            pg_insert(RolePermission)
+            .values(pending_grants)
+            .on_conflict_do_nothing(constraint="uq_role_permission")
+        )
 
 
 def seed_organization_defaults(
@@ -361,7 +373,7 @@ def seed_organization_defaults(
     for slug, codes in role_specs.items():
         role = Role(
             organization_id=org.id, name=slug.title(), slug=slug,
-            description=f"Default {slug} access", is_system=True,
+            system_key=slug, description=f"Default {slug} access", is_system=True,
         )
         db.add(role)
         db.flush()
@@ -399,7 +411,10 @@ def seed_organization_defaults(
     elif org.industry.value == "college":
         vertical_roles = COLLEGE_ROLE_GRANTS
     for slug, codes in vertical_roles.items():
-        role = Role(organization_id=org.id, name=slug.replace("-", " ").title(), slug=slug, description=f"Default {slug} access", is_system=True)
+        role = Role(
+            organization_id=org.id, name=slug.replace("-", " ").title(), slug=slug,
+            system_key=slug, description=f"Default {slug} access", is_system=True,
+        )
         db.add(role); db.flush()
         for code in codes:
             db.add(RolePermission(role_id=role.id, permission_id=by_code[code].id))
@@ -426,14 +441,6 @@ def seed_organization_defaults(
     db.add(Job(organization_id=org.id, kind="refresh_client_signals", payload={"organization_id": org.id}, run_at=datetime.now(timezone.utc), idempotency_key="client-signals-bootstrap"))
     for module in org.enabled_modules:
         db.add(FeatureFlag(organization_id=org.id, flag=module, enabled=True, meta={}))
-    db.add(FeatureFlag(
-        organization_id=org.id, flag="ai.local_intent_v2", enabled=True,
-        meta={"mode": "enabled", "engine_version": "local-intent-v1"},
-    ))
-    db.add(FeatureFlag(
-        organization_id=org.id, flag="ai.execution_v3", enabled=True,
-        meta={"mode": "enabled", "version": 3, "legacy_kill_switch": True},
-    ))
     if org.industry.value == "college":
         db.add(FeatureFlag(
             organization_id=org.id, flag="college.placement_v1", enabled=True,
@@ -442,10 +449,6 @@ def seed_organization_defaults(
         db.add(FeatureFlag(
             organization_id=org.id, flag="college.data_exchange_v1", enabled=True,
             meta={"mode": "enabled", "version": 1},
-        ))
-        db.add(FeatureFlag(
-            organization_id=org.id, flag="authorization.policy_v2", enabled=True,
-            meta={"mode": "enabled", "version": 2},
         ))
 
 
@@ -511,11 +514,6 @@ def ensure_control_plane(db: Session) -> None:
                 "text-embedding-3-small": {"input": 7, "cached_input": 7, "output": 0},
             },
             "fallback": {"input": 255, "cached_input": 26, "output": 1530},
-        },
-        "ai_models": {
-            "planner": settings.AI_MODEL_PLANNER,
-            "synthesis": settings.AI_MODEL_SYNTHESIS,
-            "repair": settings.AI_MODEL_REPAIR,
         },
         "billing_identity": {"registered_state": "Tamil Nadu", "country": "IN"},
         "payment_gateway": {"provider": settings.PAYMENT_GATEWAY},
@@ -609,7 +607,12 @@ def ensure_missing_business_roles(db: Session, permissions: list[Permission]) ->
         },
         "college": COLLEGE_ROLE_GRANTS,
     }
-    for organization in db.execute(select(Organization)).scalars():
+    # Hold a shared row lock while templates are repaired so a concurrent
+    # tenant deletion cannot invalidate a role between discovery and flush.
+    organizations = db.execute(
+        select(Organization).with_for_update(read=True)
+    ).scalars().all()
+    for organization in organizations:
         specs = {**common, **vertical.get(organization.industry.value, {})}
         existing_slugs = set(db.execute(select(Role.slug).where(Role.organization_id == organization.id)).scalars())
         existing_names = set(db.execute(select(Role.name).where(Role.organization_id == organization.id)).scalars())
@@ -619,7 +622,7 @@ def ensure_missing_business_roles(db: Session, permissions: list[Permission]) ->
                 continue
             role = Role(
                 organization_id=organization.id, name=name, slug=slug,
-                description=f"Default {name.lower()} access", is_system=True,
+                system_key=slug, description=f"Default {name.lower()} access", is_system=True,
             )
             db.add(role)
             db.flush()

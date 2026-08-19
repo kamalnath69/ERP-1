@@ -65,8 +65,7 @@ def test_ai_performance_exposes_only_sanitized_aggregates():
     payload = response.json()
     assert {
         "period_days", "turns", "provider_call_ratio", "zero_credit_ratio",
-        "cache_hit_ratio", "verification_failure_ratio", "fallback_ratio",
-        "provider_requests", "tokens", "latency_ms", "routes",
+        "outcomes", "provider_requests", "tokens", "latency_ms", "routes",
     } <= payload.keys()
     assert set(payload["tokens"]) == {"input", "output", "embedding"}
     assert "prompts" not in payload

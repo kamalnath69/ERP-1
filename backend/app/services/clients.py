@@ -20,7 +20,7 @@ from app.models import (
     User,
 )
 from app.services.business_access import ensure_location, filter_clients
-from app.services.access_policy import policy_v2_enabled, require_policy_domain
+from app.services.access_policy import college_policy_applies, require_policy_domain
 from app.services.cursor_pagination import decode_cursor_or_legacy_id, encode_cursor
 from app.services.rbac import get_user_permissions
 
@@ -190,7 +190,7 @@ def client_directory(
     permissions = get_user_permissions(db, user)
     is_college = bool(org and org.industry.value == "college")
     context = None
-    if is_college and policy_v2_enabled(db, user.organization_id):
+    if is_college and college_policy_applies(db, user.organization_id):
         context = require_policy_domain(db, user, "students", "view")
     can_view_contact = not context or context.has_sensitive("college.students.contact.view")
     can_view_financial = not context or (

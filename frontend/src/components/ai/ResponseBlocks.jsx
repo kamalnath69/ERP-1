@@ -1,523 +1,383 @@
-import React, { lazy, Suspense, useLayoutEffect, useRef, useState } from "react";
+import React, { lazy, Suspense } from "react";
 import {
-  ArrowSquareOut,
-  CheckCircle,
-  ClockCounterClockwise,
-  PushPin,
-  Warning,
+  ArrowRight, CheckCircle, ClockCounterClockwise, PushPin, Warning,
 } from "@phosphor-icons/react";
-import { Button } from "../ui/button";
-import { EmptyState } from "../system";
+
 import {
-  EntityAvatar,
-  EntityCard,
-  EntityProfileLink,
-  ProfileTableRow,
-} from "../entities/EntityProfile";
+  ArtifactCardGrid, CollectionValue, PresentationValue, artifactFields,
+  artifactValue, formatArtifactValue, hasArtifactValue,
+} from "@/components/ai/ArtifactCards";
 import {
-  PROFILE_INTERNAL_FIELDS,
-  visibleProfileFields,
-} from "@/lib/profileNavigation";
+  EntityAvatar, EntityProfileLink, EntityStatusBadge,
+} from "@/components/entities/EntityProfile";
+import { EmptyState } from "@/components/system";
+import { Button } from "@/components/ui/button";
+import { profilePath } from "@/lib/profileNavigation";
+import { cn } from "@/lib/utils";
 
 const AIChart = lazy(() => import("./AIChart"));
-
-function valueText(value, key = "") {
-  if (value == null || value === "") return "-";
-  if (key.endsWith("_paise"))
-    return `INR ${(Number(value) / 100).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
-  if (key.endsWith("_milli"))
-    return (Number(value) / 1000).toLocaleString("en-IN", { maximumFractionDigits: 3 });
-  if (typeof value === "boolean") return value ? "Yes" : "No";
-  if (typeof value === "object")
-    return Array.isArray(value)
-      ? value.map((item) => valueText(item)).join(", ")
-      : Object.entries(value)
-          .map(([k, v]) => `${k.replaceAll("_", " ")}: ${valueText(v)}`)
-          .join(" / ");
-  if (/(_at|_on)$/.test(key) && !Number.isNaN(Date.parse(value)))
-    return new Date(value).toLocaleString("en-IN", {
-      dateStyle: "medium",
-      timeStyle: key.endsWith("_at") ? "short" : undefined,
-    });
-  return String(value);
-}
+const HUMAN_FIELD = { format: "text" };
+const humanText = (value) => formatArtifactValue(value, HUMAN_FIELD);
 
 export default function ResponseBlocks({
-  message,
-  onViewAll,
-  onPin,
-  onConfirm,
-  onUndo,
-  onSelectEntity,
-  compact = false,
+  message, onViewAll, onPin, onConfirm, onUndo, onSelectEntity,
+  onSuggestion, compact = false,
 }) {
+  const artifacts = message.artifacts || [];
   return (
     <div className={compact ? "mt-3 space-y-3" : "mt-4 space-y-4"}>
-      {(message.blocks || []).map((block) => (
-        <Block
-          key={block.id}
-          block={block}
-          onViewAll={onViewAll}
-          onPin={onPin}
-          onConfirm={onConfirm}
-          onUndo={onUndo}
-          onSelectEntity={onSelectEntity}
-          compact={compact}
-        />
+      {artifacts.map((block) => (
+        <Block key={block.id} block={block} onViewAll={onViewAll} onPin={onPin}
+          onConfirm={onConfirm} onUndo={onUndo} onSelectEntity={onSelectEntity}
+          compact={compact} />
       ))}
-      {!!message.citations?.length && (
-        <section className="overflow-hidden rounded-2xl border bg-card/85 shadow-[0_8px_26px_hsl(var(--primary)/.04)]">
-          <div className={`flex items-center justify-between border-b bg-secondary/35 ${compact ? "px-3 py-2.5" : "px-4 py-3"}`}><div><div className="overline">Reference material</div><div className="mt-0.5 text-sm font-semibold">Sources used</div></div><span className="rounded-full bg-background px-2.5 py-1 text-[10px] font-semibold text-muted-foreground">{message.citations.length}</span></div>
-          <div className={compact ? "mt-2 space-y-1.5" : "mt-3 space-y-2"}>
-            {message.citations.map((item, index) => (
-              <a
-                key={`${item.document_id}-${index}`}
-                href={item.href}
-                target="_blank"
-                rel="noreferrer"
-                className={`group mx-3 block rounded-xl border bg-background/60 transition hover:border-accent/50 hover:shadow-sm ${compact ? "mb-2 p-2.5" : "mb-3 p-3"}`}
-              >
-                <div className="flex items-center justify-between gap-3 text-sm font-medium">
-                  <span className="flex min-w-0 items-center gap-2"><span className="text-[10px] text-muted-foreground">{String(index + 1).padStart(2, "0")}</span><span className="truncate">{item.document}</span></span>
-                  <ArrowSquareOut className="shrink-0 text-muted-foreground group-hover:text-accent" />
-                </div>
-                <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
-                  {item.excerpt}
-                </p>
-              </a>
+      {!!message.suggestions?.length && onSuggestion && (
+        <section className="px-1 pt-1" aria-label="Suggested follow-up questions">
+          <div className="mb-2 text-xs font-semibold text-muted-foreground">You could also ask</div>
+          <div className="flex flex-wrap gap-2">
+            {message.suggestions.map((item, index) => (
+              <button key={item.id || `${item.label}-${index}`} type="button"
+                onClick={() => onSuggestion(item)}
+                className="rounded-full border bg-card px-3 py-1.5 text-left text-xs font-medium text-muted-foreground transition hover:border-primary/30 hover:bg-primary/5 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                {humanText(item.label)}
+              </button>
             ))}
           </div>
         </section>
       )}
+      {!!message.evidence?.length && <EvidencePanel evidence={message.evidence} compact={compact} />}
     </div>
   );
 }
 
 function Block({ block, onViewAll, onPin, onConfirm, onUndo, onSelectEntity, compact }) {
   const data = block.data || {};
-  if (block.type === "text") return null;
-  if (block.type === "kpi_grid")
-    return (
-      <section className="overflow-hidden rounded-2xl border bg-card/85 shadow-[0_8px_26px_hsl(var(--primary)/.04)]">
-        <div className={`border-b bg-secondary/30 ${compact ? "px-3 py-2.5" : "px-4 py-3"}`}><div className="overline">Live business view</div><h3 className="mt-0.5 font-display text-lg font-semibold">{block.title || "Business snapshot"}</h3></div>
-        <div className={`grid gap-px bg-border ${compact ? "grid-cols-2" : "grid-cols-1 sm:grid-cols-2 xl:grid-cols-3"}`}>
-        {(data.items || []).map((item, index) => (
-          <div key={item.label} className={`relative bg-card ${compact ? "p-3" : "p-4 md:p-5"}`}>
-            <span className={`absolute left-0 top-4 h-8 w-0.5 rounded-full ${index === 0 ? "bg-accent" : "bg-border"}`} />
-            <div className="text-[11px] font-medium text-muted-foreground">{item.label}</div>
-            <div className={`mt-2 font-display font-bold ${compact ? "text-xl" : "text-2xl md:text-3xl"}`}>
-              {item.format === "money"
-                ? valueText(item.value, "amount_paise")
-                : Number(item.value || 0).toLocaleString("en-IN")}
-            </div>
-          </div>
-        ))}
-        </div>
-      </section>
-    );
-  if (block.type === "chart")
-    return (
-      <section className={`rounded-2xl border bg-card/85 shadow-[0_8px_26px_hsl(var(--primary)/.04)] ${compact ? "p-3" : "p-4 md:p-5"}`}>
-        <div className="overline">Trend and comparison</div><h3 className="mt-1 font-display text-xl font-semibold">{block.title}</h3>
-        <Suspense
-          fallback={
-            <div className={`${compact ? "h-44" : "h-72"} mt-3 animate-pulse rounded-xl bg-secondary`} />
-          }
-        >
-          <AIChart data={data} className={compact ? "h-44" : undefined} />
-        </Suspense>
-      </section>
-    );
-  if (block.type === "entity_cards")
-    return (
-      <EntityCards
-        block={block}
-        onViewAll={onViewAll}
-        onPin={onPin}
-        onSelectEntity={onSelectEntity}
-        compact={compact}
-      />
-    );
-  if (block.type === "table")
-    return <Records block={block} onViewAll={onViewAll} onPin={onPin} compact={compact} />;
-  if (block.type === "action")
-    return (
-      <ActionCard
-        data={data}
-        title={block.title}
-        onConfirm={onConfirm}
-        onUndo={onUndo}
-        compact={compact}
-      />
-    );
-  if (block.type === "alert")
-    return (
-      <div className="rounded-2xl border border-amber-500/35 bg-amber-500/10 p-4 text-amber-950 dark:text-amber-100 flex gap-3 shadow-sm">
-        <span className="h-9 w-9 shrink-0 rounded-xl bg-amber-500/15 grid place-items-center"><Warning /></span>
-        <div><div className="text-sm font-semibold">Needs your attention</div><div className="mt-1 text-sm opacity-80">{valueText(data.message)}</div></div>
-      </div>
-    );
+  const normalized = data.query && !data.query_spec
+    ? { ...block, data: { ...data, query_spec: data.query } } : block;
+  if (block.type === "profile") return <ProfileArtifact block={block} compact={compact} />;
+  if (["records", "ranking"].includes(block.type)) {
+    return <RecordsArtifact block={normalized} onViewAll={onViewAll} onPin={onPin} compact={compact} />;
+  }
+  if (block.type === "comparison") return <ComparisonArtifact block={block} compact={compact} />;
+  if (block.type === "metric") return <MetricArtifact block={block} compact={compact} />;
+  if (block.type === "clarification") return <ClarificationArtifact block={block} onSelectEntity={onSelectEntity} compact={compact} />;
+  if (block.type === "notice") return <NoticeArtifact block={block} compact={compact} />;
+  if (block.type === "processing") return <ProcessingArtifact block={block} compact={compact} />;
+  if (block.type === "sources") return <SourcesArtifact block={block} compact={compact} />;
+  if (block.type === "chart") return <ChartArtifact block={block} compact={compact} />;
+  if (block.type === "action") return <ActionCard data={data} title={block.title} onConfirm={onConfirm} onUndo={onUndo} compact={compact} />;
   return null;
 }
 
-function EntityCards({ block, onViewAll, onPin, onSelectEntity, compact = false }) {
+function ProfileArtifact({ block, compact }) {
   const data = block.data || {};
-  const rawItems = data.items || [];
-  const items = canonicalEntityCards(rawItems);
-  const { gridRef, visibleCount, rowHeight } = useFirstRowPreview(items.length);
-  const canonicalCount = items.length < rawItems.length ? items.length : undefined;
-  const total = Number(canonicalCount ?? data.total ?? rawItems.length);
-  const canOpenOverflow = Boolean(
-    onViewAll && (data.result_session_id || data.query_spec),
-  );
-  const previewCount = canOpenOverflow ? visibleCount : items.length;
-  const hasHiddenOverflow = canOpenOverflow && (
-    previewCount < items.length || total > rawItems.length || data.has_more
-  );
+  const fields = artifactFields(block.presentation)
+    .filter((field) => hasArtifactValue(artifactValue(data, field)));
+  const titleField = fields.find((field) => field.role === "title");
+  const subtitleFields = fields.filter((field) => field.role === "subtitle").slice(0, compact ? 1 : 3);
+  const badgeField = fields.find((field) => field.role === "badge");
+  const metricFields = fields.filter((field) => field.role === "metric").slice(0, 4);
+  const detailFields = fields.filter((field) => field.role === "detail");
+  const collectionFields = fields.filter((field) => field.role === "collection");
+  const title = formatArtifactValue(artifactValue(data, titleField), titleField)
+    || humanText(block.title) || "Profile";
+  const groupedDetails = detailFields.reduce((groups, field) => {
+    const name = field.group || "Details";
+    groups[name] = [...(groups[name] || []), field];
+    return groups;
+  }, {});
+  const path = profilePath(data.profile_ref);
+
   return (
-    <section className="space-y-3">
-      <RecordsHeader
-        block={block}
-        onViewAll={onViewAll}
-        onPin={onPin}
-        visibleCount={canonicalCount}
-        hasHiddenOverflow={hasHiddenOverflow}
-        compact={compact}
-      />
-      {items.length ? (
-        <div
-          ref={gridRef}
-          className="grid gap-3 overflow-hidden"
-          style={{
-            gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 17rem), 1fr))",
-            maxHeight: previewCount < items.length && rowHeight ? `${rowHeight}px` : undefined,
-          }}
-        >
-          {items.map((item, index) => {
-            const details = visibleProfileFields(item, compact ? 4 : 6)
-              .filter(
-                ([key]) =>
-                  !["name", "status", "active", "phone", "type"].includes(key),
-              )
-              .slice(0, compact ? 2 : 3)
-              .map(([key, value]) => [key, valueText(value, key)]);
+    <section className="overflow-hidden rounded-[1.35rem] border bg-card shadow-[0_14px_38px_hsl(var(--primary)/.07)]">
+      <div className={cn("relative overflow-hidden border-b bg-gradient-to-br from-primary/10 via-card to-emerald-500/5", compact ? "p-4" : "p-5 md:p-6")}>
+        <div className="absolute -right-12 -top-16 h-36 w-36 rounded-full border-[22px] border-primary/5" aria-hidden="true" />
+        <div className="relative flex items-start gap-4">
+          <EntityAvatar name={title} kind={data.profile_ref?.kind} avatarUrl={data.avatar_url}
+            className={compact ? "h-12 w-12 rounded-2xl" : "h-14 w-14 rounded-2xl text-lg"} />
+          <div className="min-w-0 flex-1">
+            <div className="text-[10px] font-bold uppercase tracking-[.18em] text-primary/70">Verified profile</div>
+            <div className="mt-1 flex flex-wrap items-center gap-2">
+              <h3 className={cn("font-display font-semibold", compact ? "text-xl" : "text-2xl")}>{title}</h3>
+              {badgeField && <EntityStatusBadge value={artifactValue(data, badgeField)} />}
+            </div>
+            {!!subtitleFields.length && (
+              <p className="mt-1.5 max-w-3xl text-sm leading-6 text-muted-foreground">
+                {subtitleFields.map((field) => formatArtifactValue(artifactValue(data, field), field)).filter(Boolean).join(" / ")}
+              </p>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className={compact ? "p-4" : "p-5 md:p-6"}>
+        {!!metricFields.length && (
+          <div className={cn("grid gap-2.5", compact ? "grid-cols-2" : "grid-cols-2 lg:grid-cols-4")}>
+            {metricFields.map((field) => (
+              <div key={field.key} className="rounded-2xl border bg-secondary/45 p-3.5">
+                <div className="text-[10px] font-bold uppercase tracking-[.12em] text-muted-foreground">{field.label}</div>
+                <div className="mt-1.5 text-lg font-semibold"><PresentationValue value={artifactValue(data, field)} field={field} compact /></div>
+              </div>
+            ))}
+          </div>
+        )}
+        {!!Object.keys(groupedDetails).length && (
+          <div className={cn("grid gap-3", metricFields.length && "mt-4", compact ? "grid-cols-1" : "md:grid-cols-2")}>
+            {Object.entries(groupedDetails).map(([group, groupFields]) => (
+              <section key={group} className="rounded-2xl border p-4">
+                <h4 className="text-xs font-bold uppercase tracking-[.12em] text-muted-foreground">{group}</h4>
+                <dl className="mt-3 space-y-2.5">
+                  {groupFields.map((field) => (
+                    <div key={field.key} className="flex items-start justify-between gap-4 text-sm">
+                      <dt className="text-muted-foreground">{field.label}</dt>
+                      <dd className="max-w-[62%] text-right font-medium"><PresentationValue value={artifactValue(data, field)} field={field} compact /></dd>
+                    </div>
+                  ))}
+                </dl>
+              </section>
+            ))}
+          </div>
+        )}
+        {!!collectionFields.length && (
+          <div className={cn("grid gap-3", (metricFields.length || detailFields.length) && "mt-4", compact ? "grid-cols-1" : "lg:grid-cols-2")}>
+            {collectionFields.map((field) => (
+              <section key={field.key} className="rounded-2xl border p-4">
+                <h4 className="mb-3 text-xs font-bold uppercase tracking-[.12em] text-muted-foreground">{field.label}</h4>
+                <CollectionValue value={artifactValue(data, field)} compact={compact} />
+              </section>
+            ))}
+          </div>
+        )}
+        {path && (
+          <EntityProfileLink profileRef={data.profile_ref} ariaLabel={`Open ${title} full profile`}
+            className="mt-5 inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground shadow-sm transition hover:brightness-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+            Open full profile <ArrowRight aria-hidden="true" />
+          </EntityProfileLink>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function RecordsArtifact({ block, onViewAll, onPin, compact }) {
+  const data = block.data || {};
+  const items = data.items || [];
+  const previewLimit = compact ? 3 : (block.presentation?.preview_limit || 4);
+  const total = Number(data.total ?? items.length);
+  const hidden = items.length > previewLimit || data.has_more || total > previewLimit;
+  const canViewAll = Boolean(onViewAll && hidden && (data.result_session_id || data.query_spec));
+  const canPin = Boolean(onPin && data.result_session_id);
+  const exact = data.count_is_exact !== false;
+  const title = humanText(block.title) || (block.type === "ranking" ? "Ranking" : "Results");
+  return (
+    <section className="rounded-[1.35rem] border bg-card/75 p-3 shadow-[0_12px_34px_hsl(var(--primary)/.055)] md:p-4">
+      <header className="mb-3 flex flex-wrap items-center justify-between gap-3 px-1">
+        <div>
+          <div className="text-[10px] font-bold uppercase tracking-[.17em] text-primary/65">{block.type === "ranking" ? "Ranked insight" : "Verified records"}</div>
+          <div className="mt-1 flex flex-wrap items-baseline gap-2">
+            <h3 className={cn("font-display font-semibold", compact ? "text-lg" : "text-xl")}>{title}</h3>
+            <span className="text-xs text-muted-foreground">{exact ? `${total.toLocaleString("en-IN")} found` : `${items.length.toLocaleString("en-IN")} shown`}</span>
+          </div>
+        </div>
+        {(canPin || canViewAll) && (
+          <div className="flex gap-2">
+            {canPin && <Button size="sm" variant="ghost" className="rounded-xl"
+              onClick={() => onPin({ sessionId: data.result_session_id, querySpec: data.query_spec, title })}><PushPin /> Pin</Button>}
+            {canViewAll && <Button size="sm" className="rounded-xl"
+              onClick={() => onViewAll({ sessionId: data.result_session_id, querySpec: data.query_spec, title })}>
+              View all {exact && total ? total.toLocaleString("en-IN") : ""}
+            </Button>}
+          </div>
+        )}
+      </header>
+      {items.length
+        ? <ArtifactCardGrid items={items} presentation={block.presentation} compact={compact} limit={previewLimit} />
+        : <EmptyState variant="inline" icon={Warning} title="No matching records" description="Try changing the name, date, or filter in your question." />}
+    </section>
+  );
+}
+
+function ComparisonArtifact({ block, compact }) {
+  const data = block.data || {};
+  const rows = data.groups || data.items || [];
+  const metricRows = Array.isArray(data.metrics) && data.metrics.every((item) => typeof item === "object") ? data.metrics : [];
+  return (
+    <section className="rounded-[1.35rem] border bg-card/80 p-4 shadow-[0_12px_34px_hsl(var(--primary)/.055)] md:p-5">
+      <div className="text-[10px] font-bold uppercase tracking-[.17em] text-primary/65">Side-by-side insight</div>
+      <h3 className="mt-1 font-display text-xl font-semibold">{humanText(block.title) || "Comparison"}</h3>
+      {!!rows.length && <div className="mt-4"><ArtifactCardGrid items={rows} presentation={block.presentation} compact={compact} /></div>}
+      {!!metricRows.length && (
+        <div className="mt-4 grid gap-2">
+          {metricRows.map((row, index) => {
+            const field = artifactFields(block.presentation).find((item) => item.key === row.field) || HUMAN_FIELD;
             return (
-              <div
-                key={item.id || index}
-                className={`space-y-2 ${index >= previewCount ? "invisible pointer-events-none select-none" : ""}`}
-                aria-hidden={index >= previewCount || undefined}
-              >
-                <EntityCard item={item} details={details} />
-                {item.selection_ref && onSelectEntity && (
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    className="w-full rounded-xl"
-                    onClick={() => onSelectEntity(item)}
-                  >
-                    Use this record
-                  </Button>
-                )}
+              <div key={`${row.field || "metric"}-${index}`} className="grid gap-3 rounded-2xl border bg-secondary/35 p-3 sm:grid-cols-[1fr_auto_auto] sm:items-center">
+                <div className="font-semibold">{field.label || humanText(row.field)?.replaceAll("_", " ") || "Metric"}</div>
+                <div className="text-sm"><span className="text-muted-foreground">Placed </span>{formatArtifactValue(row.placed_average, field) || "Not available"}</div>
+                <div className="text-sm"><span className="text-muted-foreground">Unplaced </span>{formatArtifactValue(row.unplaced_average, field) || "Not available"}</div>
               </div>
             );
           })}
         </div>
-      ) : <EmptyState
-        variant="inline"
-        icon={Warning}
-        title="No matching records"
-        description="Try a different name or broaden your question."
-      />}
+      )}
+      {!rows.length && !metricRows.length && <ScalarMetrics data={data} presentation={block.presentation} compact={compact} />}
     </section>
   );
 }
 
-function RecordsHeader({ block, onViewAll, onPin, visibleCount, hasHiddenOverflow = false, embedded = false, compact = false }) {
-  const data = block.data || {};
-  const count = visibleCount ?? data.total ?? data.items?.length ?? 0;
-  const countLabel = data.count_is_exact === false && data.has_more
-    ? `Showing ${Number(count).toLocaleString("en-IN")}`
-    : `${Number(count).toLocaleString("en-IN")} found`;
-  const canPin = Boolean(data.result_session_id && onPin);
-  const canViewAll = Boolean(
-    onViewAll && (
-      data.result_session_id || (hasHiddenOverflow && data.query_spec)
-    ),
-  );
+function ScalarMetrics({ data, presentation, compact }) {
+  const fields = artifactFields(presentation).filter((field) => hasArtifactValue(artifactValue(data, field)));
+  if (!fields.length) return null;
   return (
-    <header className={`${embedded ? "border-b bg-secondary/30" : "rounded-2xl border bg-card/85 shadow-[0_8px_26px_hsl(var(--primary)/.04)]"} ${compact ? "p-3" : "p-4"} flex flex-wrap justify-between gap-3 items-center`}>
-      <div>
-        <div className="overline">Current records</div>
-        <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2"><h3 className={`font-display font-semibold ${compact ? "text-lg" : "text-xl"}`}>{block.title}</h3><p className="text-xs text-muted-foreground">{countLabel}</p></div>
-      </div>
-      {(canPin || canViewAll) && (
-        <div className="flex gap-2">
-          {canPin && (
-            <Button
-              size="sm"
-              variant="ghost"
-              className="rounded-xl"
-              onClick={() => onPin({ sessionId: data.result_session_id, querySpec: data.query_spec, title: block.title })}
-            >
-              <PushPin /> Pin
-            </Button>
-          )}
-          {canViewAll && (
-            <Button
-              size="sm"
-              className="rounded-xl"
-              onClick={() => onViewAll({ sessionId: data.result_session_id, querySpec: data.query_spec, title: block.title })}
-            >
-              View all
-            </Button>
-          )}
+    <div className={cn("mt-4 grid gap-2.5", compact ? "grid-cols-1" : "sm:grid-cols-2 lg:grid-cols-3")}>
+      {fields.map((field) => (
+        <div key={field.key} className="rounded-2xl border bg-secondary/40 p-4">
+          <div className="text-[10px] font-bold uppercase tracking-[.12em] text-muted-foreground">{field.label}</div>
+          <div className="mt-1.5 text-xl font-semibold"><PresentationValue value={artifactValue(data, field)} field={field} compact /></div>
         </div>
-      )}
-    </header>
+      ))}
+    </div>
   );
 }
 
-export function measureFirstRow(children) {
-  const nodes = Array.from(children || []);
-  if (!nodes.length) return { visibleCount: 0, rowHeight: 0 };
-  const firstTop = nodes[0].offsetTop;
-  const firstRow = nodes.filter((node) => Math.abs(node.offsetTop - firstTop) <= 1);
-  const rowBottom = Math.max(
-    ...firstRow.map((node) => node.offsetTop + node.offsetHeight),
-  );
-  return {
-    visibleCount: Math.max(firstRow.length, 1),
-    rowHeight: Math.max(rowBottom - firstTop, 0),
-  };
-}
-
-function useFirstRowPreview(itemCount) {
-  const gridRef = useRef(null);
-  const [layout, setLayout] = useState({ visibleCount: itemCount, rowHeight: 0 });
-
-  useLayoutEffect(() => {
-    const grid = gridRef.current;
-    if (!grid || !itemCount) {
-      setLayout({ visibleCount: itemCount, rowHeight: 0 });
-      return undefined;
-    }
-    const measure = () => {
-      const next = measureFirstRow(grid.children);
-      setLayout((current) => (
-        current.visibleCount === next.visibleCount && current.rowHeight === next.rowHeight
-          ? current
-          : next
-      ));
-    };
-    measure();
-
-    if (typeof ResizeObserver !== "undefined") {
-      const observer = new ResizeObserver(measure);
-      observer.observe(grid);
-      Array.from(grid.children).forEach((child) => observer.observe(child));
-      return () => observer.disconnect();
-    }
-    window.addEventListener("resize", measure);
-    return () => window.removeEventListener("resize", measure);
-  }, [itemCount]);
-
-  return { gridRef, ...layout };
-}
-
-function canonicalEntityCards(items) {
-  const grouped = new Map();
-  items.forEach((item, index) => {
-    const profile = item.profile_ref;
-    const canonicalCatalog = profile?.kind === "catalog" && ["catalog", "inventory"].includes(item.kind);
-    const key = canonicalCatalog
-      ? `${profile.kind}:${profile.id}`
-      : `${item.kind || "record"}:${item.id || index}`;
-    grouped.set(key, [...(grouped.get(key) || []), item]);
-  });
-  return [...grouped.values()].map((candidates) => {
-    const preferred = candidates.find((candidate) => candidate.kind === "catalog") || candidates[0];
-    const inventory = candidates.filter((candidate) => candidate.kind === "inventory");
-    const embeddedStock = preferred.snapshot?.stock;
-    if (!inventory.length && !embeddedStock) return { ...preferred };
-    return {
-      ...preferred,
-      stock_levels: embeddedStock?.level_count ?? inventory.length,
-      stock_quantity_milli: embeddedStock?.total_quantity_milli
-        ?? inventory.reduce((sum, candidate) => sum + Number(candidate.snapshot?.quantity_milli || candidate.quantity_milli || 0), 0),
-      low_stock_levels: embeddedStock?.low_level_count
-        ?? inventory.filter((candidate) => candidate.status === "low").length,
-    };
-  });
-}
-
-function Records({ block, onViewAll, onPin, compact = false }) {
+function MetricArtifact({ block, compact }) {
   const data = block.data || {};
   const items = data.items || [];
-  const columns = (
-    data.columns?.length
-      ? data.columns
-      : [...new Set(items.flatMap((item) => Object.keys(item)))]
-  )
-    .filter((key) => !PROFILE_INTERNAL_FIELDS.has(key) && !key.endsWith("_id"))
-    .slice(0, 6);
-  if (compact) {
-    const preview = items.slice(0, 3);
-    return (
-      <section className="overflow-hidden rounded-2xl border bg-card/85 shadow-[0_8px_26px_hsl(var(--primary)/.04)]">
-        <RecordsHeader
-          block={block}
-          onViewAll={onViewAll}
-          onPin={onPin}
-          embedded
-          compact
-          hasHiddenOverflow={items.length > preview.length || Number(data.total || 0) > items.length || data.has_more}
-        />
-        {preview.length ? <div className="divide-y">
-          {preview.map((item, index) => {
-            const titleKey = columns[0];
-            const title = item.display_name || item.name || valueText(item[titleKey], titleKey);
-            const details = columns.slice(1, 3).map((key) => `${key.replaceAll("_", " ")}: ${valueText(item[key], key)}`);
-            const content = <>
-              <span className="block truncate text-sm font-semibold">{title}</span>
-              {!!details.length && <span className="mt-1 block line-clamp-2 text-xs text-muted-foreground">{details.join(" / ")}</span>}
-            </>;
-            return item.profile_ref ? (
-              <EntityProfileLink key={item.id || index} profileRef={item.profile_ref} className="block px-3 py-3 transition-colors hover:bg-secondary/50">
-                {content}
-              </EntityProfileLink>
-            ) : <div key={item.id || index} className="px-3 py-3">{content}</div>;
-          })}
-        </div> : <EmptyState variant="inline" icon={Warning} title="No matching records" description="Try changing the name, date, or filter in your question." />}
-      </section>
-    );
-  }
   return (
-    <section className="rounded-2xl border bg-card/85 overflow-hidden shadow-[0_8px_26px_hsl(var(--primary)/.04)]">
-      <RecordsHeader block={block} onViewAll={onViewAll} onPin={onPin} embedded />
-      {items.length ? (
-        <div className="premium-scrollbar overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead className="bg-secondary/45">
-              <tr>
-                {columns.map((key) => (
-                  <th
-                    key={key}
-                    className="text-left text-[10px] font-semibold uppercase tracking-[.12em] text-muted-foreground px-4 py-3 whitespace-nowrap"
-                  >
-                    {key.replaceAll("_", " ")}
-                  </th>
-                ))}
-                {items.some((item) => item.profile_ref) && (
-                  <th className="px-4 py-3" />
-                )}
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((item, index) => (
-                <ProfileTableRow
-                  key={item.id || index}
-                  profileRef={item.profile_ref}
-                  ariaLabel={`Open ${item.display_name || item.name || "record"} profile`}
-                  className="border-t transition-colors"
-                >
-                  {columns.map((key, columnIndex) => (
-                    <td key={key} className="px-4 py-3 max-w-64 truncate">
-                      {columnIndex === 0 && item.profile_ref ? (
-                        <div className="flex items-center gap-2.5">
-                          <EntityAvatar
-                            name={item.display_name || item.name}
-                            kind={item.profile_ref.kind}
-                            avatarUrl={item.avatar_url}
-                            className="h-9 w-9 rounded-xl text-sm"
-                          />
-                          <EntityProfileLink
-                            profileRef={item.profile_ref}
-                            className="font-medium hover:text-accent"
-                          >
-                            {valueText(item[key], key)}
-                          </EntityProfileLink>
-                        </div>
-                      ) : (
-                        valueText(item[key], key)
-                      )}
-                    </td>
-                  ))}
-                  {items.some((row) => row.profile_ref) && (
-                    <td className="px-4 py-3 text-right">
-                      {item.profile_ref && (
-                        <EntityProfileLink
-                          profileRef={item.profile_ref}
-                          className="text-xs font-semibold text-accent"
-                        >
-                          Open profile
-                        </EntityProfileLink>
-                      )}
-                    </td>
-                  )}
-                </ProfileTableRow>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : <EmptyState
-        variant="inline"
-        icon={Warning}
-        title="No matching records"
-        description="Try changing the name, date, or filter in your question."
-      />}
+    <section className="rounded-[1.35rem] border bg-gradient-to-br from-primary/8 via-card to-card p-4 shadow-[0_12px_34px_hsl(var(--primary)/.055)] md:p-5">
+      <div className="text-[10px] font-bold uppercase tracking-[.17em] text-primary/65">Verified metric</div>
+      <h3 className="mt-1 font-display text-xl font-semibold">{humanText(block.title) || "Analysis"}</h3>
+      <ScalarMetrics data={data} presentation={block.presentation} compact={compact} />
+      {!!items.length && <div className="mt-4"><ArtifactCardGrid items={items} presentation={block.presentation} compact={compact} limit={compact ? 3 : 4} /></div>}
     </section>
   );
+}
+
+function ClarificationArtifact({ block, onSelectEntity, compact }) {
+  const data = block.data || {};
+  const options = data.options || [];
+  if (!options.length) return null;
+  return (
+    <section className={cn("rounded-[1.35rem] border bg-card shadow-sm", compact ? "p-3" : "p-4")}>
+      <div className="text-[10px] font-bold uppercase tracking-[.17em] text-primary/65">Choose one</div>
+      <h3 className="mt-1 font-display text-lg font-semibold">{humanText(block.title) || "Clarify the request"}</h3>
+      <div className="mt-3 grid gap-2 sm:grid-cols-2">
+        {options.map((option, index) => (
+          <button key={`${humanText(option.label)}-${index}`} type="button" disabled={!option.entity || !onSelectEntity}
+            onClick={() => onSelectEntity?.(data.clarification_id, option.entity)}
+            className="rounded-xl border bg-background px-3 py-2.5 text-left text-sm transition hover:border-primary/30 hover:bg-primary/5 disabled:cursor-default disabled:opacity-70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+            <span className="block font-semibold">{humanText(option.label)}</span>
+            {option.meta && <span className="mt-0.5 block text-xs text-muted-foreground">{humanText(option.meta)}</span>}
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function NoticeArtifact({ block, compact }) {
+  const unavailable = Array.isArray(block.data?.unavailable_fields) ? block.data.unavailable_fields : [];
+  const detail = unavailable.length
+    ? `Unavailable in your current access: ${unavailable.map((item) => humanText(item).replaceAll("_", " ")).filter(Boolean).join(", ")}.`
+    : humanText(block.data?.message || block.data?.reason) || "Some requested details are not available in the current authorized view.";
+  return (
+    <section className={cn("rounded-2xl border border-amber-500/30 bg-amber-500/8", compact ? "p-3" : "p-4")}>
+      <div className="flex gap-3"><Warning className="mt-0.5 shrink-0 text-amber-700" aria-hidden="true" />
+        <div><div className="text-sm font-semibold">{humanText(block.title) || "Access notice"}</div><div className="mt-1 text-xs leading-5 text-muted-foreground">{detail}</div></div>
+      </div>
+    </section>
+  );
+}
+
+function ProcessingArtifact({ block, compact }) {
+  return (
+    <section className={cn("rounded-2xl border bg-secondary/25", compact ? "p-3" : "p-4")}>
+      <div className="flex items-center gap-3"><ClockCounterClockwise className="text-primary" /><div><div className="text-sm font-semibold">{humanText(block.title) || "Analysis queued"}</div><div className="mt-0.5 text-xs text-muted-foreground">This larger authorized analysis will finish in the background.</div></div></div>
+    </section>
+  );
+}
+
+function SourcesArtifact({ block, compact }) {
+  const items = block.data?.items || [];
+  if (!items.length) return null;
+  return (
+    <details className="rounded-2xl border bg-card/75">
+      <summary className={cn("cursor-pointer list-none font-medium", compact ? "px-3 py-2.5 text-xs" : "px-4 py-3 text-sm")}>{humanText(block.title) || "Sources"}</summary>
+      <div className="grid gap-2 border-t p-3">
+        {items.map((item, index) => (
+          <div key={`${humanText(item.document || item.name || item.title)}-${index}`} className="rounded-xl bg-secondary/35 p-3 text-xs">
+            <div className="font-semibold">{humanText(item.document || item.name || item.title) || "Authorized source"}</div>
+            {item.excerpt && <div className="mt-1 line-clamp-3 text-muted-foreground">{humanText(item.excerpt)}</div>}
+          </div>
+        ))}
+      </div>
+    </details>
+  );
+}
+
+function ChartArtifact({ block, compact }) {
+  return (
+    <section className={cn("rounded-[1.35rem] border bg-card/85 shadow-[0_8px_26px_hsl(var(--primary)/.04)]", compact ? "p-3" : "p-4 md:p-5")}>
+      <div className="text-[10px] font-bold uppercase tracking-[.17em] text-primary/65">Trend and comparison</div>
+      <h3 className="mt-1 font-display text-xl font-semibold">{humanText(block.title)}</h3>
+      <Suspense fallback={<div className={cn("mt-3 animate-pulse rounded-xl bg-secondary", compact ? "h-44" : "h-72")} />}>
+        <AIChart data={block.data || {}} className={compact ? "h-44" : undefined} />
+      </Suspense>
+    </section>
+  );
+}
+
+function EvidencePanel({ evidence, compact }) {
+  return (
+    <details className="overflow-hidden rounded-2xl border bg-card/65">
+      <summary className={cn("cursor-pointer list-none font-medium text-muted-foreground", compact ? "px-3 py-2.5 text-xs" : "px-4 py-3 text-sm")}>Evidence and scope ({evidence.length})</summary>
+      <div className="divide-y border-t">
+        {evidence.map((item, index) => (
+          <div key={`${humanText(item.source)}-${index}`} className="px-4 py-3 text-xs text-muted-foreground">
+            <div className="font-semibold text-foreground">{humanText(item.source) || "Authorized ERP records"}</div>
+            <div className="mt-1">{humanText(item.authorized_scope)}{item.sample_size != null ? ` / sample ${Number(item.sample_size).toLocaleString("en-IN")}` : ""}{item.coverage_percent != null ? ` / ${Number(item.coverage_percent).toLocaleString("en-IN")}% coverage` : ""}</div>
+            {!!Object.keys(item.definitions || {}).length && <div className="mt-1">{Object.values(item.definitions).map(humanText).filter(Boolean).join(" / ")}</div>}
+          </div>
+        ))}
+      </div>
+    </details>
+  );
+}
+
+function actionFormat(key) {
+  if (key.endsWith("_paise")) return { format: "currency_paise" };
+  if (key.endsWith("_at")) return { format: "datetime" };
+  if (key.endsWith("_on")) return { format: "date" };
+  return HUMAN_FIELD;
+}
+
+function safeActionChanges(changes) {
+  return Object.entries(changes || {}).filter(([key, value]) => (
+    key !== "id" && !key.endsWith("_id") && !key.startsWith("_") && hasArtifactValue(value)
+  ));
 }
 
 function ActionCard({ data, title, onConfirm, onUndo, compact = false }) {
   const completed = ["completed", "undone"].includes(data.status);
+  const changes = safeActionChanges(data.preview?.changes).slice(0, 8);
   return (
-    <section className="overflow-hidden rounded-2xl border bg-card/90 shadow-[0_8px_26px_hsl(var(--primary)/.05)]">
-      <div className="border-b bg-gradient-to-r from-accent/10 via-transparent to-emerald-500/10 px-4 py-3"><div className="overline">Ready for your review</div><div className="mt-0.5 text-sm font-semibold">Business action</div></div>
+    <section className="overflow-hidden rounded-[1.35rem] border bg-card/90 shadow-[0_8px_26px_hsl(var(--primary)/.05)]">
+      <div className="border-b bg-gradient-to-r from-primary/10 via-transparent to-emerald-500/10 px-4 py-3"><div className="text-[10px] font-bold uppercase tracking-[.17em] text-primary/65">Ready for review</div><div className="mt-0.5 text-sm font-semibold">Business action</div></div>
       <div className={compact ? "p-3" : "p-4 md:p-5"}>
-      <div className="flex gap-3">
-        <div className={`w-10 h-10 shrink-0 rounded-xl grid place-items-center ${completed ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300" : "bg-accent/15 text-accent"}`}>
-          {completed ? <CheckCircle /> : <ClockCounterClockwise />}
-        </div>
-        <div className="flex-1">
-          <h3 className="font-semibold">{title || data.preview?.title}</h3>
-          <div className={`mt-2 grid gap-2 text-xs ${compact ? "grid-cols-1" : "sm:grid-cols-2"}`}>
-            {Object.entries(data.preview?.changes || {})
-              .slice(0, 8)
-              .map(([key, value]) => (
-                <div key={key} className="rounded-xl border bg-secondary/35 p-2.5">
-                  <span className="text-muted-foreground capitalize">
-                    {key.replaceAll("_", " ")}:{" "}
-                  </span>
-                  {valueText(value, key)}
-                </div>
-              ))}
-          </div>
-          <div className="flex gap-2 mt-3">
-            {data.status === "pending_confirmation" && (
-              <Button size="sm" className="rounded-xl" onClick={() => onConfirm(data)}>
-                Review and confirm
-              </Button>
-            )}
-            {data.status === "completed" &&
-              data.undo_expires_at &&
-              new Date(data.undo_expires_at) > new Date() && (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="rounded-xl"
-                  onClick={() => onUndo(data)}
-                >
-                  <ClockCounterClockwise /> Undo
-                </Button>
-              )}
-            <span className="text-xs text-muted-foreground self-center capitalize">
-              {data.status?.replaceAll("_", " ")}
-            </span>
+        <div className="flex gap-3">
+          <div className={cn("grid h-10 w-10 shrink-0 place-items-center rounded-xl", completed ? "bg-emerald-500/15 text-emerald-700" : "bg-primary/15 text-primary")}>{completed ? <CheckCircle /> : <ClockCounterClockwise />}</div>
+          <div className="min-w-0 flex-1">
+            <h3 className="font-semibold">{humanText(title || data.preview?.title)}</h3>
+            {!!changes.length && <div className={cn("mt-3 grid gap-2 text-xs", compact ? "grid-cols-1" : "sm:grid-cols-2")}>{changes.map(([key, value]) => (
+              <div key={key} className="rounded-xl border bg-secondary/35 p-2.5"><span className="text-muted-foreground">{key.replaceAll("_", " ")}: </span>{formatArtifactValue(value, actionFormat(key))}</div>
+            ))}</div>}
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              {data.status === "pending_confirmation" && <Button size="sm" className="rounded-xl" onClick={() => onConfirm?.(data)}>Review and confirm</Button>}
+              {data.status === "completed" && data.undo_expires_at && new Date(data.undo_expires_at) > new Date() && <Button size="sm" variant="outline" className="rounded-xl" onClick={() => onUndo?.(data)}><ClockCounterClockwise /> Undo</Button>}
+              <span className="text-xs capitalize text-muted-foreground">{humanText(data.status).replaceAll("_", " ")}</span>
+            </div>
           </div>
         </div>
-      </div>
       </div>
     </section>
   );

@@ -63,7 +63,7 @@ def prevent_external_email(monkeypatch):
     monkeypatch.setattr("app.api.v1.auth.trial_signup_available", lambda _db: True)
     monkeypatch.setattr("app.api.v1.auth.send_auth_code_email", delivered)
     monkeypatch.setattr("app.api.v1.users.send_auth_code_email", delivered)
-    monkeypatch.setattr("app.ai.orchestrator.provider", lambda: None)
+    monkeypatch.setattr("app.ai.engine.configured_provider", lambda: None)
     # API mutation middleware publishes through a separate PostgreSQL
     # connection. Unit/integration tests do not exercise cross-worker fan-out,
     # and a real NOTIFY can wait behind the test transaction on pooled CI DBs.

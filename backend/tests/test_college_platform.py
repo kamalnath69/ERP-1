@@ -1,4 +1,5 @@
 """End-to-end coverage for the College industry workspace."""
+import asyncio
 from uuid import uuid4
 from unittest.mock import patch
 
@@ -6,20 +7,29 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, select
 
-from app.ai.fast_queries import _summary_text
-from app.ai.tools import tool_college_students
+from app.ai.access import resolve_access_envelope
+from app.ai.catalog import catalog_for
+from app.ai.compiler import deterministic_compile
+from app.ai.contracts import (
+    AssistantRequest, ConversationState, FilterOperator, QueryFilter,
+    QueryGoal, QuerySort, SemanticQuery,
+)
+from app.ai.engine import run_assistant_turn
+from app.ai.execution import execute_semantic_query
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.db.seed import ensure_missing_business_roles, ensure_permissions, sync_granular_role_permissions
 from app.models import (
-    AuditLog, CollegeApplicationStageEvent, CollegeCareerEvidence, CollegeDataConnector,
-    CollegeDepartment, CollegeStudentProfile, Organization, Permission, Role,
-    RolePermission, User,
+    AccessPolicy, AccessPolicyScope, AuditLog, CollegeApplicationStageEvent,
+    CollegeCareerEvidence, CollegeDataConnector, CollegeDepartment,
+    CollegeStudentProfile, Organization, Permission, Role, RolePermission, User,
 )
+from app.services.access_policy import COLLEGE_DOMAIN_LEVELS, ensure_policy, resolve_policy_context
 from app.services.college_access import CollegeAccess
 from app.services.college_imports import commit_run, stage_rows
 from app.services.college_placement import evaluate_eligibility
 from app.services.college_jobs import _public_host, _url_origin
+from app.services.rbac import owner_invariant_health
 from conftest import delete_signup_challenge, verified_signup_body
 from server import app
 
@@ -71,7 +81,7 @@ def college_account():
             select(Permission.code)
             .join(RolePermission, RolePermission.permission_id == Permission.id)
             .join(Role, Role.id == RolePermission.role_id)
-            .where(Role.organization_id == created_id, Role.slug == "owner")
+            .where(Role.organization_id == created_id, Role.system_key == "owner")
         ).scalars())
         assert "college.academics.manage" in owner_permissions
 
@@ -815,7 +825,7 @@ def test_college_workspace_connects_academics_students_attendance_results_and_fe
         )).scalar_one()
         owner_role = db.execute(select(Role).where(
             Role.organization_id == organization_id,
-            Role.slug == "owner",
+            Role.system_key == "owner",
         )).scalar_one()
         academic_permission = db.execute(select(Permission).where(
             Permission.code == "college.academics.manage",
@@ -843,13 +853,126 @@ def test_college_workspace_connects_academics_students_attendance_results_and_fe
         db.rollback()
 
 
-def test_college_summary_language_is_selected_per_turn():
-    result = {"industry": "college", "active_students": 12, "employees": 4}
-    assert _summary_text(result, "en") == "You have 12 active students and 4 faculty and staff."
-    assert "irukaanga" in _summary_text(result, "tanglish")
-    tamil = _summary_text(result, "ta")
-    assert "மாணவர்களும்" in tamil
-    assert "There are" not in tamil
+def test_college_greetings_are_turn_local_and_do_not_reuse_data_context():
+    catalog = catalog_for("college")
+    english = deterministic_compile(
+        "Hello", catalog, context=None, state=ConversationState(),
+    )
+    tanglish = deterministic_compile(
+        "Vanakkam", catalog, context=None, state=ConversationState(),
+    )
+
+    assert english.requested_analysis == "greeting"
+    assert tanglish.requested_analysis == "greeting_tanglish"
+    assert english.entities == tanglish.entities == []
+
+
+def test_profile_answer_does_not_leak_into_a_later_population_question(college_account):
+    headers, context, organization_id = college_account
+    location_id = context["locations"][0]["id"]
+    marker = uuid4().hex[:6]
+    department = _post("/api/college/departments", headers, {
+        "name": f"Computer Science {marker}", "code": f"CS{marker[:3].upper()}",
+        "location_id": location_id,
+    })
+    program = _post("/api/college/programs", headers, {
+        "department_id": department["id"], "name": f"B.Sc. CS {marker}",
+        "code": f"BSC{marker[:4].upper()}", "degree_type": "undergraduate",
+        "duration_semesters": 6,
+    })
+    cohort = _post("/api/college/cohorts", headers, {
+        "program_id": program["id"], "name": f"CS 2026 {marker}",
+        "code": f"CS26{marker[:4].upper()}", "admission_year": 2023,
+        "graduation_year": 2026, "current_semester": 6, "section": "A",
+    })
+    name = f"Kamal {marker}"
+    student = _post("/api/college/students", headers, {
+        "first_name": "Kamal", "last_name": marker,
+        "email": f"kamal-{marker}@example.com", "home_location_id": location_id,
+        "admission_number": f"ADM-{marker.upper()}",
+        "roll_number": f"ROLL-{marker.upper()}", "program_id": program["id"],
+        "cohort_id": cohort["id"], "current_semester": 6,
+        "admitted_on": "2023-07-10",
+    })
+
+    with SessionLocal() as db:
+        owner = db.execute(select(User).where(
+            User.organization_id == organization_id,
+        )).scalar_one()
+        profile = asyncio.run(run_assistant_turn(
+            request=AssistantRequest(message=f"Tell me about {name}"),
+            user=owner, db=db, provider_override=None,
+        ))
+        assert profile.response.outcome.value == "success"
+        assert name in profile.response.answer
+        profile_artifact = next(
+            item for item in profile.response.artifacts if item.type == "profile"
+        )
+        assert "id" not in profile_artifact.data
+        assert profile_artifact.data["profile_ref"] == {
+            "kind": "client", "id": student["client_id"],
+        }
+        assert profile_artifact.presentation.layout == "profile"
+        assert all(field.key != "id" for field in profile_artifact.presentation.fields)
+        assert any(
+            ref.kind == "student" and ref.id == student["id"]
+            for ref in profile_artifact.security.entity_refs
+        )
+
+        population = asyncio.run(run_assistant_turn(
+            request=AssistantRequest(message="Tell me about the overall good student"),
+            user=owner, db=db,
+            conversation_state=profile.state.model_dump(mode="json"),
+            provider_override=None,
+        ))
+        assert population.query.goal == QueryGoal.RANK
+        assert population.query.entities == []
+        assert not any(
+            item.type == "profile" and item.title == name
+            for item in population.response.artifacts
+        )
+
+
+def test_college_owner_runtime_scope_survives_corrupt_and_missing_policy(college_account):
+    _headers, _context, organization_id = college_account
+    with SessionLocal() as db:
+        owner = db.execute(select(User).where(User.organization_id == organization_id)).scalar_one()
+        policy = db.execute(select(AccessPolicy).where(
+            AccessPolicy.organization_id == organization_id,
+            AccessPolicy.user_id == owner.id,
+        )).scalar_one()
+        db.execute(delete(AccessPolicyScope).where(AccessPolicyScope.policy_id == policy.id))
+        policy.status = "revoked"
+        policy.domain_levels = {}
+        db.flush()
+
+        context = resolve_policy_context(db, owner)
+        assert context.active is True
+        assert context.maximum_scope.unrestricted is True
+        assert all(context.level(domain) == "manage" for domain in COLLEGE_DOMAIN_LEVELS)
+        unhealthy = next(
+            row for row in owner_invariant_health(db)["unhealthy"]
+            if row["organization_id"] == organization_id
+        )
+        assert "owner_policy_needs_repair" in unhealthy["reasons"]
+
+        db.delete(policy)
+        db.flush()
+        db.info.pop("edvatiq.policy_context", None)
+        without_row = resolve_policy_context(db, owner)
+        assert without_row.active is True
+        assert without_row.maximum_scope.unrestricted is True
+
+        repaired = ensure_policy(db, owner, creator_id=owner.id)
+        db.flush()
+        assert repaired.status == "active"
+        assert db.execute(select(AccessPolicyScope).where(
+            AccessPolicyScope.policy_id == repaired.id,
+            AccessPolicyScope.domain_key == "*",
+            AccessPolicyScope.scope_type == "organization",
+            AccessPolicyScope.scope_value == "*",
+        )).scalar_one_or_none() is not None
+        db.rollback()
 
 
 def test_college_opportunity_scope_and_batch_eligibility_are_isolated():
@@ -986,18 +1109,29 @@ def test_college_placement_intelligence_is_evidence_backed_and_audited(college_a
 
     with SessionLocal() as db:
         owner = db.execute(select(User).where(User.organization_id == organization_id)).scalar_one()
-        ai_result = tool_college_students(
-            db,
-            owner,
-            department="CSE",
-            section="A",
-            graduation_years=[2027],
-            placement_status="unplaced",
-            sort="academics_desc",
+        envelope = resolve_access_envelope(db, owner)
+        ai_query = SemanticQuery(
+            goal=QueryGoal.RANK,
+            entity="student",
+            fields=[
+                "id", "name", "department", "section", "graduation_year",
+                "placement_status", "cgpa",
+            ],
+            filters=[
+                QueryFilter(field="department", operator=FilterOperator.CONTAINS, value="CSE"),
+                QueryFilter(field="section", operator=FilterOperator.EQ, value="A"),
+                QueryFilter(field="graduation_year", operator=FilterOperator.EQ, value=2027),
+                QueryFilter(field="placement_status", operator=FilterOperator.EQ, value="unplaced"),
+            ],
+            sort=[QuerySort(field="cgpa", direction="desc")],
+            limit=25,
         )
-        assert [row["name"] for row in ai_result["items"]] == ["Asha Student", "Bala Student"]
-        assert ai_result["resolved_scope"]["department"]["id"] == department["id"]
-        assert ai_result["resolved_scope"]["graduation_years"] == [2027]
+        ai_result = execute_semantic_query(
+            db, owner, ai_query, catalog_for("college"), envelope,
+        )
+        assert [row["name"] for row in ai_result.artifacts[0].data["items"]] == [
+            "Asha Student", "Bala Student",
+        ]
 
     attendance = client.post(f"/api/college/students/{ready_student['id']}/attendance-snapshots", headers=headers, json={
         "scope": "overall", "classes_held": 120, "classes_attended": 108,

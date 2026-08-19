@@ -1,6 +1,5 @@
 """Tenant-safe document uploads, retrieval, and client communications."""
 import hashlib
-import math
 import os
 import secrets
 from datetime import datetime, timezone
@@ -19,7 +18,7 @@ from app.schemas.validation import RequestModel
 from app.core.deps import require_entitlements, require_permissions
 from app.models import Client, CollegeStudentProfile, Document, DocumentChunk, Job, Organization, OutboundMessage
 from app.services.business_access import ensure_client_access, ensure_location, tenant_get
-from app.services.access_policy import policy_v2_enabled, resolve_policy_context
+from app.services.access_policy import college_policy_applies, resolve_policy_context
 from app.services.college_access import resolve_college_access
 from app.services.cursor_pagination import decode_cursor, encode_cursor, page_size
 from app.services.entitlements import entitlement_value
@@ -226,7 +225,7 @@ def search_documents(q: str, user=Depends(require_permissions("documents.view"))
 def list_messages(user=Depends(require_permissions("notifications.send")), db: Session = Depends(get_db)):
     statement = select(OutboundMessage).where(OutboundMessage.organization_id == user.organization_id)
     organization = db.get(Organization, user.organization_id)
-    if organization and organization.industry.value == "college" and policy_v2_enabled(db, user.organization_id):
+    if organization and organization.industry.value == "college" and college_policy_applies(db, user.organization_id):
         access = resolve_college_access(db, user, "students")
         context = resolve_policy_context(db, user)
         if not context.has_sensitive("college.students.contact.view"):
@@ -268,7 +267,7 @@ def send_message(body: MessageBody, user=Depends(require_permissions("notificati
     client = tenant_get(db, Client, body.client_id, user)
     ensure_client_access(db, user, client)
     organization = db.get(Organization, user.organization_id)
-    if organization and organization.industry.value == "college" and policy_v2_enabled(db, user.organization_id):
+    if organization and organization.industry.value == "college" and college_policy_applies(db, user.organization_id):
         access = resolve_college_access(db, user, "students")
         if not resolve_policy_context(db, user).has_sensitive("college.students.contact.view"):
             raise HTTPException(403, "Student contact access is required")
@@ -293,15 +292,3 @@ def send_message(body: MessageBody, user=Depends(require_permissions("notificati
     )
     db.add(row); db.flush(); db.add(Job(organization_id=user.organization_id, kind="send_message", payload={"message_id": row.id}, run_at=datetime.now(timezone.utc), idempotency_key=f"send-{row.id}"))
     db.commit(); db.refresh(row); return serialize(row)
-
-
-def _embedding(text: str):
-    if not settings.AI_API_KEY: return None
-    from openai import OpenAI
-    client = OpenAI(api_key=settings.AI_API_KEY, base_url=settings.OPENAI_BASE_URL or None)
-    return client.embeddings.create(model=settings.AI_EMBEDDING_MODEL, input=text).data[0].embedding
-
-
-def _cosine_distance(left, right):
-    dot = sum(a * b for a, b in zip(left, right)); norm_left = math.sqrt(sum(a * a for a in left)); norm_right = math.sqrt(sum(b * b for b in right))
-    return 1 - dot / (norm_left * norm_right) if norm_left and norm_right else 1

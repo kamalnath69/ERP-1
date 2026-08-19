@@ -21,7 +21,7 @@ from app.services.business_access import (
     organization_for,
 )
 from app.services.entitlements import entitlement_value
-from app.services.access_policy import policy_v2_enabled, require_policy_domain, resolve_policy_context
+from app.services.access_policy import college_policy_applies, require_policy_domain, resolve_policy_context
 from app.services.rbac import get_user_permissions
 
 router = APIRouter(prefix="/reports", tags=["reports"])
@@ -55,7 +55,7 @@ def _scope_invoices(statement, db: Session, user, location_id: str | None):
     is_college_policy = bool(
         organization
         and organization.industry.value == "college"
-        and policy_v2_enabled(db, user.organization_id)
+        and college_policy_applies(db, user.organization_id)
     )
     if is_college_policy:
         context = require_policy_domain(db, user, "clearance", "view")

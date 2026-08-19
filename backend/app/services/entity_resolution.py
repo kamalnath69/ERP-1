@@ -15,7 +15,7 @@ from app.models import (
     SalePayment, StockLevel, Task, User,
 )
 from app.services.business_access import allowed_client_ids, allowed_location_ids, filter_clients
-from app.services.access_policy import policy_v2_enabled, resolve_policy_context
+from app.services.access_policy import college_policy_applies, resolve_policy_context
 from app.services.rbac import get_user_permissions
 
 
@@ -23,7 +23,8 @@ logger = logging.getLogger("edvatiq.entity_resolution")
 
 
 KIND_PERMISSION = {
-    "client": "clients.view", "employee": "employees.view", "location": "dashboard.view",
+    "client": "clients.view", "student": "college.students.view",
+    "employee": "employees.view", "location": "dashboard.view",
     "catalog": "catalog.view", "inventory": "inventory.view", "appointment": "appointments.view",
     "invoice": "sales.view", "payment": "sales.view", "task": "dashboard.view",
     "membership_plan": "gym.memberships.view", "membership": "gym.memberships.view",
@@ -32,7 +33,7 @@ KIND_PERMISSION = {
     "lab_test": "clinical.view", "lab_order": "clinical.view",
 }
 ENTITY_KINDS = tuple(KIND_PERMISSION)
-PROFILE_KIND = {"client": "client", "patient": "client", "membership": "client",
+PROFILE_KIND = {"client": "client", "student": "client", "patient": "client", "membership": "client",
                 "checkin": "client", "employee": "employee", "catalog": "catalog", "inventory": "catalog"}
 
 
@@ -59,10 +60,13 @@ def _score(reference, values):
         candidate = normalize_text(value); candidate_compact = compact_text(value)
         candidate_phone = normalize_phone(value) if field == "phone" else ""
         if field == "phone" and len(phone) >= 7 and candidate_phone == phone: score = 100
+        elif candidate == text and field in {"first_name", "last_name"}: score = 91 if field == "first_name" else 89
         elif candidate == text: score = 100
         elif candidate_compact and candidate_compact == compact: score = 98
         elif compact and (compact in candidate_compact or candidate_compact in compact): score = 84
-        else: score = round(SequenceMatcher(None, compact, candidate_compact).ratio() * 70)
+        else:
+            multiplier = 92 if field in {"name", "first_name", "last_name"} else 78
+            score = round(SequenceMatcher(None, compact, candidate_compact).ratio() * multiplier)
         if score > best[0]: best = (score, field)
     return best
 
@@ -93,24 +97,28 @@ def _text_filter(reference, fields):
         clauses.extend([func.lower(func.coalesce(field, "")).contains(text),
                         func.regexp_replace(func.lower(func.coalesce(field, "")), r"[^[:alnum:]]+", "", "g").contains(compact)])
         if len(compact) >= 3:
-            clauses.append(func.similarity(func.lower(func.coalesce(field, "")), text) >= 0.24)
+            normalized_field = func.lower(func.coalesce(field, ""))
+            clauses.extend([
+                func.similarity(normalized_field, text) >= 0.24,
+                func.word_similarity(text, normalized_field) >= 0.45,
+            ])
     return or_(*clauses)
 
 
-def resolve_entities(db: Session, user: User, reference: str, kinds=None, limit=8):
+def resolve_entities(db: Session, user: User, reference: str, kinds=None, limit=8, *, include_media=True):
     started = time.perf_counter()
     reference = str(reference or "").strip()
     if len(reference) < 2: return {"count": 0, "items": [], "resolution": "none"}
-    permissions = get_user_permissions(db, user)
-    requested = [kind for kind in (kinds or ENTITY_KINDS) if kind in KIND_PERMISSION and KIND_PERMISSION[kind] in permissions]
-    allowed_locations = allowed_location_ids(db, user); allowed_clients = allowed_client_ids(db, user)
     organization = db.get(Organization, user.organization_id)
     is_college = bool(organization and organization.industry.value == "college")
     college_context = (
         resolve_policy_context(db, user)
-        if is_college and policy_v2_enabled(db, user.organization_id)
+        if is_college and college_policy_applies(db, user.organization_id)
         else None
     )
+    permissions = set(college_context.permissions) if college_context else get_user_permissions(db, user)
+    explicit_kinds = kinds is not None
+    requested = [kind for kind in (kinds or ENTITY_KINDS) if kind in KIND_PERMISSION and KIND_PERMISSION[kind] in permissions]
     can_view_student_contact = bool(
         not college_context
         or (college_context.active and college_context.has_sensitive("college.students.contact.view"))
@@ -123,13 +131,39 @@ def resolve_entities(db: Session, user: User, reference: str, kinds=None, limit=
         if not college_context.active:
             requested = []
         else:
-            college_kinds = {"client", "location"}
+            college_kinds = {"client", "student", "location"}
             if college_context.maximum_scope.unrestricted:
                 college_kinds.add("employee")
             if college_context.has_sensitive("college.fees.view"):
                 college_kinds.update({"invoice", "payment"})
             requested = [kind for kind in requested if kind in college_kinds]
-    row_id = _uuid(reference); found = []
+    if is_college and not explicit_kinds and "student" in requested:
+        # Student is the canonical College person kind. Keep client available
+        # only for explicit legacy profile references during the migration.
+        requested = [kind for kind in requested if kind != "client"]
+
+    row_id = _uuid(reference)
+
+    location_scoped_kinds = {
+        "employee", "location", "appointment", "invoice", "payment", "membership",
+        "checkin", "class", "equipment", "inventory", "encounter", "prescription", "lab_order",
+    }
+    client_scoped_kinds = {"appointment", "invoice", "payment", "membership", "checkin"}
+    if set(requested).intersection(location_scoped_kinds):
+        if college_context:
+            allowed_locations = None if college_context.maximum_scope.unrestricted else set(
+                college_context.maximum_scope.location_ids
+            )
+        else:
+            allowed_locations = allowed_location_ids(db, user)
+    else:
+        allowed_locations = None
+    allowed_clients = (
+        allowed_client_ids(db, user)
+        if set(requested).intersection(client_scoped_kinds)
+        else None
+    )
+    found = []
 
     def add(kind, row, label, meta, status=None, fields=(), profile_id=None, payload=None):
         score, matched = _score(reference, fields)
@@ -138,6 +172,50 @@ def resolve_entities(db: Session, user: User, reference: str, kinds=None, limit=
             item = _item(kind, row.id, label, meta, status, fields, profile_id, payload)
             item["confidence"] = score; item["matched_by"] = matched
             found.append(item)
+
+    if "student" in requested:
+        full = func.trim(Client.first_name + " " + Client.last_name)
+        student_fields = [
+            full, Client.first_name, Client.last_name, Client.client_number,
+            CollegeStudentProfile.admission_number, CollegeStudentProfile.roll_number,
+        ]
+        if can_view_student_contact:
+            student_fields.extend([Client.phone, Client.email])
+        stmt = filter_clients(select(CollegeStudentProfile, Client).join(
+            Client, Client.id == CollegeStudentProfile.client_id,
+        ).where(
+            CollegeStudentProfile.organization_id == user.organization_id,
+            Client.organization_id == user.organization_id,
+        ), db, user, Client)
+        stmt = stmt.where(
+            or_(CollegeStudentProfile.id == row_id, _text_filter(reference, student_fields))
+            if row_id else _text_filter(reference, student_fields)
+        )
+        for student, client in db.execute(stmt.limit(30)).all():
+            name = f"{client.first_name} {client.last_name}".strip()
+            add(
+                "student", student, name,
+                student.admission_number or student.roll_number or client.client_number,
+                student.status,
+                [
+                    ("name", name), ("first_name", client.first_name),
+                    ("last_name", client.last_name), ("number", client.client_number),
+                    ("phone", client.phone if can_view_student_contact else None),
+                    ("email", client.email if can_view_student_contact else None),
+                    ("admission_number", student.admission_number),
+                    ("roll_number", student.roll_number),
+                ],
+                profile_id=client.id,
+                payload={
+                    "client_id": client.id,
+                    "client_number": client.client_number,
+                    "phone": client.phone if can_view_student_contact else None,
+                    "email": client.email if can_view_student_contact else None,
+                    "admission_number": student.admission_number,
+                    "roll_number": student.roll_number,
+                    "current_semester": student.current_semester,
+                },
+            )
 
     if "client" in requested:
         full = func.trim(Client.first_name + " " + Client.last_name)
@@ -157,7 +235,8 @@ def resolve_entities(db: Session, user: User, reference: str, kinds=None, limit=
             name = f"{row.first_name} {row.last_name}".strip()
             add("client", row, name, student.admission_number if student else row.phone or row.client_number, student.status if student else row.status,
                 [
-                    ("name", name), ("number", row.client_number),
+                    ("name", name), ("first_name", row.first_name),
+                    ("last_name", row.last_name), ("number", row.client_number),
                     ("phone", row.phone if can_view_student_contact else None),
                     ("email", row.email if can_view_student_contact else None),
                     ("admission_number", student.admission_number if student else None),
@@ -177,11 +256,14 @@ def resolve_entities(db: Session, user: User, reference: str, kinds=None, limit=
         stmt = select(Employee).where(Employee.organization_id == user.organization_id)
         if allowed_locations is not None:
             stmt = stmt.where(Employee.id.in_(select(EmployeeLocation.employee_id).where(EmployeeLocation.location_id.in_(allowed_locations))))
-        stmt = stmt.where(or_(Employee.id == row_id, _text_filter(reference, [full, Employee.employee_number, Employee.phone, Employee.email, Employee.designation])) if row_id else _text_filter(reference, [full, Employee.employee_number, Employee.phone, Employee.email, Employee.designation]))
+        employee_fields = [full, Employee.first_name, Employee.last_name, Employee.employee_number, Employee.phone, Employee.email, Employee.designation]
+        stmt = stmt.where(or_(Employee.id == row_id, _text_filter(reference, employee_fields)) if row_id else _text_filter(reference, employee_fields))
         for row in db.execute(stmt.limit(30)).scalars():
             name = f"{row.first_name} {row.last_name}".strip()
             add("employee", row, name, row.designation or row.employee_number, row.status,
-                [("name", name), ("number", row.employee_number), ("phone", row.phone), ("email", row.email), ("designation", row.designation)],
+                [("name", name), ("first_name", row.first_name), ("last_name", row.last_name),
+                 ("number", row.employee_number), ("phone", row.phone), ("email", row.email),
+                 ("designation", row.designation)],
                 payload={"employee_number": row.employee_number, "phone": row.phone, "email": row.email, "designation": row.designation})
 
     named_models = {
@@ -271,7 +353,10 @@ def resolve_entities(db: Session, user: User, reference: str, kinds=None, limit=
         stmt = filter_clients(stmt, db, user, Client).where(or_(PatientProfile.id == row_id, func.lower(func.coalesce(PatientProfile.abha_number, "")).contains(normalize_text(reference)), client_match) if row_id else or_(func.lower(func.coalesce(PatientProfile.abha_number, "")).contains(normalize_text(reference)), client_match))
         for row, client in db.execute(stmt.limit(20)).all():
             name = f"{client.first_name} {client.last_name}".strip()
-            add("patient", row, name, row.abha_number or "Patient", "active", [("name", name), ("abha", row.abha_number), ("phone", client.phone)], profile_id=client.id, payload={"blood_group": row.blood_group})
+            add("patient", row, name, row.abha_number or "Patient", "active",
+                [("name", name), ("first_name", client.first_name), ("last_name", client.last_name),
+                 ("abha", row.abha_number), ("phone", client.phone)],
+                profile_id=client.id, payload={"blood_group": row.blood_group})
 
     clinical_children = [kind for kind in ("encounter", "prescription", "lab_order") if kind in requested]
     if clinical_children:
@@ -337,7 +422,7 @@ def resolve_entities(db: Session, user: User, reference: str, kinds=None, limit=
 
     found.sort(key=lambda item: (-item["confidence"], item["display_name"]))
     found = found[:max(1, min(limit, 20))]
-    if "clients.media.view" in permissions and can_view_student_media:
+    if include_media and "clients.media.view" in permissions and can_view_student_media:
         client_ids = {
             (item.get("profile_ref") or {}).get("id") for item in found
             if (item.get("profile_ref") or {}).get("kind") == "client"
@@ -351,16 +436,24 @@ def resolve_entities(db: Session, user: User, reference: str, kinds=None, limit=
                 client_id = (item.get("profile_ref") or {}).get("id")
                 updated_at = photos.get(client_id)
                 if updated_at: item["avatar_url"] = f"/clients/{client_id}/photo?v={int(updated_at.timestamp())}"
-    exact = [item for item in found if item["confidence"] >= 98]
-    resolution = "unique" if len(exact) == 1 else "ambiguous" if found else "none"
-    selected = exact[0] if resolution == "unique" else None
+    top_score = int(found[0]["confidence"]) if found else 0
+    second_score = int(found[1]["confidence"]) if len(found) > 1 else 0
+    margin = max(0, top_score - second_score)
+    compact_reference = compact_text(reference)
+    safe_fuzzy = len(compact_reference) >= 4 and top_score >= 80 and margin >= 8
+    safe_exact = top_score >= 98 and second_score < 98
+    resolution = "unique" if found and (safe_exact or safe_fuzzy) else "ambiguous" if found else "none"
+    selected = found[0] if resolution == "unique" else None
     for item in found:
         item.pop("_match_fields", None)
     logger.info(
         "entity_resolution outcome=%s requested_kinds=%d candidates=%d latency_ms=%d organization=%s",
         resolution, len(requested), len(found), int((time.perf_counter() - started) * 1000), user.organization_id,
     )
-    return {"count": len(found), "items": found, "resolution": resolution, "selected": selected}
+    return {
+        "count": len(found), "items": found, "resolution": resolution,
+        "selected": selected, "margin": margin,
+    }
 
 
 def validate_entity_ref(db: Session, user: User, kind: str, row_id: str):

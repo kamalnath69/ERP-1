@@ -674,7 +674,23 @@ def _seed_document_and_ai(db: Session, org: Organization, owner: User) -> None:
                 turn_id=turn.id,
                 role="assistant",
                 content=assistant_content,
-                blocks=[{"type": "kpi", "title": "Open priorities", "value": 3, "format": "number"}],
+                outcome="success",
+                artifacts=[{
+                    "id": "demo-open-priorities",
+                    "type": "metric",
+                    "title": "Open priorities",
+                    "data": {"value": 3, "format": "number"},
+                    "evidence_ids": ["demo-priority-observation"],
+                    "security": {"permissions": ["ai.use"], "domains": [], "scope": {}, "entity_ids": []},
+                }],
+                evidence=[{
+                    "id": "demo-priority-observation",
+                    "kind": "demo_summary",
+                    "entity": "organization",
+                    "facts": {"open_priorities": 3},
+                    "source": "Edvatiq demo data",
+                    "authorized_scope": "your organization",
+                }],
             ),
         ])
         db.add(AIUsage(

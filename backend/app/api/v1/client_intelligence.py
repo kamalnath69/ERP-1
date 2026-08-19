@@ -28,7 +28,7 @@ from app.models import (
     WorkoutPlan, WorkoutSession,
 )
 from app.services.audit import log_action
-from app.services.access_policy import ACCESS_LEVELS, policy_v2_enabled, require_policy_domain, resolve_policy_context
+from app.services.access_policy import ACCESS_LEVELS, college_policy_applies, require_policy_domain, resolve_policy_context
 from app.services.business_access import ensure_client_access, ensure_location, filter_clients, filter_locations, tenant_get
 from app.services.rbac import get_user_permissions, get_user_roles
 from app.services.college_access import resolve_college_access
@@ -195,7 +195,7 @@ def _college_domain_allows_profile(
 ) -> bool:
     if not _is_college(db, user):
         return True
-    if policy_v2_enabled(db, user.organization_id):
+    if college_policy_applies(db, user.organization_id):
         context = resolve_policy_context(db, user)
         if not context.active or ACCESS_LEVELS.index(context.level(domain)) < ACCESS_LEVELS.index(minimum):
             return False
@@ -216,7 +216,7 @@ def _require_college_client_domain(
 ) -> None:
     if not _is_college(db, user):
         return
-    if policy_v2_enabled(db, user.organization_id):
+    if college_policy_applies(db, user.organization_id):
         require_policy_domain(db, user, domain, minimum)
     profile = _college_student_profile(db, user, client.id)
     resolve_college_access(db, user, domain).require_student(profile.id)
@@ -1365,33 +1365,10 @@ async def client_copilot(client_id: str, body: ClientQuestion, user: User = Depe
     from app.api.v1.ai import _process_chat
     from app.schemas import ChatRequest
     result = await _process_chat(
-        ChatRequest(message=body.message.strip(), context={"kind": "client", "id": client_id},
+        ChatRequest(message=body.message.strip(), context={"entity": {"kind": "client", "id": client_id}},
                     idempotency_key=f"client:{client_id}:{secrets.token_hex(12)}"), user, db,
     )
     message = result["message"]
-    return {"content": message["content"], "blocks": message.get("blocks", []),
-            "evidence": message.get("citations", []), "pulse": workspace["pulse"],
+    return {"content": message["content"], "artifacts": message.get("artifacts", []),
+            "evidence": message.get("evidence", []), "pulse": workspace["pulse"],
             "suggested_actions": [item.get("recommended_action") for item in workspace["signals"] if item.get("recommended_action")][:3]}
-
-    # Legacy fallback retained temporarily for migrations created before unified orchestration.
-    evidence = []
-    for item in workspace["brief"][:5]: evidence.extend(item.get("evidence") or [])
-    client = workspace["client"]; industry = workspace["industry"]
-    facts = [f"Client: {client['first_name']} {client['last_name']}", f"Industry: {industry}", f"Pulse: {workspace['pulse']['state']}"]
-    facts.extend(f"{item['title']}: {item['detail']}" for item in workspace["brief"][:6])
-    question = body.message.strip(); tamil = any("\u0b80" <= char <= "\u0bff" for char in question)
-    if settings.AI_API_KEY:
-        try:
-            from openai import OpenAI
-            from app.ai.orchestrator import selected_model
-            prompt = "You are Edvatiq's client copilot. Answer only from the supplied facts. Be concise, preserve the user's language, explain uncertainty, and never diagnose or prescribe.\n\n" + "\n".join(facts) + f"\n\nQuestion: {question}"
-            response = OpenAI(api_key=settings.AI_API_KEY, base_url=settings.OPENAI_BASE_URL or None).responses.create(model=selected_model(db, user), input=prompt)
-            content = response.output_text
-        except Exception:
-            content = None
-    else: content = None
-    if not content:
-        summary = " ".join(item["detail"] for item in workspace["brief"][:3])
-        content = ("கிடைக்கக்கூடிய பதிவுகளின் அடிப்படையில்: " if tamil else "Based on the available records: ") + summary
-    log_action(db, organization_id=user.organization_id, user_id=user.id, action="ai.client_chat", resource_type="client", resource_id=client_id, question=question, tool="client_workspace")
-    db.commit(); return {"content": content, "evidence": evidence[:12], "pulse": workspace["pulse"], "suggested_actions": [item.get("recommended_action") for item in workspace["signals"] if item.get("recommended_action")][:3]}

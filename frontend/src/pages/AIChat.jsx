@@ -53,16 +53,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import {
-  EntityAvatar,
-  EntityCard,
-  EntityProfileLink,
-  ProfileTableRow,
-} from "@/components/entities/EntityProfile";
-import {
-  PROFILE_INTERNAL_FIELDS,
-  visibleProfileFields,
-} from "@/lib/profileNavigation";
+import { ArtifactCardGrid } from "@/components/ai/ArtifactCards";
 import {
   closeResultDrawer,
   openResultDrawer,
@@ -97,7 +88,6 @@ import {
   useGetAIConversationQuery,
   useGetAIConversationsQuery,
   useGetAIWorkspaceQuery,
-  useGetConversationMessagePageQuery,
   useLazyGetConversationMessagePageQuery,
   useSubmitAIMessageFeedbackMutation,
   useUpdateAIConversationMutation,
@@ -111,8 +101,15 @@ import {
   setAISidebarCollapsed,
 } from "@/store/slices/preferencesSlice";
 import useCursorPagination from "@/hooks/useCursorPagination";
+import useLatestConversationHistory from "@/hooks/useLatestConversationHistory";
 
 const EMPTY_ITEMS = Object.freeze([]);
+const CHAT_SELECTION_SETTLE_MS = 90;
+const TERMINAL_CONVERSATION_STATUSES = new Set([400, 401, 403, 404, 410, 422]);
+
+function isTerminalConversationError(error) {
+  return TERMINAL_CONVERSATION_STATUSES.has(Number(error?.status));
+}
 const businessSuggestions = [
   "Show today's business snapshot",
   "Compare revenue for the last 30 days",
@@ -137,6 +134,7 @@ export default function AIChat() {
     streaming,
     streamStatus,
     streamError,
+    streamConversationKey,
     draftAssistantId,
     pendingHistoryMessageId,
     pendingHistoryConversationId,
@@ -144,12 +142,28 @@ export default function AIChat() {
     draft: input,
     setDraft: setInput,
     sendMessage,
+    selectClarificationEntity,
     stopGeneration,
+    discardActiveStream,
     selectConversation,
     startNewConversation,
     confirmAction: confirm,
     undoAction: undo,
   } = useAIConversation();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const selectionTimer = useRef(null);
+  const selectionGeneration = useRef(0);
+  const startingNewConversation = useRef(false);
+  const requestedConversation = searchParams.get("chat");
+  const selectedConversationId = startingNewConversation.current
+    ? null
+    : requestedConversation || active;
+  const selectionSettling = Boolean(
+    requestedConversation
+    && requestedConversation !== active
+    && !startingNewConversation.current,
+  );
+  const historyConversationId = selectionSettling ? null : active;
   const workspaceQuery = useGetAIWorkspaceQuery(
     undefined,
     QUERY_POLICIES.operational,
@@ -180,22 +194,19 @@ export default function AIChat() {
   const conversations = conversationPaging.items;
   const conversationsLoading = conversationListQuery.isLoading && !conversations.length;
   const listedActiveConversation = conversations.find((item) => item.id === active);
+  const listedSelectedConversation = conversations.find(
+    (item) => item.id === selectedConversationId,
+  );
   const conversationDetailQuery = useGetAIConversationQuery(
     active,
-    withSkip(QUERY_POLICIES.reference, !active || Boolean(listedActiveConversation)),
+    withSkip(
+      QUERY_POLICIES.reference,
+      !active || selectionSettling || Boolean(listedActiveConversation),
+    ),
   );
-  const conversationQuery = useGetConversationMessagePageQuery(
-    { conversationId: active, limit: 50 },
-    withSkip(QUERY_POLICIES.reference, !active),
-  );
+  const [loadConversationMessagePage] = useLazyGetConversationMessagePageQuery();
   const [loadOlderMessagePage, olderMessageState] = useLazyGetConversationMessagePageQuery();
   const [messageCursor, setMessageCursor] = useState(null);
-  const {
-    currentData: conversationMessagePage,
-    isFetching: conversationFetching,
-    isError: conversationError,
-  } = conversationQuery;
-  const conversationMessages = conversationMessagePage?.items;
   const documents = sidebar?.documents || EMPTY_ITEMS;
   const savedViews = sidebar?.savedViews || EMPTY_ITEMS;
   const sidebarLoading = workspaceLoading || conversationsLoading;
@@ -214,15 +225,12 @@ export default function AIChat() {
     useUpdateAIConversationMutation();
   const [submitMessageFeedback, feedbackState] =
     useSubmitAIMessageFeedbackMutation();
-  const [searchParams, setSearchParams] = useSearchParams();
   const messageViewport = useRef(null);
   const inputRef = useRef(null);
   const keepAtBottom = useRef(true);
   const historyRefreshKey = useRef(null);
   const conversationCache = useRef(new Map());
   const initialSent = useRef(false);
-  const startingNewConversation = useRef(false);
-  const requestedConversation = searchParams.get("chat");
   const draftMessage = draftAssistantId
     ? messages.find((message) => message.id === draftAssistantId)
     : null;
@@ -231,9 +239,51 @@ export default function AIChat() {
     conversationCache.current.set(active, conversationDetailQuery.currentData);
   }
   const activeConversation =
-    listedActiveConversation ||
-    conversationDetailQuery.currentData ||
-    conversationCache.current.get(active);
+    listedSelectedConversation ||
+    (selectedConversationId === active ? conversationDetailQuery.currentData : null) ||
+    conversationCache.current.get(selectedConversationId);
+  const acceptConversationHistory = useCallback((conversationId, page) => {
+    dispatch(setMessages({
+      conversationId,
+      messages: page.items || [],
+      preserveOlder: true,
+    }));
+    setMessageCursor(page.next_cursor || null);
+  }, [dispatch]);
+  const conversationHistory = useLatestConversationHistory({
+    conversationId: historyConversationId,
+    hasCachedMessages: Boolean(messages.length),
+    loadPage: loadConversationMessagePage,
+    onPage: acceptConversationHistory,
+  });
+  const conversationFetching = Boolean(
+    historyConversationId
+    && conversationHistory.conversationId === historyConversationId
+    && conversationHistory.isFetching,
+  );
+  const conversationError = Boolean(
+    historyConversationId
+    && conversationHistory.conversationId === historyConversationId
+    && conversationHistory.status === "error",
+  );
+  const historyError = conversationError ? conversationHistory.error : null;
+  const detailError = selectedConversationId === active
+    && !listedSelectedConversation
+    && conversationDetailQuery.isError
+    ? conversationDetailQuery.error
+    : null;
+  const terminalConversationError = Boolean(
+    isTerminalConversationError(historyError)
+    || isTerminalConversationError(detailError),
+  );
+  const visibleMessages = selectionSettling || terminalConversationError
+    ? EMPTY_ITEMS
+    : messages;
+
+  useEffect(() => {
+    if (!terminalConversationError || !active) return;
+    dispatch(setMessages({ conversationId: active, messages: [] }));
+  }, [active, dispatch, terminalConversationError]);
 
   useLayoutEffect(() => {
     const composer = inputRef.current;
@@ -242,19 +292,37 @@ export default function AIChat() {
     composer.style.height = `${Math.min(composer.scrollHeight, 128)}px`;
   }, [input]);
 
-  useLayoutEffect(() => {
+  useEffect(() => {
+    if (selectionTimer.current) {
+      window.clearTimeout(selectionTimer.current);
+      selectionTimer.current = null;
+    }
     if (!requestedConversation) {
       startingNewConversation.current = false;
-      return;
+      return undefined;
     }
-    if (startingNewConversation.current) return;
-    if (requestedConversation && requestedConversation !== active) {
+    if (startingNewConversation.current || requestedConversation === active) {
+      return undefined;
+    }
+
+    selectionGeneration.current += 1;
+    const generation = selectionGeneration.current;
+    selectionTimer.current = window.setTimeout(() => {
+      if (selectionGeneration.current !== generation) return;
+      selectionTimer.current = null;
       selectConversation(requestedConversation);
-    }
+    }, CHAT_SELECTION_SETTLE_MS);
+
+    return () => {
+      if (selectionGeneration.current !== generation) return;
+      selectionGeneration.current += 1;
+      if (selectionTimer.current) window.clearTimeout(selectionTimer.current);
+      selectionTimer.current = null;
+    };
   }, [active, requestedConversation, selectConversation]);
 
   useEffect(() => {
-    if (!active || startingNewConversation.current || requestedConversation === active) return;
+    if (!active || startingNewConversation.current || requestedConversation) return;
     const next = new URLSearchParams(searchParams);
     next.set("chat", active);
     next.delete("ask");
@@ -266,49 +334,26 @@ export default function AIChat() {
   }, [active]);
 
   useEffect(() => {
-    const waitingForCompletedMessage =
-      pendingHistoryConversationId === active &&
-      pendingHistoryMessageId &&
-      !conversationMessages?.some(
-        (message) => message.id === pendingHistoryMessageId,
-      );
-    if (
-      active &&
-      conversationMessages &&
-      !streaming &&
-      !waitingForCompletedMessage
-    ) {
-      dispatch(
-        setMessages({ conversationId: active, messages: conversationMessages, preserveOlder: true }),
-      );
-      setMessageCursor(conversationMessagePage?.next_cursor || null);
-    }
-  }, [
-    active,
-    conversationMessages,
-    dispatch,
-    pendingHistoryConversationId,
-    pendingHistoryMessageId,
-    conversationMessagePage?.next_cursor,
-    streaming,
-  ]);
-
-  useEffect(() => {
     if (!pendingHistoryMessageId) {
       historyRefreshKey.current = null;
       return;
     }
-    if (pendingHistoryConversationId !== active || conversationFetching) return;
+    if (
+      pendingHistoryConversationId !== active
+      || selectionSettling
+      || conversationFetching
+    ) return;
     const refreshKey = `${active}:${pendingHistoryMessageId}`;
     if (historyRefreshKey.current === refreshKey) return;
     historyRefreshKey.current = refreshKey;
-    conversationQuery.refetch().catch(() => {});
+    conversationHistory.refresh();
   }, [
     active,
     conversationFetching,
-    conversationQuery,
+    conversationHistory.refresh,
     pendingHistoryConversationId,
     pendingHistoryMessageId,
+    selectionSettling,
   ]);
 
   useLayoutEffect(() => {
@@ -318,7 +363,7 @@ export default function AIChat() {
   }, [
     active,
     draftMessage?.content,
-    draftMessage?.blocks?.length,
+    draftMessage?.artifacts?.length,
     messages.length,
     streaming,
   ]);
@@ -348,6 +393,9 @@ export default function AIChat() {
     async (text, explicitContext = null) => {
       const question = String(text ?? input).trim();
       if (!question || streaming) return false;
+      if (selectionSettling || (selectedConversationId && selectedConversationId !== active)) {
+        return false;
+      }
       if (activeConversation?.archived_at) {
         toast.error("Restore this chat before sending a new message");
         return false;
@@ -363,8 +411,11 @@ export default function AIChat() {
     },
     [
       activeConversation?.archived_at,
+      active,
       input,
       searchParams,
+      selectedConversationId,
+      selectionSettling,
       sendMessage,
       streaming,
     ],
@@ -379,16 +430,26 @@ export default function AIChat() {
   }, [searchParams, send, streaming]);
 
   const chooseConversation = (id) => {
+    if (!id || id === selectedConversationId) return;
     startingNewConversation.current = false;
     keepAtBottom.current = true;
-    selectConversation(id);
+    selectionGeneration.current += 1;
+    if (selectionTimer.current) window.clearTimeout(selectionTimer.current);
+    selectionTimer.current = null;
+    discardActiveStream();
+    conversationHistory.abort();
     const next = new URLSearchParams(searchParams);
     next.set("chat", id);
+    next.delete("ask");
     setSearchParams(next, { replace: true });
   };
   const newConversation = () => {
     startingNewConversation.current = true;
     keepAtBottom.current = true;
+    selectionGeneration.current += 1;
+    if (selectionTimer.current) window.clearTimeout(selectionTimer.current);
+    selectionTimer.current = null;
+    conversationHistory.abort();
     startNewConversation();
     setConversationScope("active");
     setConversationSearch("");
@@ -613,14 +674,37 @@ export default function AIChat() {
     recognition.start();
   };
   const conversationLoading = Boolean(
-    active && conversationFetching && !messages.length,
+    selectedConversationId
+    && !visibleMessages.length
+    && (
+      selectionSettling
+      || active !== selectedConversationId
+      || conversationHistory.conversationId !== active
+      || conversationHistory.status === "idle"
+      || conversationFetching
+    ),
+  );
+  const detailUnavailable = Boolean(detailError);
+  const conversationRefreshError = Boolean(
+    visibleMessages.length && (conversationError || detailUnavailable),
   );
   const conversationUnavailable = Boolean(
-    active && (conversationError || conversationDetailQuery.isError),
+    selectedConversationId
+    && (
+      terminalConversationError
+      || (!visibleMessages.length && (conversationError || detailUnavailable))
+    ),
   );
   const conversationReadOnly = Boolean(
-    activeConversation?.archived_at || conversationUnavailable,
+    selectionSettling
+    || conversationLoading
+    || activeConversation?.archived_at
+    || conversationUnavailable,
   );
+  const retryConversation = () => {
+    conversationHistory.refresh();
+    if (detailUnavailable) conversationDetailQuery.refetch();
+  };
 
   return (
     <SecondarySidebarLayout
@@ -634,7 +718,7 @@ export default function AIChat() {
       sidebar={historyCollapsed ? (
           <CollapsedHistoryRail
             isCollege={isCollege}
-            active={active}
+            active={selectedConversationId}
             conversations={conversations}
             savedViews={savedViews}
             documents={documents}
@@ -647,7 +731,7 @@ export default function AIChat() {
         ) : (
           <HistoryPanel
             isCollege={isCollege}
-            active={active}
+            active={selectedConversationId}
             conversations={conversations}
             savedViews={savedViews}
             documents={documents}
@@ -673,6 +757,7 @@ export default function AIChat() {
               })
             }
             streaming={streaming}
+            streamingConversationId={streamConversationKey}
             hasMore={Boolean(conversationListQuery.data?.has_more)}
             loadingMore={conversationListQuery.isFetching}
             onLoadMore={() => conversationPaging.loadMore(conversationListQuery.data?.next_cursor)}
@@ -680,7 +765,7 @@ export default function AIChat() {
         )}
       mobileSidebar={({ closeSidebar }) => <HistoryPanel
         isCollege={isCollege}
-        active={active}
+        active={selectedConversationId}
         conversations={conversations}
         savedViews={savedViews}
         documents={documents}
@@ -703,6 +788,7 @@ export default function AIChat() {
           title: item.title,
         })}
         streaming={streaming}
+        streamingConversationId={streamConversationKey}
         hasMore={Boolean(conversationListQuery.data?.has_more)}
         loadingMore={conversationListQuery.isFetching}
         onLoadMore={() => conversationPaging.loadMore(conversationListQuery.data?.next_cursor)}
@@ -748,25 +834,33 @@ export default function AIChat() {
           {conversationLoading ? (
             <ConversationSkeleton />
           ) : (
-            !messages.length &&
+            !visibleMessages.length &&
             !streaming &&
-            !conversationError && <Welcome send={send} isCollege={isCollege} />
+            !conversationUnavailable && <Welcome send={send} isCollege={isCollege} />
           )}
-          {conversationError && !messages.length && (
+          {conversationUnavailable && !visibleMessages.length && (
             <InlineState
               icon={WarningCircle}
               text="This conversation could not be loaded."
-              action={() => conversationQuery.refetch()}
+              action={retryConversation}
             />
           )}
-          {messageCursor && messages.length > 0 && (
+          {conversationRefreshError && (
+            <div className="mx-auto flex w-full max-w-5xl items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-950">
+              <span>Latest chat history could not be refreshed. Showing the saved copy.</span>
+              <Button type="button" size="sm" variant="outline" className="h-8 shrink-0 bg-white" onClick={retryConversation}>
+                Retry
+              </Button>
+            </div>
+          )}
+          {messageCursor && visibleMessages.length > 0 && (
             <div className="mx-auto flex w-full max-w-5xl justify-center">
               <Button type="button" variant="outline" size="sm" disabled={olderMessageState.isFetching} onClick={loadEarlierMessages}>
                 {olderMessageState.isFetching ? "Loading earlier messages..." : "Load earlier messages"}
               </Button>
             </div>
           )}
-          {messages.map((message) => (
+          {visibleMessages.map((message) => (
             <AIMessage
               key={message.id}
               message={message}
@@ -791,16 +885,21 @@ export default function AIChat() {
               onPin={pin}
               onConfirm={confirm}
               onUndo={undo}
-              onSelectEntity={(item) =>
-                send(
-                  `Tell me about ${item.display_name || "this record"}`,
-                  item.selection_ref,
-                )
-              }
+              onSelectEntity={selectClarificationEntity}
+              onSuggestion={(suggestion) => send(
+                suggestion.prompt,
+                suggestion.entity_refs?.length
+                  ? { selected_entities: suggestion.entity_refs }
+                  : null,
+              )}
             />
           ))}
           {streamError && !streaming && (
-            <InlineState icon={WarningCircle} text={streamError} />
+            <InlineState
+              icon={WarningCircle}
+              text={typeof streamError === "string" ? streamError : streamError.message}
+              action={streamError.retryable === false ? null : () => send(streamError.question || input)}
+            />
           )}
           <div aria-hidden="true" />
         </div>
@@ -848,7 +947,13 @@ export default function AIChat() {
               rows={1}
               maxLength={5000}
               className="premium-scrollbar min-h-10 max-h-32 flex-1 resize-none bg-transparent px-2 py-2.5 text-sm leading-5 outline-none"
-              placeholder={conversationReadOnly ? "Start or restore a chat to continue" : isCollege ? "Ask about students, readiness, attendance, coding, or placements..." : "Ask about sales, clients, stock, appointments or documents..."}
+              placeholder={conversationLoading || selectionSettling
+                ? "Loading selected chat..."
+                : conversationReadOnly
+                  ? "Start or restore a chat to continue"
+                  : isCollege
+                    ? "Ask about students, readiness, attendance, coding, or placements..."
+                    : "Ask about sales, clients, stock, appointments or documents..."}
               value={input}
               disabled={conversationReadOnly}
               onChange={(event) => setInput(event.target.value)}
@@ -974,6 +1079,7 @@ function HistoryPanel({
   onArchive,
   onDelete,
   streaming,
+  streamingConversationId,
   hasMore,
   loadingMore,
   onLoadMore,
@@ -991,7 +1097,10 @@ function HistoryPanel({
       key={item.id}
       item={item}
       active={active === item.id}
-      streaming={(streaming && active === item.id) || item.active_stream}
+      streaming={Boolean(
+        item.active_stream
+        || (streaming && streamingConversationId === item.id),
+      )}
       onChoose={onChoose}
       onPin={onPin}
       onRename={onRename}
@@ -1133,13 +1242,16 @@ function ConversationRow({ item, active, streaming, onChoose, onPin, onRename, o
   return (
     <div
       className={cn(
-        "group relative mb-1 overflow-hidden rounded-xl transition-colors",
-        active ? "bg-primary text-primary-foreground" : "hover:bg-secondary",
+        "group relative mb-1 overflow-hidden rounded-xl border border-transparent transition-colors",
+        active
+          ? "border-primary bg-primary text-primary-foreground shadow-sm"
+          : "hover:border-border/60 hover:bg-secondary/45",
       )}
     >
       <button
         type="button"
         onClick={() => onChoose(item.id)}
+        aria-current={active ? "page" : undefined}
         className="block w-full min-w-0 px-3 py-2.5 pr-10 text-left"
       >
         <div className="flex min-w-0 items-center gap-1.5 text-sm font-medium">
@@ -1437,110 +1549,38 @@ function ResultDrawer({ drawer, close }) {
         items: [...(current?.items || []), ...response.data.items],
       }));
       setCursor(response.data.next_cursor);
+    } catch {
+      toast.error("Could not load more records");
     } finally {
       setLoading(false);
     }
   };
   const items = data?.items || [];
-  const hasProfiles = items.some((item) => item.profile_ref);
-  const columns = [...new Set(items.flatMap((item) => Object.keys(item)))]
-    .filter((key) => !PROFILE_INTERNAL_FIELDS.has(key) && !key.endsWith("_id"))
-    .slice(0, 7);
+  const total = Number(data?.total ?? items.length);
   return (
     <Sheet open={!!drawer} onOpenChange={(open) => !open && close()}>
-      <SheetContent className="premium-scrollbar sm:max-w-4xl overflow-y-auto">
+      <SheetContent className="premium-scrollbar w-full overflow-y-auto sm:max-w-6xl">
         <SheetHeader>
           <SheetTitle className="font-display text-3xl">
-            {drawer?.title || "Complete result"}
+            {drawer?.title || data?.title || "Complete result"}
           </SheetTitle>
           <SheetDescription>
             {data
-              ? `${Number(data.count || items.length).toLocaleString("en-IN")} matching records`
+              ? `${total.toLocaleString("en-IN")} matching record${total === 1 ? "" : "s"}${data.scope_label ? ` in ${data.scope_label}` : ""}`
               : "Loading current workspace information"}
           </SheetDescription>
         </SheetHeader>
         {loading && !data ? (
           <div className="mt-8 h-56 animate-pulse bg-secondary rounded-2xl" />
+        ) : items.length ? (
+          <div className="mt-6">
+            <ArtifactCardGrid items={items} presentation={data?.presentation} />
+          </div>
         ) : (
-          <>
-            {hasProfiles && (
-              <div className="mt-6 grid gap-3 md:hidden">
-                {items.map((item, index) => (
-                  <EntityCard
-                    key={item.id || index}
-                    item={item}
-                    details={visibleProfileFields(item, 3).map(
-                      ([key, value]) => [key, drawerValue(value, key)],
-                    )}
-                  />
-                ))}
-              </div>
-            )}
-            <div
-              className={`premium-scrollbar mt-6 overflow-x-auto border rounded-2xl ${hasProfiles ? "hidden md:block" : ""}`}
-            >
-              <table className="w-full text-sm">
-                <thead className="bg-secondary">
-                  <tr>
-                    {columns.map((key) => (
-                      <th
-                        key={key}
-                        className="text-left px-4 py-3 capitalize whitespace-nowrap"
-                      >
-                        {key.replaceAll("_", " ")}
-                      </th>
-                    ))}
-                    {hasProfiles && <th className="px-4 py-3" />}
-                  </tr>
-                </thead>
-                <tbody>
-                  {items.map((item, index) => (
-                    <ProfileTableRow
-                      key={item.id || index}
-                      profileRef={item.profile_ref}
-                      ariaLabel={`Open ${item.display_name || item.name || "record"} profile`}
-                      className="border-t"
-                    >
-                      {columns.map((key, columnIndex) => (
-                        <td key={key} className="px-4 py-3 max-w-64 truncate">
-                          {columnIndex === 0 && item.profile_ref ? (
-                            <div className="flex items-center gap-2.5">
-                              <EntityAvatar
-                                name={item.display_name || item.name}
-                                kind={item.profile_ref.kind}
-                                avatarUrl={item.avatar_url}
-                                className="h-9 w-9 rounded-xl text-sm"
-                              />
-                              <EntityProfileLink
-                                profileRef={item.profile_ref}
-                                className="font-medium hover:text-accent"
-                              >
-                                {drawerValue(item[key], key)}
-                              </EntityProfileLink>
-                            </div>
-                          ) : (
-                            drawerValue(item[key], key)
-                          )}
-                        </td>
-                      ))}
-                      {hasProfiles && (
-                        <td className="px-4 py-3 text-right">
-                          {item.profile_ref && (
-                            <EntityProfileLink
-                              profileRef={item.profile_ref}
-                              className="text-xs font-semibold text-accent"
-                            >
-                              Open profile
-                            </EntityProfileLink>
-                          )}
-                        </td>
-                      )}
-                    </ProfileTableRow>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </>
+          <div className="mt-8 rounded-2xl border bg-secondary/30 p-8 text-center">
+            <div className="font-semibold">No matching records</div>
+            <div className="mt-1 text-sm text-muted-foreground">The current authorized result is empty.</div>
+          </div>
         )}
         {cursor && (
           <Button
@@ -1555,19 +1595,4 @@ function ResultDrawer({ drawer, close }) {
       </SheetContent>
     </Sheet>
   );
-}
-
-function drawerValue(value, key = "") {
-  if (value == null || value === "") return "-";
-  if (key.endsWith("_paise"))
-    return `INR ${(Number(value) / 100).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
-  if (typeof value === "boolean") return value ? "Yes" : "No";
-  if (typeof value === "object")
-    return Array.isArray(value) ? value.join(", ") : "Details";
-  if (/(_at|_on)$/.test(key) && !Number.isNaN(Date.parse(value)))
-    return new Date(value).toLocaleString("en-IN", {
-      dateStyle: "medium",
-      timeStyle: key.endsWith("_at") ? "short" : undefined,
-    });
-  return String(value);
 }

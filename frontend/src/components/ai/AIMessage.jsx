@@ -70,8 +70,8 @@ export default function AIMessage({
             </div>
             {message.content ? (
               <div className={cn(
-                "rounded-2xl rounded-tl-md border bg-card/80 shadow-[0_8px_26px_hsl(var(--primary)/.04)]",
-                compact ? "px-3.5 py-3 text-sm" : "px-4 py-3.5 md:px-5",
+                "text-foreground",
+                compact ? "px-1 py-1 text-sm" : "max-w-4xl px-1 py-1.5 text-[15px] leading-7",
               )}>
                 <RichText>{message.content}</RichText>
               </div>

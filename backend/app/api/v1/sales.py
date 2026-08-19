@@ -10,7 +10,7 @@ from app.core.database import get_db
 from app.schemas.validation import RequestModel
 from app.core.deps import require_permissions
 from app.models import Organization
-from app.services.access_policy import policy_v2_enabled, require_policy_domain
+from app.services.access_policy import college_policy_applies, require_policy_domain
 from app.services.rbac import get_user_permissions
 from app.services.sales import create_sale, invoice_detail, record_payment, sales_workspace, void_invoice
 
@@ -23,7 +23,7 @@ def _require_college_finance(db: Session, user, *, manage: bool = False) -> None
     if not organization or getattr(organization.industry, "value", organization.industry) != "college":
         return
     required = "college.fees.manage" if manage else "college.fees.view"
-    if policy_v2_enabled(db, user.organization_id):
+    if college_policy_applies(db, user.organization_id):
         context = require_policy_domain(db, user, "clearance", "work" if manage else "view")
         allowed = context.has_sensitive(required)
     else:

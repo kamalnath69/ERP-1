@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.deps import get_current_user
 from app.models import Notification, Organization
-from app.services.access_policy import policy_v2_enabled, resolve_policy_context
+from app.services.access_policy import college_policy_applies, resolve_policy_context
 from app.services.cursor_pagination import decode_cursor, encode_cursor, page_size
 from app.services.entity_resolution import validate_entity_ref
 
@@ -61,7 +61,7 @@ def _notification_visible(db: Session, user, row: Notification) -> bool:
     if (
         not organization
         or getattr(organization.industry, "value", organization.industry) != "college"
-        or not policy_v2_enabled(db, user.organization_id)
+        or not college_policy_applies(db, user.organization_id)
     ):
         return True
     context = resolve_policy_context(db, user)

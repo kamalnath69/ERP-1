@@ -12,9 +12,9 @@ from sqlalchemy.orm import Session
 from app.models import (
     AccessDelegation, AccessDelegationScope, AccessPolicy, AccessPolicyScope,
     CollegeCohort, CollegeCourseOffering, CollegeDepartment, CollegeProgram,
-    CollegeStudentProfile, FeatureFlag, Organization, User,
+    CollegeStudentProfile, Organization, User,
 )
-from app.services.rbac import get_user_permissions, get_user_roles
+from app.services.rbac import get_user_permissions, is_system_owner
 
 
 ACCESS_LEVELS = ("none", "view", "work", "manage")
@@ -309,15 +309,21 @@ def permission_codes_for_levels(levels: dict[str, str]) -> set[str]:
 
 
 def is_owner(db: Session, user: User) -> bool:
-    return any(role.is_system and role.slug == "owner" for role in get_user_roles(db, user))
+    return is_system_owner(db, user)
 
 
-def policy_v2_enabled(db: Session, organization_id: str) -> bool:
-    flag = db.execute(select(FeatureFlag.enabled).where(
-        FeatureFlag.organization_id == organization_id,
-        FeatureFlag.flag == "authorization.policy_v2",
-    )).scalar_one_or_none()
-    return bool(flag)
+def college_policy_applies(db: Session, organization_id: str | None) -> bool:
+    """College tenants always use the enterprise policy; there is no version switch."""
+    if not organization_id:
+        return False
+    cache = db.info.setdefault("edvatiq.college_organizations", {})
+    cache_key = str(organization_id)
+    if cache_key not in cache:
+        industry = db.execute(select(Organization.industry).where(
+            Organization.id == organization_id,
+        )).scalar_one_or_none()
+        cache[cache_key] = getattr(industry, "value", industry) == "college"
+    return bool(cache[cache_key])
 
 
 def get_policy(db: Session, user: User) -> AccessPolicy | None:
@@ -343,6 +349,28 @@ def utc_datetime(value: datetime | None) -> datetime | None:
 def ensure_policy(db: Session, user: User, *, creator_id: str | None = None) -> AccessPolicy:
     policy = get_policy(db, user)
     if policy:
+        if is_owner(db, user):
+            policy.status = "active"
+            policy.domain_levels = {domain: "manage" for domain in COLLEGE_DOMAIN_LEVELS}
+            policy.expires_at = None
+            policy.reviewed_by_user_id = creator_id or user.id
+            policy.reviewed_at = datetime.now(timezone.utc)
+            owner_scope = db.execute(select(AccessPolicyScope.id).where(
+                AccessPolicyScope.organization_id == user.organization_id,
+                AccessPolicyScope.policy_id == policy.id,
+                AccessPolicyScope.domain_key == "*",
+                AccessPolicyScope.scope_type == "organization",
+                AccessPolicyScope.scope_value == "*",
+            )).scalar_one_or_none()
+            if not owner_scope:
+                db.add(AccessPolicyScope(
+                    organization_id=user.organization_id,
+                    policy_id=policy.id,
+                    domain_key="*",
+                    scope_type="organization",
+                    scope_value="*",
+                ))
+            db.flush()
         return policy
     owner = is_owner(db, user)
     policy = AccessPolicy(
@@ -482,7 +510,7 @@ def expand_college_roots(
     )
 
 
-def resolve_policy_context(db: Session, user: User) -> PolicyContext:
+def _resolve_policy_context_uncached(db: Session, user: User) -> PolicyContext:
     permissions = frozenset(get_user_permissions(db, user))
     if not user.organization_id:
         return PolicyContext(
@@ -525,6 +553,28 @@ def resolve_policy_context(db: Session, user: User) -> PolicyContext:
         permissions=permissions, maximum_scope=maximum,
         domain_levels=dict(policy.domain_levels or {}), domain_scopes=domain_scopes,
     )
+
+
+def resolve_policy_context(db: Session, user: User) -> PolicyContext:
+    """Resolve College policy once per request/session and access version.
+
+    Expanded policy scopes are immutable value objects. Keeping them in the
+    current SQLAlchemy session avoids repeating the hierarchy expansion for
+    every selector, AI tool, and serializer involved in one request, without
+    carrying sensitive scope data across requests.
+    """
+    cache = db.info.setdefault("edvatiq.policy_context", {})
+    cache_key = (
+        str(user.organization_id or ""),
+        str(user.id),
+        int(user.access_version or 0),
+    )
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+    context = _resolve_policy_context_uncached(db, user)
+    cache[cache_key] = context
+    return context
 
 
 def require_policy_domain(db: Session, user: User, domain: str, minimum: str = "view") -> PolicyContext:

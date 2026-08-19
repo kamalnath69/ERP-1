@@ -312,16 +312,10 @@ def ai_performance(
     total = func.count(AIExecutionTrace.id)
     provider_turns = func.sum(case((AIExecutionTrace.provider_requests > 0, 1), else_=0))
     zero_credit_turns = func.sum(case((AIExecutionTrace.zero_credit.is_(True), 1), else_=0))
-    cache_hits = func.sum(case((AIExecutionTrace.cache_status == "hit", 1), else_=0))
-    verification_failures = func.sum(case((AIExecutionTrace.verification_outcome == "deterministic_fallback", 1), else_=0))
-    fallbacks = func.sum(case((AIExecutionTrace.fallback_used.is_(True), 1), else_=0))
     aggregates = db.execute(select(
         total,
         func.coalesce(provider_turns, 0),
         func.coalesce(zero_credit_turns, 0),
-        func.coalesce(cache_hits, 0),
-        func.coalesce(verification_failures, 0),
-        func.coalesce(fallbacks, 0),
         func.coalesce(func.sum(AIExecutionTrace.provider_requests), 0),
         func.coalesce(func.sum(AIExecutionTrace.input_tokens), 0),
         func.coalesce(func.sum(AIExecutionTrace.output_tokens), 0),
@@ -339,10 +333,17 @@ def ai_performance(
         func.percentile_cont(0.95).within_group(AIExecutionTrace.total_latency_ms),
         func.sum(AIExecutionTrace.provider_requests),
         func.sum(case((AIExecutionTrace.zero_credit.is_(True), 1), else_=0)),
-        func.sum(case((AIExecutionTrace.verification_outcome == "deterministic_fallback", 1), else_=0)),
+        func.sum(case((AIExecutionTrace.outcome.in_((
+            "unavailable", "unsupported", "configuration_required",
+        )), 1), else_=0)),
     ).where(
         AIExecutionTrace.created_at >= since,
     ).group_by(AIExecutionTrace.route).order_by(func.count(AIExecutionTrace.id).desc())).all()
+    outcome_rows = db.execute(select(
+        AIExecutionTrace.outcome, func.count(AIExecutionTrace.id),
+    ).where(
+        AIExecutionTrace.created_at >= since,
+    ).group_by(AIExecutionTrace.outcome)).all()
 
     def ratio(value: int) -> float:
         return round((int(value or 0) / count), 4) if count else 0.0
@@ -352,19 +353,17 @@ def ai_performance(
         "turns": count,
         "provider_call_ratio": ratio(aggregates[1]),
         "zero_credit_ratio": ratio(aggregates[2]),
-        "cache_hit_ratio": ratio(aggregates[3]),
-        "verification_failure_ratio": ratio(aggregates[4]),
-        "fallback_ratio": ratio(aggregates[5]),
-        "provider_requests": int(aggregates[6] or 0),
+        "outcomes": {str(outcome): int(turns or 0) for outcome, turns in outcome_rows},
+        "provider_requests": int(aggregates[3] or 0),
         "tokens": {
-            "input": int(aggregates[7] or 0),
-            "output": int(aggregates[8] or 0),
-            "embedding": int(aggregates[9] or 0),
+            "input": int(aggregates[4] or 0),
+            "output": int(aggregates[5] or 0),
+            "embedding": int(aggregates[6] or 0),
         },
         "latency_ms": {
-            "p50": int(aggregates[10] or 0),
-            "p95": int(aggregates[11] or 0),
-            "first_event_p95": int(aggregates[12] or 0),
+            "p50": int(aggregates[7] or 0),
+            "p95": int(aggregates[8] or 0),
+            "first_event_p95": int(aggregates[9] or 0),
         },
         "routes": [
             {
@@ -374,9 +373,9 @@ def ai_performance(
                 "p95_latency_ms": int(p95_latency or 0),
                 "provider_requests": int(requests or 0),
                 "zero_credit_turns": int(free_turns or 0),
-                "verification_fallbacks": int(failed_verification or 0),
+                "unavailable_turns": int(unavailable_turns or 0),
             }
-            for route, turns, average_latency, p95_latency, requests, free_turns, failed_verification in route_rows
+            for route, turns, average_latency, p95_latency, requests, free_turns, unavailable_turns in route_rows
         ],
     }
 
@@ -488,12 +487,15 @@ def transfer_owner(org_id: str, body: OwnerTransferBody, actor=Depends(require_p
     if not target or target.organization_id != org_id or not target.is_active: raise HTTPException(400, "Choose an active user in this organization")
     owner_role = db.execute(select(Role).where(
         Role.organization_id == org_id,
-        Role.slug == "owner",
+        Role.system_key == "owner",
         Role.is_system.is_(True),
     )).scalar_one_or_none()
     if not owner_role: raise HTTPException(409, "This organization has no owner role")
     existing = db.execute(select(UserRole).where(UserRole.role_id == owner_role.id)).scalars().all()
     if not db.execute(select(UserRole).where(UserRole.role_id == owner_role.id, UserRole.user_id == target.id)).scalar_one_or_none(): db.add(UserRole(role_id=owner_role.id, user_id=target.id))
+    db.flush()
+    from app.services.access_policy import ensure_policy
+    ensure_policy(db, target, creator_id=target.id)
     for assignment in existing:
         if assignment.user_id != target.id: db.delete(assignment)
     db.query(User).filter(User.organization_id == org_id).update({User.session_version: User.session_version + 1})
@@ -1028,4 +1030,12 @@ def _approve_deletion(db, actor, deletion):
 
 @router.get("/health")
 def health(actor=Depends(require_platform_permission("overview.view")), db: Session = Depends(get_db)):
-    return {"organizations": db.scalar(select(func.count(Organization.id))) or 0, "users": db.scalar(select(func.count(User.id))) or 0, "status": "healthy"}
+    from app.services.rbac import owner_invariant_health
+
+    authorization = owner_invariant_health(db)
+    return {
+        "organizations": db.scalar(select(func.count(Organization.id))) or 0,
+        "users": db.scalar(select(func.count(User.id))) or 0,
+        "status": "healthy" if authorization["healthy"] else "attention",
+        "authorization": authorization,
+    }

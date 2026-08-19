@@ -5,6 +5,12 @@ import { WarningCircle } from "@phosphor-icons/react";
 import { baseApi } from "@/store/api/baseApi";
 import { cn } from "@/lib/utils";
 
+export function isCancelledQuery(query) {
+  return query?.error?.status === "CANCELLED"
+    || query?.error?.code === "ERR_CANCELED"
+    || query?.error?.name === "AbortError";
+}
+
 export function selectDegradedQueries(state) {
   const apiState = state[baseApi.reducerPath];
   if (!apiState) return [];
@@ -12,7 +18,9 @@ export function selectDegradedQueries(state) {
   return Object.entries(apiState.queries || {})
     .filter(([cacheKey, query]) => {
       const active = Object.keys(subscriptions[cacheKey] || {}).length > 0;
-      return active && (query?.status === "rejected" || query?.data?._sync?.partial);
+      return active
+        && !isCancelledQuery(query)
+        && (query?.status === "rejected" || query?.data?._sync?.partial);
     })
     .map(([, query]) => ({ endpointName: query.endpointName, originalArgs: query.originalArgs, hasData: query.data !== undefined }));
 }

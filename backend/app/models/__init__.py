@@ -44,7 +44,8 @@ from app.models.college_placement import (
 from app.models.documents import Document, DocumentChunk, Job, OutboundMessage
 from app.models.data_exchange import DataExchangeArtifact, DataExchangeRow, DataExchangeRun
 from app.models.ai import (
-    AIAction, AIExecutionTrace, AIIntentResolution, AIMessageFeedback, AIResultSession, AISavedView, AIUsage,
+    AIAction, AIExecutionTrace, AIMessageFeedback, AIResultSession,
+    AISavedView, AISemanticPolicy, AIUsage,
     ChatConversation, ChatMessage, ChatTurn,
 )
 from app.models.audit import AuditLog

@@ -26,7 +26,7 @@ from app.models import (
 )
 from app.schemas.validation import RequestModel
 from app.services.audit import log_action
-from app.services.access_policy import policy_v2_enabled, resolve_policy_context
+from app.services.access_policy import college_policy_applies, resolve_policy_context
 from app.services.college import require_college, tenant_row
 from app.services.college_access import resolve_college_access
 from app.services.college_imports import RESOURCE_FIELDS, commit_run, stage_rows
@@ -64,7 +64,7 @@ def _require_credential_administration(db: Session, user: User) -> None:
     """Require both the Data domain and the explicit credential safeguard."""
     require_college(db, user)
     resolve_college_access(db, user, "data")
-    if policy_v2_enabled(db, user.organization_id):
+    if college_policy_applies(db, user.organization_id):
         context = resolve_policy_context(db, user)
         if not context.has_sensitive("college.integrations.manage"):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Integration credential access is required")

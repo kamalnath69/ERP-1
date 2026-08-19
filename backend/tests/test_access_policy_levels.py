@@ -117,14 +117,14 @@ def test_owner_resolution_requires_the_builtin_role(monkeypatch):
     user = SimpleNamespace(id="user")
     monkeypatch.setattr(
         access_policy,
-        "get_user_roles",
-        lambda _db, _user: [SimpleNamespace(slug="owner", is_system=False)],
+        "is_system_owner",
+        lambda _db, _user: False,
     )
     assert access_policy.is_owner(None, user) is False
 
     monkeypatch.setattr(
         access_policy,
-        "get_user_roles",
-        lambda _db, _user: [SimpleNamespace(slug="owner", is_system=True)],
+        "is_system_owner",
+        lambda _db, _user: True,
     )
     assert access_policy.is_owner(None, user) is True

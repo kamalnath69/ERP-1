@@ -3,7 +3,6 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from app.ai.orchestrator import fast_conversation_reply
 from app.ai.personalization import (
     AssistantPreferences,
     model_style_instruction,
@@ -34,23 +33,6 @@ def test_assistant_preferences_are_strict_and_normalized():
         AssistantPreferences(custom_instructions="x" * 1501)
     with pytest.raises(ValidationError):
         AssistantPreferences(unknown_setting=True)
-
-
-def test_current_message_language_wins_over_saved_style():
-    preferences = AssistantPreferences(
-        preferred_name="Kamal",
-        tone="friendly",
-        detail="detailed",
-        formatting="paragraphs",
-    )
-
-    english = fast_conversation_reply("Hello", preferences)
-    tanglish = fast_conversation_reply("Vanakkam", preferences)
-
-    assert english["language"] == "en"
-    assert english["content"].startswith("Hi, Kamal!")
-    assert tanglish["language"] == "tanglish"
-    assert tanglish["content"].startswith("Vanakkam, Kamal!")
 
 
 def test_custom_instructions_are_explicitly_presentation_only():

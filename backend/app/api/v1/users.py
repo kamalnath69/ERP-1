@@ -9,7 +9,6 @@ from app.core.deps import CurrentUser, require_permissions
 from app.core.security import hash_password, verify_password
 from app.schemas.validation import RequestModel
 from app.models import (
-    AccessPolicy,
     Permission,
     Organization,
     Role,
@@ -27,12 +26,18 @@ from app.schemas import (
     UserOverridesUpdate,
     UserUpdate,
 )
-from app.services.rbac import get_user_permissions
+from app.services.rbac import (
+    OWNER_SYSTEM_KEY,
+    active_owner_count,
+    get_user_permissions,
+    get_user_roles,
+)
 from app.models import AccessScope, Location
 from app.services.access_policy import (
+    college_policy_applies,
+    ensure_policy,
     grantable_permission_codes,
     is_owner,
-    policy_v2_enabled,
     require_access_administrator,
 )
 from app.services.auth_security import clear_auth_cookies
@@ -59,7 +64,7 @@ def _is_policy_college(db: Session, user: User) -> bool:
     return bool(
         organization
         and getattr(organization.industry, "value", organization.industry) == "college"
-        and policy_v2_enabled(db, user.organization_id)
+        and college_policy_applies(db, user.organization_id)
     )
 
 
@@ -75,10 +80,12 @@ def _college_role_assignment_guard(
     if target and target.id == actor.id:
         raise HTTPException(status.HTTP_409_CONFLICT, "Another owner must review changes to your own access")
 
-    protected_slugs = {"owner", "access-admin"}
-    current_slugs = {role.slug for role in get_user_roles(db, target) if role.is_system} if target else set()
-    next_slugs = {role.slug for role in roles if role.is_system}
-    if not actor_owner and (current_slugs | next_slugs).intersection(protected_slugs):
+    protected_keys = {OWNER_SYSTEM_KEY, "access-admin"}
+    current_keys = {
+        role.system_key for role in get_user_roles(db, target) if role.is_system and role.system_key
+    } if target else set()
+    next_keys = {role.system_key for role in roles if role.is_system and role.system_key}
+    if not actor_owner and (current_keys | next_keys).intersection(protected_keys):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Only an owner can assign or change Owner and Access Admin")
 
     ceiling = grantable_permission_codes(db, actor)
@@ -311,12 +318,8 @@ def create_user(body: UserCreate, request: Request, user: User = Depends(require
     for location_id in valid_locations:
         db.add(AccessScope(organization_id=user.organization_id, user_id=new_user.id, scope_type="location", scope_value=location_id, meta={}))
     if _is_policy_college(db, user):
-        db.add(AccessPolicy(
-            organization_id=user.organization_id,
-            user_id=new_user.id,
-            status="pending_review",
-            created_by_user_id=user.id,
-        ))
+        db.flush()
+        ensure_policy(db, new_user, creator_id=user.id)
     code = create_auth_code(db, new_user, "email_verification", request)
     db.commit()
     db.refresh(new_user)
@@ -390,9 +393,15 @@ def update_user(
         require_access_administrator(db, user)
         if target.id == user.id:
             raise HTTPException(status.HTTP_409_CONFLICT, "Another owner must change your account status")
-        target_slugs = {role.slug for role in get_user_roles(db, target) if role.is_system}
-        if not is_owner(db, user) and target_slugs.intersection({"owner", "access-admin"}):
+        target_keys = {
+            role.system_key for role in get_user_roles(db, target) if role.is_system and role.system_key
+        }
+        if not is_owner(db, user) and target_keys.intersection({OWNER_SYSTEM_KEY, "access-admin"}):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Only an owner can change Owner and Access Admin accounts")
+    requested_active = body.is_active if body.is_active is not None else target.is_active
+    if target.is_active and not requested_active and is_owner(db, target):
+        if active_owner_count(db, target.organization_id) <= 1:
+            raise HTTPException(status.HTTP_409_CONFLICT, "The final active owner cannot be deactivated")
     previous_active = target.is_active
     for k, v in body.model_dump(exclude_none=True).items():
         setattr(target, k, v)
@@ -421,6 +430,9 @@ def assign_roles(
     )).scalars()) if body.role_ids else []
     valid = {role.id for role in roles}
     if valid != set(body.role_ids): raise HTTPException(422, "One or more roles are invalid")
+    next_owner = any(role.is_system and role.system_key == OWNER_SYSTEM_KEY for role in roles)
+    if is_owner(db, target) and not next_owner and active_owner_count(db, target.organization_id) <= 1:
+        raise HTTPException(status.HTTP_409_CONFLICT, "The final active owner cannot be removed")
     if _is_policy_college(db, user):
         require_access_administrator(db, user)
         raise HTTPException(

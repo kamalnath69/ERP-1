@@ -22,7 +22,12 @@ from app.models import (
 from app.services.audit import log_action
 from app.services.business_access import allowed_client_ids, allowed_location_ids, client_scope_mode, filter_clients
 from app.services.entitlements import entitlement_value
-from app.services.rbac import get_user_permissions, get_user_roles
+from app.services.rbac import (
+    OWNER_SYSTEM_KEY,
+    active_owner_count,
+    get_user_permissions,
+    get_user_roles,
+)
 from app.services.access_policy import (
     ACCESS_LEVELS, COLLEGE_DOMAIN_LEVELS, COLLEGE_DOMAIN_LABELS,
     COLLEGE_ROLE_LEVEL_SUGGESTIONS, MANAGED_PERMISSION_CODES,
@@ -31,8 +36,8 @@ from app.services.access_policy import (
     SENSITIVE_CAPABILITIES, ScopeRoot,
     active_delegation, college_domain_catalog, delegation_roots, ensure_policy,
     domain_level_from_permissions, ensure_roots_within, expand_college_roots, get_policy, grantable_permission_codes,
-    is_owner, permission_codes_for_levels, policy_roots, policy_summary,
-    policy_v2_enabled, require_access_administrator, resolve_policy_context, utc_datetime, validate_scope_roots,
+    college_policy_applies, is_owner, permission_codes_for_levels, policy_roots, policy_summary,
+    require_access_administrator, resolve_policy_context, utc_datetime, validate_scope_roots,
 )
 from app.services.cursor_pagination import decode_cursor, encode_cursor, page_size
 
@@ -113,7 +118,7 @@ def _require_legacy_access_mode(db: Session, actor: User) -> None:
     if (
         organization
         and organization.industry.value == "college"
-        and policy_v2_enabled(db, actor.organization_id)
+        and college_policy_applies(db, actor.organization_id)
     ):
         raise HTTPException(
             status_code=409,
@@ -200,8 +205,10 @@ def _validate_policy_body(db: Session, actor: User, target: User, body: Enterpri
     actor_owner = is_owner(db, actor)
     if target.id == actor.id:
         raise HTTPException(409, "Another owner must review changes to your own access")
-    target_role_slugs = {role.slug for role in get_user_roles(db, target) if role.is_system}
-    if not actor_owner and target_role_slugs.intersection({"owner", "access-admin"}):
+    target_role_keys = {
+        role.system_key for role in get_user_roles(db, target) if role.is_system and role.system_key
+    }
+    if not actor_owner and target_role_keys.intersection({OWNER_SYSTEM_KEY, "access-admin"}):
         raise HTTPException(403, "Only an owner can change owners or Access Admins")
 
     unknown_domains = set(body.domain_levels) - set(COLLEGE_DOMAIN_LEVELS)
@@ -216,14 +223,12 @@ def _validate_policy_body(db: Session, actor: User, target: User, body: Enterpri
         raise HTTPException(422, "Access expiry must be in the future")
 
     roles, role_codes = _role_codes(db, body.role_ids, actor.organization_id)
-    next_role_slugs = {role.slug for role in roles if role.is_system}
-    if not actor_owner and next_role_slugs.intersection({"owner", "access-admin"}):
+    next_role_keys = {role.system_key for role in roles if role.is_system and role.system_key}
+    if not actor_owner and next_role_keys.intersection({OWNER_SYSTEM_KEY, "access-admin"}):
         raise HTTPException(403, "Only an owner can assign Owner or Access Admin")
 
     normalized_levels = _normalize_domain_levels(body.domain_levels)
     has_college_domain = any(level != "none" for level in normalized_levels.values())
-    if not has_college_domain and "access-admin" not in next_role_slugs:
-        raise HTTPException(422, "Enable at least one College work area")
     if body.ai_enabled and not has_college_domain:
         raise HTTPException(422, "Edvatiq AI needs at least one College work area")
 
@@ -422,7 +427,10 @@ def _configuration_preview(db: Session, actor: User, target: User, body: UserAcc
         warnings.append("Some selected work needs Client access, but Client viewing is blocked.")
     return {
         "roles": [
-            {"id": row.id, "name": row.name, "slug": row.slug, "is_system": row.is_system}
+            {
+                "id": row.id, "name": row.name, "slug": row.slug,
+                "system_key": row.system_key, "is_system": row.is_system,
+            }
             for row in valid_roles
         ],
         "effective_permissions": [{"id": row.id, "code": row.code, "label": row.label, "module": row.module} for row in effective_rows],
@@ -542,13 +550,13 @@ def access_users_page(
     rows = list(db.execute(statement.order_by(first_key, last_key, User.id).limit(size + 1)).scalars())
     has_more = len(rows) > size
     rows = rows[:size]
-    role_rows = db.execute(select(UserRole.user_id, Role.id, Role.name, Role.slug).join(
+    role_rows = db.execute(select(UserRole.user_id, Role.id, Role.name, Role.slug, Role.system_key).join(
         Role, Role.id == UserRole.role_id,
     ).where(UserRole.user_id.in_([row.id for row in rows]))).all() if rows else []
     roles_by_user: dict[str, list[dict]] = {row.id: [] for row in rows}
-    for user_id, role_id, role_name, role_slug in role_rows:
+    for user_id, role_id, role_name, role_slug, system_key in role_rows:
         roles_by_user.setdefault(user_id, []).append({
-            "id": role_id, "name": role_name, "slug": role_slug,
+            "id": role_id, "name": role_name, "slug": role_slug, "system_key": system_key,
         })
     policies = {
         row.user_id: row for row in db.execute(select(AccessPolicy).where(
@@ -580,7 +588,7 @@ def access_users_page(
                 if row.id in policies and utc_datetime(policies[row.id].expires_at)
                 and utc_datetime(policies[row.id].expires_at) <= datetime.now(timezone.utc)
                 else policies[row.id].status if row.id in policies
-                else "active" if any(role.get("slug") == "owner" for role in roles_by_user.get(row.id, []))
+                else "active" if any(role.get("system_key") == OWNER_SYSTEM_KEY for role in roles_by_user.get(row.id, []))
                 else "pending_review"
             ),
             "policy_version": policies[row.id].version if row.id in policies else 0,
@@ -847,7 +855,7 @@ def catalog(actor=Depends(require_permissions("roles.manage")), db: Session = De
         Role.slug != "manager",
     ).order_by(Role.name)).scalars())
     if not actor_owner:
-        roles = [row for row in roles if row.slug not in {"owner", "access-admin"}]
+        roles = [row for row in roles if row.system_key not in {OWNER_SYSTEM_KEY, "access-admin"}]
     role_code_rows = db.execute(select(RolePermission.role_id, Permission.code).join(
         Permission, Permission.id == RolePermission.permission_id,
     ).where(RolePermission.role_id.in_([row.id for row in roles]))).all() if roles else []
@@ -879,7 +887,7 @@ def catalog(actor=Depends(require_permissions("roles.manage")), db: Session = De
             offerings = [row for row in offerings if row.id in ceiling.course_offering_ids]
 
     return {
-        "policy_v2": True,
+        "authorization_policy": "enterprise",
         "can_manage_delegations": actor_owner,
         "can_manage_role_templates": bool(
             organization and entitlement_value(db, organization, "access.custom_roles", False)
@@ -1135,16 +1143,12 @@ def save_configuration(user_id: str, body: UserAccessConfiguration, actor=Depend
     preview = _configuration_preview(db, actor, target, body)
 
     current_owner = is_owner(db, target)
-    next_owner = any(role["is_system"] and role["slug"] == "owner" for role in preview["roles"])
-    if current_owner and not next_owner:
-        owner_role = db.execute(select(Role).where(
-            Role.organization_id == actor.organization_id,
-            Role.slug == "owner",
-            Role.is_system.is_(True),
-        )).scalar_one_or_none()
-        owners = set(db.execute(select(UserRole.user_id).where(UserRole.role_id == owner_role.id)).scalars()) if owner_role else set()
-        if len(owners) <= 1:
-            raise HTTPException(409, "The final owner cannot be removed")
+    next_owner = any(
+        role["is_system"] and role.get("system_key") == OWNER_SYSTEM_KEY
+        for role in preview["roles"]
+    )
+    if current_owner and not next_owner and active_owner_count(db, actor.organization_id) <= 1:
+        raise HTTPException(409, "The final active owner cannot be removed")
 
     db.query(UserRole).filter(UserRole.user_id == target.id).delete()
     for role_id in body.role_ids:
@@ -1264,22 +1268,18 @@ def save_enterprise_policy(
         raise HTTPException(409, "This access policy changed elsewhere. Refresh before saving.")
 
     current_owner = is_owner(db, target)
-    next_owner = any(role.is_system and role.slug == "owner" for role in preview["roles"])
-    if current_owner and not next_owner:
-        owner_role = db.execute(select(Role).where(
-            Role.organization_id == actor.organization_id,
-            Role.slug == "owner",
-            Role.is_system.is_(True),
-        )).scalar_one_or_none()
-        owner_count = db.scalar(select(func.count(UserRole.user_id)).where(
-            UserRole.role_id == owner_role.id,
-        )) if owner_role else 0
-        if int(owner_count or 0) <= 1:
-            raise HTTPException(409, "The final owner cannot be removed")
+    next_owner = any(
+        role.is_system and role.system_key == OWNER_SYSTEM_KEY for role in preview["roles"]
+    )
+    if current_owner and not next_owner and active_owner_count(db, actor.organization_id) <= 1:
+        raise HTTPException(409, "The final active owner cannot be removed")
 
     db.query(UserRole).filter(UserRole.user_id == target.id).delete()
     for role in preview["roles"]:
         db.add(UserRole(user_id=target.id, role_id=role.id))
+    db.flush()
+    if next_owner:
+        policy = ensure_policy(db, target, creator_id=actor.id)
 
     managed_permissions = list(db.execute(select(Permission).where(
         Permission.code.in_(POLICY_MANAGED_PERMISSION_CODES),
@@ -1290,53 +1290,42 @@ def save_enterprise_policy(
             UserPermissionOverride.user_id == target.id,
             UserPermissionOverride.permission_id.in_(managed_ids),
         ).delete(synchronize_session=False)
-    role_codes = preview["role_codes"]
-    desired = preview["desired_managed"]
-    for permission in managed_permissions:
-        inherited = permission.code in role_codes
-        requested = permission.code in desired
-        if inherited != requested:
-            db.add(UserPermissionOverride(
-                user_id=target.id,
-                permission_id=permission.id,
-                granted=requested,
-            ))
+    if not next_owner:
+        role_codes = preview["role_codes"]
+        desired = preview["desired_managed"]
+        for permission in managed_permissions:
+            inherited = permission.code in role_codes
+            requested = permission.code in desired
+            if inherited != requested:
+                db.add(UserPermissionOverride(
+                    user_id=target.id,
+                    permission_id=permission.id,
+                    granted=requested,
+                ))
 
     db.query(AccessPolicyScope).filter(AccessPolicyScope.policy_id == policy.id).delete()
-    for root in preview["maximum_roots"]:
+    maximum_roots = [ScopeRoot("organization", "*")] if next_owner else preview["maximum_roots"]
+    domain_roots = {} if next_owner else preview["domain_roots"]
+    for root in maximum_roots:
         db.add(AccessPolicyScope(
             organization_id=actor.organization_id, policy_id=policy.id, domain_key="*",
             scope_type=root.scope_type, scope_value=root.scope_value,
         ))
-    for domain, roots in preview["domain_roots"].items():
+    for domain, roots in domain_roots.items():
         for root in roots:
             db.add(AccessPolicyScope(
                 organization_id=actor.organization_id, policy_id=policy.id, domain_key=domain,
                 scope_type=root.scope_type, scope_value=root.scope_value,
             ))
 
-    # Compatibility projection for legacy modules while College moves to the
-    # centralized evaluator.
-    db.execute(delete(AccessScope).where(
-        AccessScope.organization_id == actor.organization_id,
-        AccessScope.user_id == target.id,
-        AccessScope.scope_type.like("college.%"),
-    ))
-    for root in preview["maximum_roots"]:
-        if root.scope_type != "organization":
-            db.add(AccessScope(
-                organization_id=actor.organization_id, user_id=target.id,
-                scope_type=f"college.{root.scope_type}", scope_value=root.scope_value,
-                meta={"source": "access_policy_v2"},
-            ))
-
     now = datetime.now(timezone.utc)
     policy.status = "active"
-    policy.domain_levels = {
-        domain: body.domain_levels.get(domain, "none")
-        for domain in COLLEGE_DOMAIN_LEVELS
-    }
-    policy.expires_at = body.expires_at
+    policy.domain_levels = (
+        {domain: "manage" for domain in COLLEGE_DOMAIN_LEVELS}
+        if next_owner else
+        {domain: body.domain_levels.get(domain, "none") for domain in COLLEGE_DOMAIN_LEVELS}
+    )
+    policy.expires_at = None if next_owner else body.expires_at
     policy.reviewed_by_user_id = actor.id
     policy.reviewed_at = now
     policy.review_note = body.review_note

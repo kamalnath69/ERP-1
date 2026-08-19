@@ -15,7 +15,7 @@ from app.models import (
     OutboundMessage, Organization, Task, TrainerAssignment, User,
 )
 from app.services.audit import log_action
-from app.services.access_policy import policy_v2_enabled, resolve_policy_context
+from app.services.access_policy import college_policy_applies, resolve_policy_context
 from app.services.business_access import ensure_client_access, ensure_location, enforce_plan_limit, tenant_get
 from app.services.entitlements import entitlement_value
 from app.services.rbac import user_has_permissions
@@ -196,7 +196,15 @@ ACTION_REGISTRY = {
 }
 
 
-def prepare_action(db: Session, user: User, action_type: str, payload: dict, conversation_id: str | None) -> dict:
+def prepare_action(
+    db: Session,
+    user: User,
+    action_type: str,
+    payload: dict,
+    conversation_id: str | None,
+    *,
+    idempotency_key: str | None = None,
+) -> dict:
     if not user_has_permissions(db, user, ["ai.actions"]):
         return {"access_denied": True, "message": "AI-assisted actions are not included in your access."}
     if not entitlement_value(db, db.get(Organization, user.organization_id), "ai.actions", False):
@@ -207,8 +215,29 @@ def prepare_action(db: Session, user: User, action_type: str, payload: dict, con
         return {"access_denied": True, "message": "You do not have permission to perform this action."}
     try: validated = definition.payload_model.model_validate(payload)
     except Exception as exc: return {"error": str(exc)}
+    normalized_payload = validated.model_dump(mode="json")
+    action_key = idempotency_key or f"ai-{secrets.token_hex(16)}"
+    existing = db.execute(select(AIAction).where(
+        AIAction.organization_id == user.organization_id,
+        AIAction.idempotency_key == action_key,
+    )).scalar_one_or_none()
+    if existing:
+        if (
+            existing.user_id != user.id
+            or existing.action_type != action_type
+            or existing.payload != normalized_payload
+        ):
+            raise HTTPException(409, "That idempotency key was already used for a different action")
+        if existing.status != "pending_confirmation":
+            return serialize_action(existing)
+        token = secrets.token_urlsafe(24)
+        existing.confirmation_token_hash = hashlib.sha256(token.encode()).hexdigest()
+        existing.confirmation_expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+        db.flush()
+        return {**serialize_action(existing), "confirmation_token": token}
+
     now = datetime.now(timezone.utc); token = secrets.token_urlsafe(24)
-    policy_context = resolve_policy_context(db, user) if policy_v2_enabled(db, user.organization_id) else None
+    policy_context = resolve_policy_context(db, user) if college_policy_applies(db, user.organization_id) else None
     if policy_context and not policy_context.active:
         return {"access_denied": True, "message": "Your data access must be reviewed before using AI actions."}
     action = AIAction(
@@ -216,39 +245,36 @@ def prepare_action(db: Session, user: User, action_type: str, payload: dict, con
         action_type=action_type, risk_level=definition.risk, required_permission=definition.permission,
         preview={
             "title": definition.title,
-            "changes": validated.model_dump(mode="json"),
-            "requires_confirmation": definition.risk == "high",
+            "changes": normalized_payload,
+            "requires_confirmation": True,
             "access_version": user.access_version,
+            "policy_version": policy_context.policy_version if policy_context else 0,
         },
-        payload=validated.model_dump(mode="json"), status="pending_confirmation" if definition.risk == "high" else "executing",
-        confirmation_token_hash=hashlib.sha256(token.encode()).hexdigest() if definition.risk == "high" else None,
-        confirmation_expires_at=now + timedelta(minutes=10) if definition.risk == "high" else None,
-        idempotency_key=f"ai-{secrets.token_hex(16)}",
-        policy_version=policy_context.policy_version if policy_context else user.access_version,
+        payload=normalized_payload, status="pending_confirmation",
+        confirmation_token_hash=hashlib.sha256(token.encode()).hexdigest(),
+        confirmation_expires_at=now + timedelta(minutes=10),
+        idempotency_key=action_key,
+        access_version=user.access_version,
     )
     db.add(action); db.flush()
-    if definition.risk == "low":
-        result, undo_payload = _execute(db, user, action, definition)
-        action.status = "completed"; action.result = result; action.executed_at = now; action.undo_payload = undo_payload
-        if undo_payload: action.undo_expires_at = now + timedelta(seconds=30)
-        log_action(db, organization_id=user.organization_id, user_id=user.id, action=f"ai_action.{action_type}",
-                   resource_type="ai_action", resource_id=action.id, changes=action.payload)
-        return serialize_action(action)
     return {**serialize_action(action), "confirmation_token": token}
 
 
 def _execute(db, user, action, definition):
     if not user_has_permissions(db, user, [definition.permission]):
         raise HTTPException(403, "Your access changed and this action is no longer allowed")
-    if policy_v2_enabled(db, user.organization_id):
+    if college_policy_applies(db, user.organization_id):
         context = resolve_policy_context(db, user)
         expected_access_version = (action.preview or {}).get("access_version")
+        expected_policy_version = (action.preview or {}).get("policy_version", 0)
         if (
             not context.active
-            or context.policy_version != action.policy_version
+            or context.policy_version != expected_policy_version
             or expected_access_version != user.access_version
         ):
             raise HTTPException(409, "Your access changed. Review and create this action again.")
+    elif action.access_version != user.access_version:
+        raise HTTPException(409, "Your access changed. Review and create this action again.")
     data = definition.payload_model.model_validate(action.payload)
     return definition.execute(db, user, data, action)
 
@@ -265,6 +291,8 @@ def confirm_action(db: Session, user: User, action: AIAction, token: str | None)
     definition = ACTION_REGISTRY[action.action_type]
     result, undo_payload = _execute(db, user, action, definition)
     action.status = "completed"; action.result = result; action.executed_at = now; action.undo_payload = undo_payload
+    if undo_payload:
+        action.undo_expires_at = now + timedelta(seconds=30)
     log_action(db, organization_id=user.organization_id, user_id=user.id, action=f"ai_action.{action.action_type}",
                resource_type="ai_action", resource_id=action.id, changes=action.payload)
     return serialize_action(action)

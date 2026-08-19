@@ -615,6 +615,7 @@ def _optional_domain_access(
 def _sanitize_student_intelligence(db: Session, user: User, student_id: str, payload: dict) -> dict:
     permissions = get_user_permissions(db, user)
     domains = {
+        "readiness": _optional_domain_access(db, user, permissions, "readiness", "college.readiness.view"),
         "assessments": _optional_domain_access(db, user, permissions, "assessments", "college.assessments.view"),
         "attendance": _optional_domain_access(db, user, permissions, "attendance", "college.attendance.view"),
         "coding": _optional_domain_access(db, user, permissions, "coding", "college.coding.view"),
@@ -642,6 +643,8 @@ def _sanitize_student_intelligence(db: Session, user: User, student_id: str, pay
     if not can("placements"):
         payload["career"] = None
         payload["applications"] = []
+    if not can("readiness"):
+        payload["readiness"] = None
     if not can("clearance"):
         payload["fee_clearance"] = None
     elif payload.get("fee_clearance"):
@@ -795,7 +798,35 @@ def get_placement_dashboard(
     user: User = Depends(require_permissions("college.view", "college.placement_reports.view")),
 ):
     require_college(db, user)
-    access = resolve_college_access(db, user, "reports")
+    permissions = get_user_permissions(db, user)
+    reports_access = resolve_college_access(db, user, "reports")
+    primary_access = [
+        _optional_domain_access(db, user, permissions, "students", "college.students.view"),
+        _optional_domain_access(db, user, permissions, "readiness", "college.readiness.view"),
+        _optional_domain_access(db, user, permissions, "placements", "college.placements.view"),
+    ]
+    if any(item is None for item in primary_access):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Placement reports require student, readiness, and placement access",
+        )
+    evidence_access = {
+        "assessments": _optional_domain_access(
+            db, user, permissions, "assessments", "college.assessments.view",
+        ),
+        "attendance": _optional_domain_access(
+            db, user, permissions, "attendance", "college.attendance.view",
+        ),
+        "coding": _optional_domain_access(
+            db, user, permissions, "coding", "college.coding.view",
+        ),
+    }
+    access = _intersect_access(
+        reports_access,
+        *(item for item in primary_access if item is not None),
+        *(item for item in evidence_access.values() if item is not None),
+        domain="placement_reports",
+    )
     selected_cohort_ids = list(dict.fromkeys(cohort_ids or []))
     if len(selected_cohort_ids) > 50:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Compare at most 50 cohorts")
@@ -815,6 +846,9 @@ def get_placement_dashboard(
         cohort_id=cohort_id,
         cohort_ids=selected_cohort_ids,
         allowed_student_ids=access.constrained_student_ids,
+        include_assessments=evidence_access["assessments"] is not None,
+        include_attendance=evidence_access["attendance"] is not None,
+        include_coding=evidence_access["coding"] is not None,
     )
     db.commit()
     return payload

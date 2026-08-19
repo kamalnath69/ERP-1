@@ -2,13 +2,12 @@
 import hashlib
 import logging
 import re
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 
 from sqlalchemy import false, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.ai.provider import provider
-from app.ai.v3_cache import QUERY_EMBEDDING_CACHE
 from app.core.config import settings
 from app.models import CollegeStudentProfile, Document, DocumentChunk, Organization, User
 from app.services.access_policy import resolve_policy_context
@@ -18,6 +17,21 @@ from app.services.rbac import user_has_permissions
 
 
 logger = logging.getLogger("edvatiq.ai.retrieval")
+_QUERY_EMBEDDINGS: OrderedDict[tuple, list[float]] = OrderedDict()
+
+
+def _cached_embedding(key: tuple) -> list[float] | None:
+    value = _QUERY_EMBEDDINGS.get(key)
+    if value is not None:
+        _QUERY_EMBEDDINGS.move_to_end(key)
+    return value
+
+
+def _store_embedding(key: tuple, value: list[float]) -> None:
+    _QUERY_EMBEDDINGS[key] = value
+    _QUERY_EMBEDDINGS.move_to_end(key)
+    while len(_QUERY_EMBEDDINGS) > 256:
+        _QUERY_EMBEDDINGS.popitem(last=False)
 
 
 def document_access_conditions(db: Session, user: User):
@@ -113,14 +127,14 @@ def retrieve(db: Session, user: User, query: str, limit: int = 8, document_id: s
         try:
             normalized_query = " ".join(query.casefold().split())
             cache_key = (
-                "retrieval-v3", settings.AI_EMBEDDING_MODEL, str(user.organization_id), str(user.id),
+                "retrieval", settings.AI_EMBEDDING_MODEL, str(user.organization_id), str(user.id),
                 int(user.access_version), hashlib.sha256(normalized_query.encode("utf-8")).hexdigest(),
             )
-            cached_vector = QUERY_EMBEDDING_CACHE.get(cache_key)
+            cached_vector = _cached_embedding(cache_key)
             if cached_vector is None:
                 embedding = client.embed([query])
                 vector = embedding.vectors[0]
-                QUERY_EMBEDDING_CACHE.set(cache_key, vector)
+                _store_embedding(cache_key, vector)
                 embedding_cache_status = "miss"
                 provider_usage = {
                     "embedding_tokens": embedding.input_tokens,

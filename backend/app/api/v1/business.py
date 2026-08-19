@@ -22,7 +22,7 @@ from app.models import (
     Permission, Role, RolePermission, TrainerAssignment, User, UserPreference, UserRole,
 )
 from app.services.audit import log_action
-from app.services.access_policy import policy_summary, policy_v2_enabled, require_policy_domain, resolve_policy_context
+from app.services.access_policy import college_policy_applies, policy_summary, require_policy_domain, resolve_policy_context
 from app.services.business_access import (
     allowed_client_ids, allowed_location_ids, enforce_plan_limit, ensure_client_access, ensure_location,
     filter_clients, filter_locations, organization_for, tenant_get,
@@ -304,7 +304,7 @@ def _college_policy_context(db: Session, user: User):
     organization = db.get(Organization, user.organization_id) if user.organization_id else None
     if not organization or getattr(organization.industry, "value", organization.industry) != "college":
         return None
-    if not policy_v2_enabled(db, user.organization_id):
+    if not college_policy_applies(db, user.organization_id):
         return None
     return resolve_policy_context(db, user)
 
@@ -414,7 +414,7 @@ def organization_context(user=Depends(get_current_user), db: Session = Depends(g
     org = organization_for(db, user)
     permissions = get_user_permissions(db, user)
     college_policy = None
-    if org.industry.value == "college" and policy_v2_enabled(db, org.id):
+    if org.industry.value == "college" and college_policy_applies(db, org.id):
         college_policy = resolve_policy_context(db, user)
         if not college_policy.active:
             allowed: set[str] | None = set()

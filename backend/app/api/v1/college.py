@@ -24,7 +24,7 @@ from app.models import (
     Employee, Location, SaleInvoice, SaleLine, User,
 )
 from app.services.audit import log_action
-from app.services.access_policy import policy_v2_enabled, require_policy_domain, resolve_policy_context
+from app.services.access_policy import college_policy_applies, require_policy_domain, resolve_policy_context
 from app.services.business_access import enforce_plan_limit, ensure_location, organization_for
 from app.services.college import college_workspace, require_college, serialize, tenant_row
 from app.services.college_access import CollegeAccess, resolve_college_access, validate_college_filters
@@ -2690,7 +2690,7 @@ def update_structure_link(
 def admit_student(body: StudentBody, user: User = Depends(require_permissions("college.students.manage")), db: Session = Depends(get_db)):
     require_college(db, user)
     access = resolve_college_access(db, user, "students")
-    if policy_v2_enabled(db, user.organization_id):
+    if college_policy_applies(db, user.organization_id):
         context = resolve_policy_context(db, user)
         if any((body.email, body.phone, body.address)) and not context.has_sensitive("college.students.contact.view"):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Student contact access is required")
@@ -3256,7 +3256,7 @@ def internship_clearance_page(
 @router.post("/fee-plans", status_code=201)
 def create_fee_plan(body: FeePlanBody, user: User = Depends(require_permissions("college.fees.manage")), db: Session = Depends(get_db)):
     require_college(db, user)
-    if policy_v2_enabled(db, user.organization_id):
+    if college_policy_applies(db, user.organization_id):
         context = require_policy_domain(db, user, "clearance", "manage")
         if not context.has_sensitive("college.fees.manage"):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Finance management access is required")
@@ -3284,7 +3284,7 @@ def create_fee_plan(body: FeePlanBody, user: User = Depends(require_permissions(
 @router.post("/student-fees", status_code=201)
 def assign_student_fee(body: StudentFeeBody, user: User = Depends(require_permissions("college.fees.manage")), db: Session = Depends(get_db)):
     organization = require_college(db, user)
-    if policy_v2_enabled(db, user.organization_id):
+    if college_policy_applies(db, user.organization_id):
         context = require_policy_domain(db, user, "clearance", "work")
         if not context.has_sensitive("college.fees.manage"):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Finance management access is required")

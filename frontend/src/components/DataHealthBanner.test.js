@@ -1,4 +1,4 @@
-import { selectDegradedQueries } from "./DataHealthBanner";
+import { isCancelledQuery, selectDegradedQueries } from "./DataHealthBanner";
 
 describe("data health selection", () => {
   test("reports only degraded queries that are currently visible", () => {
@@ -28,5 +28,24 @@ describe("data health selection", () => {
     };
 
     expect(selectDegradedQueries(state)).toHaveLength(1);
+  });
+
+  test("does not report an intentionally canceled query as unavailable", () => {
+    const state = {
+      api: {
+        subscriptions: { canceled: { subscription: {} } },
+        queries: {
+          canceled: {
+            endpointName: "getConversationMessagePage",
+            originalArgs: { conversationId: "chat-1" },
+            status: "rejected",
+            error: { status: "CANCELLED", code: "ERR_CANCELED" },
+          },
+        },
+      },
+    };
+
+    expect(isCancelledQuery(state.api.queries.canceled)).toBe(true);
+    expect(selectDegradedQueries(state)).toEqual([]);
   });
 });

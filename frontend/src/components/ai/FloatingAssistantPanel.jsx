@@ -123,6 +123,7 @@ function AssistantSurface({ onClose }) {
     setDraft,
     pageContext,
     sendMessage,
+    selectClarificationEntity,
     stopGeneration,
     startNewConversation,
     confirmAction,
@@ -325,17 +326,22 @@ function AssistantSurface({ onClose }) {
             })}
             onConfirm={confirmAction}
             onUndo={undoAction}
-            onSelectEntity={(item) => submit(
-              `Tell me about ${item.display_name || "this record"}`,
-              item.selection_ref,
+            onSelectEntity={selectClarificationEntity}
+            onSuggestion={(suggestion) => submit(
+              suggestion.prompt,
+              suggestion.entity_refs?.length
+                ? { selected_entities: suggestion.entity_refs }
+                : undefined,
             )}
           />
         ))}
         {streamError && !streaming && (
           <div className="flex items-start gap-2 rounded-xl border border-destructive/20 bg-destructive/5 p-3 text-xs text-destructive">
             <WarningCircle className="mt-0.5 shrink-0" />
-            <span className="flex-1">{streamError}</span>
-            <button type="button" className="font-semibold underline underline-offset-2" onClick={() => submit()}>Retry</button>
+            <span className="flex-1">{typeof streamError === "string" ? streamError : streamError.message}</span>
+            {(typeof streamError === "string" || streamError.retryable !== false) && (
+              <button type="button" className="font-semibold underline underline-offset-2" onClick={() => submit(streamError.question || draft)}>Retry</button>
+            )}
           </div>
         )}
       </div>

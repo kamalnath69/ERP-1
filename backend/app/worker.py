@@ -16,11 +16,12 @@ from app.services.communications import queue_whatsapp_template
 from app.services.whatsapp import send_whatsapp_message
 from app.services.realtime import publish_change
 from app.models import (
-    AIResultSession, AIUsage, AIWallet, Appointment, ApprovalRequest, ChatConversation, Client, Document, DocumentChunk, Job, Location,
+    AIExecutionTrace, AIResultSession, AIUsage, AIWallet, Appointment, ApprovalRequest,
+    ChatConversation, ChatMessage, Client, Document, DocumentChunk, Job, Location,
     CollegeCodingAccount, CollegeDataConnector,
     Membership, MembershipPlan, Organization,
     OrganizationDeletionRequest, OrganizationEntitlementOverride, OutboundMessage,
-    PaymentEvent, RetentionArchive, Subscription, SubscriptionSchedule, SupportSession,
+    PaymentEvent, RetentionArchive, Subscription, SubscriptionSchedule, SupportSession, User,
 )
 
 _last_maintenance = None
@@ -38,6 +39,7 @@ JOB_CHANGE_PATHS = {
     "college_readiness_recompute": "/college/placement-dashboard",
     "data_exchange_validate": "/data-exchange/runs",
     "data_exchange_export": "/data-exchange/runs",
+    "ai_semantic_analysis": "/ai",
 }
 
 
@@ -50,6 +52,7 @@ def run_once() -> bool:
             _maintenance(db, now); db.commit(); _last_maintenance = now
         job = db.execute(select(Job).where(Job.status == "queued", Job.run_at <= now).order_by(Job.run_at).with_for_update(skip_locked=True).limit(1)).scalar_one_or_none()
         if not job: return False
+        job_id = job.id
         job.status = "running"; job.locked_at = now; job.attempts += 1; db.commit()
         try:
             if job.kind == "send_message": _send_message(db, job.payload["message_id"])
@@ -75,11 +78,18 @@ def run_once() -> bool:
             elif job.kind == "data_exchange_export":
                 from app.services.data_exchange import process_export_job
                 process_export_job(db, job.payload["run_id"])
+            elif job.kind == "ai_semantic_analysis":
+                _process_semantic_analysis(db, job.payload, job.organization_id)
             else: raise ValueError(f"Unknown job kind {job.kind}")
             job.status = "completed"; job.last_error = None
         except Exception as exc:
+            db.rollback()
+            job = db.get(Job, job_id)
             job.last_error = str(exc)[:2000]
-            if job.attempts >= job.max_attempts: job.status = "failed"
+            if job.attempts >= job.max_attempts:
+                job.status = "failed"
+                if job.kind == "ai_semantic_analysis":
+                    _fail_semantic_analysis(db, job.payload)
             else: job.status = "queued"; job.run_at = now + timedelta(minutes=min(2 ** job.attempts, 60))
         organization_id = job.organization_id
         changed_path = JOB_CHANGE_PATHS.get(job.kind)
@@ -91,6 +101,82 @@ def run_once() -> bool:
                 logger.warning("realtime_publish_failed job=%s error_type=%s", job.kind, type(exc).__name__)
         return True
     finally: db.close()
+
+
+def _process_semantic_analysis(db, payload: dict, organization_id: str) -> None:
+    from app.ai.access import AccessViolation, resolve_access_envelope
+    from app.ai.catalog import catalog_for
+    from app.ai.contracts import AssistantOutcome, AssistantResponse, SemanticQuery
+    from app.ai.execution import execute_semantic_query
+
+    message = db.execute(select(ChatMessage).where(
+        ChatMessage.turn_id == payload["turn_id"],
+        ChatMessage.role == "assistant",
+        ChatMessage.organization_id == organization_id,
+    )).scalar_one_or_none()
+    user = db.get(User, payload["user_id"])
+    if not message or not user or not user.is_active or user.organization_id != organization_id:
+        if message:
+            message.content = "This background analysis is no longer available under the current access."
+            message.outcome = AssistantOutcome.ACCESS_LIMITED.value
+            message.artifacts, message.evidence, message.suggestions = [], [], []
+        return
+    try:
+        envelope = resolve_access_envelope(db, user)
+        if "ai.use" not in envelope.permissions:
+            raise AccessViolation(AssistantOutcome.ACCESS_LIMITED, "Edvatiq AI is no longer included in your access.")
+        if not envelope.module_enabled("ai"):
+            raise AccessViolation(
+                AssistantOutcome.ENTITLEMENT_REQUIRED,
+                "Edvatiq AI is no longer enabled for this organization.",
+            )
+        query = SemanticQuery.model_validate(payload["semantic_query"])
+        response = execute_semantic_query(
+            db, user, query, catalog_for(envelope.industry), envelope,
+            background=True,
+        )
+    except AccessViolation as exc:
+        envelope = None
+        response = AssistantResponse(outcome=exc.outcome, answer=exc.message)
+    if response.outcome == AssistantOutcome.PROCESSING:
+        response = AssistantResponse(
+            outcome=AssistantOutcome.UNAVAILABLE,
+            answer="This analysis exceeds the configured background safety limit. Narrow the population or time range.",
+            scope=envelope.public_scope() if envelope else None,
+        )
+    data = response.model_dump(mode="json")
+    message.content = response.answer
+    message.outcome = response.outcome.value
+    message.artifacts = data["artifacts"]
+    message.suggestions = data["suggestions"]
+    message.evidence = data["observations"]
+    message.scope = data.get("scope") or {}
+    message.semantic_query = payload["semantic_query"]
+    message.meta = {
+        **(message.meta or {}),
+        "access_version": user.access_version,
+        "policy_version": envelope.policy_version if envelope else 0,
+        "background_completed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    trace = db.execute(select(AIExecutionTrace).where(
+        AIExecutionTrace.turn_id == payload["turn_id"],
+    )).scalar_one_or_none()
+    if trace:
+        trace.outcome = response.outcome.value
+
+
+def _fail_semantic_analysis(db, payload: dict) -> None:
+    message = db.execute(select(ChatMessage).where(
+        ChatMessage.turn_id == payload.get("turn_id"),
+        ChatMessage.role == "assistant",
+    )).scalar_one_or_none()
+    if not message:
+        return
+    message.content = "The background analysis could not be completed safely. Narrow the request and try again."
+    message.outcome = "unavailable"
+    message.artifacts = []
+    message.suggestions = []
+    message.evidence = []
 
 
 def _maintenance(db, now):
@@ -467,7 +553,7 @@ def _refresh_client_signals(db, organization_id):
         select(User).join(UserRole, UserRole.user_id == User.id).join(Role, Role.id == UserRole.role_id)
         .where(
             User.organization_id == organization_id,
-            Role.slug == "owner",
+            Role.system_key == "owner",
             Role.is_system.is_(True),
             User.is_active.is_(True),
         )

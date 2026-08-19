@@ -935,7 +935,6 @@ def me(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     from app.services.access_policy import (
         COLLEGE_POLICY_RELEVANT_PERMISSIONS,
         policy_summary,
-        policy_v2_enabled,
         resolve_policy_context,
     )
     perms = set(get_user_permissions(db, user)); roles = [{"id": role.id, "name": role.name, "slug": role.slug} for role in get_user_roles(db, user)]
@@ -944,7 +943,6 @@ def me(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if (
         org
         and getattr(org.industry, "value", org.industry) == "college"
-        and policy_v2_enabled(db, org.id)
         and access_context
         and not access_context.active
     ):

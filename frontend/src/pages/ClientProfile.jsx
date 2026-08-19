@@ -76,12 +76,14 @@ export default function ClientProfile() {
 
   const workspaceQuery = useGetClientWorkspaceQuery({ clientId, range: "30d" }, QUERY_POLICIES.operational);
   const { data: workspace } = workspaceQuery;
+  const collegeStudentProfileId = workspace?.industry === "college"
+    ? workspace.industry_data?.profile?.id
+    : null;
   useRegisterAIPageContext(workspace?.client ? {
-    kind: "client",
-    id: workspace.client.id || clientId,
+    kind: collegeStudentProfileId ? "student" : "client",
+    id: collegeStudentProfileId || workspace.client.id || clientId,
     label: `${workspace.industry === "college" ? "Student" : "Client"}: ${`${workspace.client.first_name || ""} ${workspace.client.last_name || ""}`.trim()}`,
   } : null);
-  const collegeStudentProfileId = workspace?.industry === "college" ? workspace.industry_data?.profile?.id : null;
   const collegePlacementQuery = useGetCollegeStudentPlacementProfileQuery(
     collegeStudentProfileId,
     withSkip(QUERY_POLICIES.operational, !collegeStudentProfileId),

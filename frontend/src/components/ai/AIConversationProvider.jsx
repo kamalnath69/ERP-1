@@ -12,7 +12,7 @@ import { useLocation } from "react-router-dom";
 import { toast } from "sonner";
 
 import api from "@/lib/api";
-import { streamAI } from "@/lib/aiStream";
+import { AIStreamError, streamAI } from "@/lib/aiStream";
 import { useAuth } from "@/contexts/AuthContext";
 import { useBusiness } from "@/contexts/BusinessContext";
 import { aiCacheApi } from "@/store/api/aiCacheApi";
@@ -71,6 +71,40 @@ export function contextIdentity(context) {
   ]);
 }
 
+function requestPageContext(context, route, locationId) {
+  const base = {
+    route,
+    location_id: locationId || null,
+  };
+  if (!context) return locationId ? base : null;
+  if (context.route || context.entity || context.selected_entities) {
+    return { ...base, ...context };
+  }
+  if (context.kind === "college_scope") {
+    const selected = (context.cohort_ids || (context.cohort_id ? [context.cohort_id] : []))
+      .map((id) => ({ kind: "cohort", id, label: context.display_name || context.label || null }));
+    if (!selected.length && context.department_id) {
+      selected.push({ kind: "department", id: context.department_id, label: context.display_name || context.label || null });
+    }
+    return {
+      ...base,
+      selected_entities: selected,
+      department_id: context.department_id || null,
+      program_id: context.program_id || null,
+      cohort_ids: context.cohort_ids || (context.cohort_id ? [context.cohort_id] : []),
+      graduation_year: context.graduation_year || null,
+    };
+  }
+  return {
+    ...base,
+    entity: {
+      kind: context.kind,
+      id: context.id,
+      label: context.display_name || context.label || null,
+    },
+  };
+}
+
 export function AIConversationProvider({ children }) {
   const dispatch = useDispatch();
   const location = useLocation();
@@ -118,8 +152,9 @@ export function AIConversationProvider({ children }) {
     : null;
 
   const sendMessage = useCallback(async (text, options = {}) => {
-    const question = String(text ?? draft).trim();
-    if (!question || streaming || requestController.current) return false;
+    const interaction = options.interaction || null;
+    const question = interaction ? "" : String(text ?? draft).trim();
+    if ((!question && !interaction) || streaming || requestController.current) return false;
     if (question.length > 5000) {
       toast.error("Keep your message within 5,000 characters");
       return false;
@@ -130,9 +165,12 @@ export function AIConversationProvider({ children }) {
     }
 
     const requestId = crypto.randomUUID();
+    const displayText = interaction
+      ? options.displayText || interaction.entity?.label || "Selected record"
+      : question;
     const userMessageId = `user-${requestId}`;
     const assistantId = `stream-${requestId}`;
-    dispatch(appendUserMessage({ id: userMessageId, role: "user", content: question }));
+    dispatch(appendUserMessage({ id: userMessageId, role: "user", content: displayText }));
     dispatch(startStreaming({ assistantId, userId: userMessageId }));
     setDraft("");
 
@@ -143,16 +181,15 @@ export function AIConversationProvider({ children }) {
       await streamAI(
         {
           conversation_id: active,
-          message: question,
-          location_id: locationId,
+          ...(interaction ? { interaction } : { message: question }),
           idempotency_key: requestId,
-          context: options.context || null,
+          context: requestPageContext(options.context, routeKey, locationId),
         },
         (event, data) => {
           if (event === "accepted") dispatch(setStreamStatus("Request received"));
           else if (event === "status") dispatch(setStreamStatus(data.message));
-          else if (event === "text_delta") dispatch(appendTextDelta(data.text));
-          else if (event === "block") dispatch(appendStreamBlock(data));
+          else if (event === "answer_delta") dispatch(appendTextDelta(data.text));
+          else if (event === "artifact") dispatch(appendStreamBlock(data));
           else if (event === "action") dispatch(appendStreamAction(data));
           else if (event === "complete") {
             dispatch(completeStreaming(data));
@@ -168,7 +205,7 @@ export function AIConversationProvider({ children }) {
             }
             dispatch(aiCacheApi.util.invalidateTags([{ type: "Resource", id: "ai" }]));
           } else if (event === "error") {
-            throw new Error(data.message);
+            throw new AIStreamError(data);
           }
         },
         controller.signal,
@@ -183,8 +220,14 @@ export function AIConversationProvider({ children }) {
           toast.info("Response stopped. Your question is ready to retry.");
         }
       } else {
-        dispatch(failStreaming(error.message || "Edvatiq could not respond"));
-        setDraft(question);
+        dispatch(failStreaming({
+          message: error.message || "Edvatiq could not respond",
+          code: error.code || "ai_execution_failed",
+          stage: error.stage || "execution",
+          retryable: error.retryable !== false,
+          question: question || displayText,
+        }));
+        if (!interaction) setDraft(question);
         toast.error(error.message || "Edvatiq could not respond");
       }
       return false;
@@ -192,7 +235,16 @@ export function AIConversationProvider({ children }) {
       if (requestController.current === controller) requestController.current = null;
       abortMode.current = null;
     }
-  }, [active, dispatch, draft, locationId, streaming]);
+  }, [active, dispatch, draft, locationId, routeKey, streaming]);
+
+  const selectClarificationEntity = useCallback((clarificationId, entity) => sendMessage(null, {
+    interaction: {
+      type: "select_entity",
+      clarification_id: clarificationId,
+      entity,
+    },
+    displayText: entity?.label || "Selected record",
+  }), [sendMessage]);
 
   const stopGeneration = useCallback(() => {
     if (!requestController.current) return;
@@ -257,7 +309,9 @@ export function AIConversationProvider({ children }) {
     pageContext,
     registerPageContext,
     sendMessage,
+    selectClarificationEntity,
     stopGeneration,
+    discardActiveStream,
     selectConversation,
     startNewConversation,
     confirmAction,
@@ -265,12 +319,14 @@ export function AIConversationProvider({ children }) {
     lastCompletedMessageId,
   }), [
     confirmAction,
+    discardActiveStream,
     draft,
     lastCompletedMessageId,
     pageContext,
     registerPageContext,
     selectConversation,
     sendMessage,
+    selectClarificationEntity,
     startNewConversation,
     stopGeneration,
     undoAction,

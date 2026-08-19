@@ -77,7 +77,7 @@ const aiSlice = createSlice({
       state.draftAssistantId = payload.assistantId;
       state.pendingUserMessageId = payload.userId;
       state.streamConversationKey = conversationKey(state);
-      currentMessages(state).push({ id: payload.assistantId, role: "assistant", content: "", blocks: [], actions: [], citations: [] });
+      currentMessages(state).push({ id: payload.assistantId, role: "assistant", content: "", artifacts: [], suggestions: [], evidence: [] });
     },
     setStreamStatus: (state, action) => { state.streamStatus = action.payload; },
     appendTextDelta: (state, action) => {
@@ -86,7 +86,7 @@ const aiSlice = createSlice({
     },
     appendStreamBlock: (state, action) => {
       const message = streamingMessages(state).find((item) => item.id === state.draftAssistantId);
-      if (message && !message.blocks.some((item) => item.id === action.payload.id)) message.blocks.push(action.payload);
+      if (message && !message.artifacts.some((item) => item.id === action.payload.id)) message.artifacts.push(action.payload);
     },
     appendStreamAction: (state, action) => {
       const message = streamingMessages(state).find((item) => item.id === state.draftAssistantId);
@@ -132,7 +132,7 @@ const aiSlice = createSlice({
       for (const messages of Object.values(state.messagesByConversation)) {
         for (const message of messages) {
           message.actions = (message.actions || []).map((item) => item.action_id === action.payload.action_id ? { ...item, ...action.payload } : item);
-          message.blocks = (message.blocks || []).map((block) => block.type === "action" && block.data?.action_id === action.payload.action_id
+          message.artifacts = (message.artifacts || []).map((block) => block.type === "action" && block.data?.action_id === action.payload.action_id
             ? { ...block, data: { ...block.data, ...action.payload } } : block);
         }
       }
