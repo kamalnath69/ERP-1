@@ -7,6 +7,7 @@ from pathlib import Path
 
 import resend
 from resend.exceptions import ResendError
+from resend.http_client_requests import RequestsClient
 
 from app.core.config import settings
 from app.services.email_templates import render_auth_email
@@ -33,17 +34,32 @@ def _masked_email(value: str) -> str:
     return f"{visible}{'*' * max(2, len(local) - len(visible))}@{domain}"
 
 
-def send_email(recipient: str, subject: str, text: str, html: str, purpose: str = "transactional") -> str | None:
+def send_email(
+    recipient: str,
+    subject: str,
+    text: str,
+    html: str,
+    purpose: str = "transactional",
+    *,
+    idempotency_key: str | None = None,
+) -> str | None:
     provider = settings.EMAIL_PROVIDER
     if provider == "resend":
-        return _send_with_resend(recipient, subject, text, html, purpose)
+        return _send_with_resend(recipient, subject, text, html, purpose, idempotency_key)
     if provider == "smtp":
         return _send_with_smtp(recipient, subject, text, html, purpose)
     _email_logger().error("mail_provider_invalid provider=%s purpose=%s", provider, purpose)
     return None
 
 
-def _send_with_resend(recipient: str, subject: str, text: str, html: str, purpose: str) -> str | None:
+def _send_with_resend(
+    recipient: str,
+    subject: str,
+    text: str,
+    html: str,
+    purpose: str,
+    idempotency_key: str | None,
+) -> str | None:
     logger = _email_logger()
     masked_recipient = _masked_email(recipient)
     missing = [name for name, value in {
@@ -58,13 +74,16 @@ def _send_with_resend(recipient: str, subject: str, text: str, html: str, purpos
     logger.info("resend_send_started purpose=%s recipient=%s sender=%s sender_mode=%s", purpose, masked_recipient, _masked_email(settings.RESEND_FROM_EMAIL), sender_mode)
     try:
         resend.api_key = settings.RESEND_API_KEY
-        response = resend.Emails.send({
+        resend.default_http_client = RequestsClient(timeout=settings.EMAIL_SEND_TIMEOUT_SECONDS)
+        payload = {
             "from": settings.RESEND_FROM_EMAIL,
             "to": [recipient],
             "subject": subject,
             "text": text,
             "html": html,
-        })
+        }
+        options = {"idempotency_key": idempotency_key} if idempotency_key else None
+        response = resend.Emails.send(payload, options) if options else resend.Emails.send(payload)
         message_id = response.get("id") if isinstance(response, dict) else getattr(response, "id", None)
         if not message_id:
             logger.error("resend_response_invalid purpose=%s recipient=%s", purpose, masked_recipient)
@@ -147,10 +166,24 @@ def _send_with_smtp(recipient: str, subject: str, text: str, html: str, purpose:
     return "smtp-accepted"
 
 
-def send_auth_code_email(recipient: str, code: str, purpose: str, first_name: str = "") -> bool:
+def send_auth_code_email(
+    recipient: str,
+    code: str,
+    purpose: str,
+    first_name: str = "",
+    *,
+    idempotency_key: str | None = None,
+) -> bool:
     expires_minutes = settings.PASSWORD_RESET_TTL_MINUTES if purpose == "password_reset" else settings.AUTH_CODE_TTL_MINUTES
     subject, text, html = render_auth_email(
         code=code, purpose=purpose, first_name=first_name,
         app_url=settings.APP_URL, expires_minutes=expires_minutes,
     )
-    return bool(send_email(recipient, subject, text, html, purpose))
+    return bool(send_email(
+        recipient,
+        subject,
+        text,
+        html,
+        purpose,
+        idempotency_key=idempotency_key,
+    ))

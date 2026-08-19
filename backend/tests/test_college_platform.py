@@ -83,7 +83,30 @@ def college_account():
             .join(Role, Role.id == RolePermission.role_id)
             .where(Role.organization_id == created_id, Role.system_key == "owner")
         ).scalars())
-        assert "college.academics.manage" in owner_permissions
+        assert {
+            "ai.use", "ai.actions", "college.academics.manage",
+            "college.protected_fields.view",
+        }.issubset(owner_permissions)
+        owner = db.execute(select(User).where(
+            User.organization_id == created_id,
+        )).scalar_one()
+        owner_policy = db.execute(select(AccessPolicy).where(
+            AccessPolicy.organization_id == created_id,
+            AccessPolicy.user_id == owner.id,
+        )).scalar_one()
+        assert owner_policy.status == "active"
+        assert owner_policy.domain_levels == {
+            domain: "manage" for domain in COLLEGE_DOMAIN_LEVELS
+        }
+        assert db.execute(select(AccessPolicyScope).where(
+            AccessPolicyScope.policy_id == owner_policy.id,
+            AccessPolicyScope.domain_key == "*",
+            AccessPolicyScope.scope_type == "organization",
+            AccessPolicyScope.scope_value == "*",
+        )).scalar_one_or_none() is not None
+        envelope = resolve_access_envelope(db, owner)
+        assert envelope.owner is True
+        assert envelope.student_scope(COLLEGE_DOMAIN_LEVELS) is None
 
     yield headers, context.json(), created_id
 

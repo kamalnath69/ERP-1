@@ -50,8 +50,10 @@ const Button = React.forwardRef(({
   }, [])
 
   const isLoading = loading || actionPending
+  // A root server error must not trap an otherwise valid form in a disabled state.
+  const hasServerError = Boolean(form?.formState.errors?.root?.server)
   const invalidSubmit = props.type === "submit" && form
-    ? !form.formState.isValid || form.formState.isValidating
+    ? form.formState.isValidating || (!form.formState.isValid && !hasServerError)
     : false
   const isDisabled = disabled || invalidSubmit
   const handleClick = (event) => {

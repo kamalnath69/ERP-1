@@ -3,6 +3,18 @@ import api from "@/lib/api";
 import { baseApi } from "@/store/api/baseApi";
 import { clearTenantPreferences } from "@/store/slices/preferencesSlice";
 
+function authErrorPayload(error, fallback) {
+  const source = error?.response?.data
+    || (error && typeof error === "object" && (error.detail || error.error) ? error : null)
+    || {};
+  return {
+    ...source,
+    detail: source.detail || fallback,
+    status: error?.response?.status ?? error?.status ?? source.status ?? null,
+    code: error?.code || source.code || null,
+  };
+}
+
 export const fetchMe = createAsyncThunk("auth/fetchMe", async (_, { rejectWithValue }) => {
   try {
     // A missing session during app startup is normal on public pages. The route
@@ -10,7 +22,7 @@ export const fetchMe = createAsyncThunk("auth/fetchMe", async (_, { rejectWithVa
     const { data } = await api.get("/auth/me", { suppressAuthRedirect: true });
     return data;
   } catch (e) {
-    return rejectWithValue(e?.response?.data || { detail: "Not authenticated" });
+    return rejectWithValue(authErrorPayload(e, "Not authenticated"));
   }
 });
 
@@ -19,10 +31,16 @@ export const loginThunk = createAsyncThunk("auth/login", async ({ email, passwor
     const { data } = await api.post("/auth/login", { email, password, org_slug: org_slug || null, mfa_code: mfa_code || null });
     dispatch(baseApi.util.resetApiState());
     dispatch(clearTenantPreferences());
-    await dispatch(fetchMe());
-    return data.user;
+    const session = await dispatch(fetchMe());
+    if (fetchMe.rejected.match(session)) {
+      return rejectWithValue({
+        ...session.payload,
+        display_detail: "You are signed in, but your workspace could not be loaded. Please try again.",
+      });
+    }
+    return session.payload?.user || data.user;
   } catch (e) {
-    return rejectWithValue({ ...(e?.response?.data || { detail: "Login failed" }), status: e?.response?.status });
+    return rejectWithValue(authErrorPayload(e, "Login failed"));
   }
 });
 
@@ -31,7 +49,7 @@ export const registerOrgThunk = createAsyncThunk("auth/registerOrg", async (payl
     const { data } = await api.post("/auth/register", payload);
     return data;
   } catch (e) {
-    return rejectWithValue(e?.response?.data || { detail: "Registration failed" });
+    return rejectWithValue(authErrorPayload(e, "Registration failed"));
   }
 });
 

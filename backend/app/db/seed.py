@@ -357,6 +357,8 @@ def seed_organization_defaults(
     *,
     create_trial: bool = True,
 ) -> None:
+    from app.services.access_policy import COLLEGE_DOMAIN_LEVELS
+
     permissions = ensure_permissions(db)
     by_code = {p.code: p for p in permissions}
     manager_codes = set(by_code) - MANAGER_DENY
@@ -381,10 +383,15 @@ def seed_organization_defaults(
         for code in codes:
             db.add(RolePermission(role_id=role.id, permission_id=by_code[code].id))
     db.add(UserRole(user_id=owner.id, role_id=roles["owner"].id))
+    owner_domain_levels = (
+        {domain: "manage" for domain in COLLEGE_DOMAIN_LEVELS}
+        if org.industry.value == "college" else {}
+    )
     owner_policy = AccessPolicy(
         organization_id=org.id, user_id=owner.id, status="active",
+        domain_levels=owner_domain_levels,
         created_by_user_id=owner.id, reviewed_by_user_id=owner.id,
-        reviewed_at=datetime.now(timezone.utc),
+        reviewed_at=datetime.now(timezone.utc), review_note="Owner invariant provisioned",
     )
     db.add(owner_policy); db.flush()
     db.add(AccessPolicyScope(

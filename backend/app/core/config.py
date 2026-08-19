@@ -119,6 +119,7 @@ class Settings:
     SMTP_FROM_NAME: str = os.environ.get("SMTP_FROM_NAME", "Edvatiq")
     SMTP_USE_TLS: bool = os.environ.get("SMTP_USE_TLS", "true").lower() == "true"
     EMAIL_PROVIDER: str = os.environ.get("EMAIL_PROVIDER", "resend").strip().lower()
+    EMAIL_SEND_TIMEOUT_SECONDS: int = max(1, min(10, int(os.environ.get("EMAIL_SEND_TIMEOUT_SECONDS", 8))))
     RESEND_API_KEY: str = os.environ.get("RESEND_API_KEY", "").strip()
     RESEND_FROM_EMAIL: str = os.environ.get("RESEND_FROM_EMAIL", "Edvatiq <onboarding@resend.dev>").strip()
     APP_URL: str = os.environ.get("APP_URL", "http://localhost:3000")

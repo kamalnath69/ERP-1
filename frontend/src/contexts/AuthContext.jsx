@@ -11,6 +11,14 @@ import { baseApi } from "@/store/api/baseApi";
 
 const AuthCtx = createContext(null);
 
+function rejectedActionError(result, fallback) {
+  const payload = result.payload || {};
+  const error = new Error(payload.detail || fallback);
+  error.code = payload.code || null;
+  error.response = { data: payload, status: payload.status ?? null };
+  return error;
+}
+
 export function AuthProvider({ children }) {
   const dispatch = useDispatch();
   const { user, organization, permissions, roles, accessContext, loading } = useSelector(selectAuth);
@@ -36,9 +44,7 @@ export function AuthProvider({ children }) {
   const login = async (email, password, orgSlug, mfaCode) => {
     const result = await dispatch(loginThunk({ email, password, org_slug: orgSlug, mfa_code: mfaCode }));
     if (loginThunk.rejected.match(result)) {
-      const err = new Error(result.payload?.detail || "Login failed");
-      err.response = { data: result.payload, status: result.payload?.status };
-      throw err;
+      throw rejectedActionError(result, "Login failed");
     }
     return result.payload;
   };
@@ -46,9 +52,7 @@ export function AuthProvider({ children }) {
   const registerOrg = async (payload) => {
     const result = await dispatch(registerOrgThunk(payload));
     if (registerOrgThunk.rejected.match(result)) {
-      const err = new Error(result.payload?.detail || "Registration failed");
-      err.response = { data: result.payload };
-      throw err;
+      throw rejectedActionError(result, "Registration failed");
     }
     return result.payload;
   };

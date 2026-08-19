@@ -127,6 +127,67 @@ def test_signup_email_challenge_hashes_secrets_and_verifies_once(monkeypatch):
         client.cookies.clear()
 
 
+def test_failed_signup_email_delivery_can_be_retried_without_consuming_send_quota(monkeypatch):
+    monkeypatch.setattr(settings, "AUTH_EXPOSE_TEST_CODES", False)
+    monkeypatch.setattr(settings, "SIGNUP_EMAIL_MAX_SENDS_15_MINUTES", 1)
+    request_ip = f"delivery-test-{uuid4().hex[:12]}"
+    monkeypatch.setattr(
+        "app.services.signup_email.client_ip",
+        lambda _request: request_ip,
+    )
+    outcomes = iter([False, True])
+    monkeypatch.setattr(
+        "app.api.v1.auth.send_auth_code_email",
+        lambda *_args, **_kwargs: next(outcomes),
+    )
+    email = f"signup-delivery-{uuid4().hex[:10]}@example.com"
+    try:
+        failed = client.post("/api/auth/registration/email/challenges", json={"email": email})
+        assert failed.status_code == 503, failed.text
+
+        retried = client.post("/api/auth/registration/email/challenges", json={"email": email})
+        assert retried.status_code == 201, retried.text
+        with SessionLocal() as db:
+            statuses = list(db.execute(select(SignupEmailChallenge.status).where(
+                SignupEmailChallenge.email == email,
+            )).scalars())
+            assert statuses.count("delivery_failed") == 1
+            assert statuses.count("pending") == 1
+    finally:
+        delete_signup_challenges(email)
+        client.cookies.clear()
+
+
+def test_failed_resend_preserves_the_previous_valid_signup_code(monkeypatch):
+    monkeypatch.setattr(settings, "SIGNUP_EMAIL_RESEND_SECONDS", 0)
+    outcomes = iter([True, False])
+    monkeypatch.setattr(
+        "app.api.v1.auth.send_auth_code_email",
+        lambda *_args, **_kwargs: next(outcomes),
+    )
+    email = f"signup-preserve-{uuid4().hex[:10]}@example.com"
+    try:
+        first = client.post("/api/auth/registration/email/challenges", json={"email": email})
+        assert first.status_code == 201, first.text
+        first_challenge = first.json()
+
+        monkeypatch.setattr(settings, "AUTH_EXPOSE_TEST_CODES", False)
+        failed_resend = client.post("/api/auth/registration/email/challenges", json={"email": email})
+        assert failed_resend.status_code == 503, failed_resend.text
+
+        verified = client.post(
+            f"/api/auth/registration/email/challenges/{first_challenge['challenge_id']}/verify",
+            json={
+                "challenge_token": first_challenge["challenge_token"],
+                "code": first_challenge["test_code"],
+            },
+        )
+        assert verified.status_code == 200, verified.text
+    finally:
+        delete_signup_challenges(email)
+        client.cookies.clear()
+
+
 def test_disabled_trial_blocks_free_account_creation(monkeypatch):
     monkeypatch.setattr(settings, "AUTH_EXPOSE_TEST_CODES", True)
     monkeypatch.setattr("app.api.v1.auth.trial_signup_available", lambda _db: False)

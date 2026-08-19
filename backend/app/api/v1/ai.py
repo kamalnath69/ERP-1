@@ -23,7 +23,7 @@ from app.ai.actions import serialize_action, undo_action
 from app.ai.catalog import CatalogError, catalog_for
 from app.ai.contracts import (
     Artifact, AssistantOutcome, AssistantRequest, AssistantResponse,
-    ConversationState, SemanticQuery,
+    ConversationState, QueryGoal, SemanticQuery,
 )
 from app.ai.definitions import semantic_definitions, validate_definitions
 from app.ai.engine import EngineResult, run_assistant_turn
@@ -224,7 +224,12 @@ def _history_query_allowed(envelope, value: dict | None) -> bool:
         if query.entity == "assistant":
             return True
         catalog = catalog_for(envelope.industry)
-        catalog.validate(query)
+        # Clarifications preserve the governed fields, filters, and sort that
+        # prompted the question even though they are not executable data goals.
+        catalog.validate(
+            query,
+            allow_clarification=query.goal == QueryGoal.CLARIFY,
+        )
         envelope.require_query(catalog, query)
         _, unavailable = envelope.projectable_fields(catalog, query)
         if unavailable:
@@ -277,10 +282,14 @@ def _authorized_message_dict(
             int(meta.get("access_version", user.access_version)) != int(user.access_version)
             or int(meta.get("policy_version", envelope.policy_version)) != int(envelope.policy_version)
         )
+        # An active Owner's RBAC reach cannot be reduced by policy rows or deny
+        # overrides. Re-evaluate labels and entitlements instead of hiding a
+        # still-authorized answer solely because a repair bumped its version.
+        scope_requires_refresh = scope_changed and not envelope.owner
         answer_allowed = (
             module_available
             and _history_query_allowed(envelope, message.semantic_query)
-            and not (scope_changed and entity and entity != "assistant")
+            and not (scope_requires_refresh and entity and entity != "assistant")
         )
 
         def allowed(item: dict) -> bool:
@@ -289,7 +298,7 @@ def _authorized_message_dict(
                 return False
             # Population totals and aggregates cannot be safely reinterpreted
             # after a scope change; force a fresh authorized execution.
-            if scope_changed and item_security.get("scope"):
+            if scope_requires_refresh and item_security.get("scope"):
                 return False
             return _security_allowed(envelope, item_security, entity)
 

@@ -4,6 +4,7 @@ const BACKEND_URL =
   import.meta.env.VITE_BACKEND_URL || import.meta.env.REACT_APP_BACKEND_URL || "";
 export const API_BASE = `${BACKEND_URL}/api`;
 const http = axios.create({ baseURL: API_BASE, withCredentials: true });
+export const AUTH_REQUEST_TIMEOUT_MS = 15_000;
 
 // HttpOnly cookies are the only browser session store.
 localStorage.removeItem("edvatiq.access_token");
@@ -16,6 +17,9 @@ function cookie(name) {
 }
 
 http.interceptors.request.use((config) => {
+  if (/\/auth(?:\/|$)/.test(String(config.url || "")) && !(Number(config.timeout) > 0)) {
+    config.timeout = AUTH_REQUEST_TIMEOUT_MS;
+  }
   if (["post", "put", "patch", "delete"].includes(config.method?.toLowerCase())) {
     const csrf = cookie("edvatiq_csrf");
     if (csrf) config.headers["X-CSRF-Token"] = csrf;
@@ -51,6 +55,7 @@ http.interceptors.response.use((response) => response, async (error) => {
       refreshing = refreshing || axios.post(`${API_BASE}/auth/refresh`, {}, {
         withCredentials: true,
         headers: { "X-CSRF-Token": cookie("edvatiq_csrf") },
+        timeout: AUTH_REQUEST_TIMEOUT_MS,
       }).finally(() => { refreshing = null; });
       await refreshing;
       if (accessChanged) window.dispatchEvent(new CustomEvent("edvatiq:access-changed"));

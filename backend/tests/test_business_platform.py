@@ -12,7 +12,7 @@ from app.core.database import SessionLocal
 from app.core.config import settings
 from app.models import (
     AIUsage, AIWallet, AuditLog, ChatConversation, ChatMessage, ChatTurn, Client,
-    Organization, Permission, PlanDefinition, PlanVersion, Role, RolePermission,
+    LegalDocument, Organization, Permission, PlanDefinition, PlanVersion, Role, RolePermission,
     Subscription, User, UserPermissionOverride, UserRole, WalletReservation,
 )
 from app.services.rbac import get_user_permissions
@@ -122,11 +122,133 @@ class TestSecureAuthentication:
         assert weak_password.status_code == 422
         assert "admin_password" in weak_password.json()["error"]["field_errors"]
 
+    def test_owner_email_is_single_workspace_but_staff_email_can_be_reused(self, organizations):
+        owner_headers, context = register(organizations, "gym")
+        organization_id = context["organization"]["id"]
+        location_id = context["locations"][0]["id"]
+        roles = client.get("/api/roles", headers=owner_headers).json()
+        manager_role = next(role for role in roles if role["slug"] == "manager")
+        staff_email = f"shared-staff-{uuid4().hex[:8]}@example.com"
+        staff = post("/api/users", owner_headers, {
+            "email": staff_email,
+            "first_name": "Shared",
+            "last_name": "Staff",
+            "password": "Testing@123",
+            "role_ids": [manager_role["id"]],
+            "location_ids": [location_id],
+        })
+        with SessionLocal() as db:
+            db.get(User, staff["id"]).email_verified = True
+            owner_email = db.execute(
+                select(User.email)
+                .join(UserRole, UserRole.user_id == User.id)
+                .join(Role, Role.id == UserRole.role_id)
+                .where(
+                    User.organization_id == organization_id,
+                    Role.is_system.is_(True),
+                    Role.system_key == "owner",
+                )
+            ).scalar_one()
+            db.commit()
+
+        challenge_ids = []
+        try:
+            owner_requested = client.post(
+                "/api/auth/registration/email/challenges",
+                json={"email": owner_email},
+            )
+            assert owner_requested.status_code == 201, owner_requested.text
+            owner_challenge = owner_requested.json()
+            challenge_ids.append(owner_challenge["challenge_id"])
+            blocked = client.post(
+                f"/api/auth/registration/email/challenges/{owner_challenge['challenge_id']}/verify",
+                json={
+                    "challenge_token": owner_challenge["challenge_token"],
+                    "code": owner_challenge["test_code"],
+                },
+            )
+            assert blocked.status_code == 409, blocked.text
+            assert "already owns another business" in blocked.json()["detail"]
+
+            staff_requested = client.post(
+                "/api/auth/registration/email/challenges",
+                json={"email": staff_email},
+            )
+            assert staff_requested.status_code == 201, staff_requested.text
+            staff_challenge = staff_requested.json()
+            challenge_ids.append(staff_challenge["challenge_id"])
+            allowed = client.post(
+                f"/api/auth/registration/email/challenges/{staff_challenge['challenge_id']}/verify",
+                json={
+                    "challenge_token": staff_challenge["challenge_token"],
+                    "code": staff_challenge["test_code"],
+                },
+            )
+            assert allowed.status_code == 200, allowed.text
+
+            second_slug = f"shared-owner-{uuid4().hex[:10]}"
+            with SessionLocal() as db:
+                legal = {
+                    row.document_type: row.id
+                    for row in db.execute(select(LegalDocument).where(
+                        LegalDocument.status == "published",
+                    )).scalars()
+                }
+            client.cookies.clear()
+            second_registration = client.post("/api/auth/register", json={
+                "organization_name": "Shared Email Workspace",
+                "organization_slug": second_slug,
+                "industry": "gym",
+                "admin_email": staff_email,
+                "admin_password": "Testing@123",
+                "admin_first_name": "Shared",
+                "admin_last_name": "Owner",
+                "location_name": "Main Location",
+                "city": "Chennai",
+                "legal_acceptance": {
+                    "accepted": True,
+                    "terms_document_id": legal["terms"],
+                    "privacy_document_id": legal["privacy"],
+                    "refund_document_id": legal["refund"],
+                },
+                "email_verification": {
+                    "challenge_id": allowed.json()["challenge_id"],
+                    "proof": allowed.json()["verification_proof"],
+                },
+            })
+            assert second_registration.status_code == 201, second_registration.text
+            with SessionLocal() as db:
+                second_organization_id = db.execute(select(Organization.id).where(
+                    Organization.slug == second_slug,
+                )).scalar_one()
+            organizations.append(second_organization_id)
+
+            ambiguous = client.post("/api/auth/login", json={
+                "email": staff_email,
+                "password": "Testing@123",
+            })
+            assert ambiguous.status_code == 400, ambiguous.text
+            assert "Business ID is required" in ambiguous.json()["detail"]
+            assert client.post("/api/auth/login", json={
+                "email": staff_email,
+                "password": "Testing@123",
+                "org_slug": context["organization"]["slug"],
+            }).status_code == 200
+            assert client.post("/api/auth/login", json={
+                "email": staff_email,
+                "password": "Testing@123",
+                "org_slug": second_slug,
+            }).status_code == 200
+        finally:
+            for challenge_id in challenge_ids:
+                delete_signup_challenge(challenge_id)
+            client.cookies.clear()
+
     def test_verification_cookie_csrf_refresh_and_recovery(self, organizations, monkeypatch):
         delivered = {}
         delivery_counts = {}
 
-        def capture_email(recipient, code, purpose, first_name=""):
+        def capture_email(recipient, code, purpose, first_name="", **_kwargs):
             delivered[purpose] = {"recipient": recipient, "code": code}
             delivery_counts[purpose] = delivery_counts.get(purpose, 0) + 1
             return True

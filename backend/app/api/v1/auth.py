@@ -1,4 +1,5 @@
 """Secure cookie authentication, payment-first registration, recovery, and sessions."""
+import logging
 import secrets
 import re
 from datetime import datetime, timedelta, timezone
@@ -42,7 +43,8 @@ from app.services.signup import (
 )
 from app.services.signup_email import (
     bind_signup_email_challenge, consume_signup_email_challenge,
-    create_signup_email_challenge, require_signup_email_proof,
+    complete_signup_email_delivery, create_signup_email_challenge,
+    ensure_signup_owner_email_available, require_signup_email_proof,
     verify_signup_email_challenge,
 )
 
@@ -50,6 +52,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 DUMMY_PASSWORD_HASH = hash_password("NotARealPassword123")
 PUBLIC_MESSAGE = "If the account exists, a code has been sent"
 INACTIVE_CHECKOUT_STATUSES = {"cancelled", "expired", "failed"}
+email_logger = logging.getLogger("edvatiq.email")
 
 
 class PlatformInviteAccept(RequestModel):
@@ -212,13 +215,25 @@ def request_signup_email_challenge(
     challenge, challenge_token, code = create_signup_email_challenge(db, str(body.email), request)
     db.commit()
     try:
-        sent = send_auth_code_email(challenge.email, code, "email_verification")
+        sent = send_auth_code_email(
+            challenge.email,
+            code,
+            "email_verification",
+            idempotency_key=f"signup-email-{challenge.id}",
+        )
     except Exception:
+        email_logger.exception(
+            "signup_verification_delivery_exception challenge_id=%s",
+            challenge.id,
+        )
         sent = False
+    challenge = complete_signup_email_delivery(
+        db,
+        challenge.id,
+        usable=sent or settings.AUTH_EXPOSE_TEST_CODES,
+    )
+    db.commit()
     if not sent and not settings.AUTH_EXPOSE_TEST_CODES:
-        challenge = db.get(SignupEmailChallenge, challenge.id)
-        challenge.status = "delivery_failed"
-        db.commit()
         raise HTTPException(503, "Verification email could not be sent. Please try again")
     return {
         "challenge_id": challenge.id,
@@ -244,6 +259,7 @@ def confirm_signup_email_challenge(
         body.challenge_token,
         body.code,
     )
+    ensure_signup_owner_email_available(db, challenge.email)
     db.commit()
     return {
         "challenge_id": challenge.id,
@@ -276,6 +292,7 @@ def register_organization(
     )).first():
         raise HTTPException(status.HTTP_409_CONFLICT, "Organization slug is reserved by a pending checkout")
     email_challenge = require_signup_email_proof(db, body.email_verification, str(body.admin_email))
+    ensure_signup_owner_email_available(db, str(body.admin_email))
     try: industry = IndustryEnum(body.industry)
     except ValueError: raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid industry")
     org = Organization(name=body.organization_name, slug=slug, industry=industry, enabled_modules=organization_modules(industry.value), contact_email=body.admin_email.lower())
@@ -489,6 +506,7 @@ def create_registration_checkout(
     )).first():
         raise HTTPException(409, "Organization slug is reserved by a pending checkout")
     email_challenge = require_signup_email_proof(db, body.email_verification, str(body.admin_email))
+    ensure_signup_owner_email_available(db, str(body.admin_email))
     try:
         industry = IndustryEnum(body.industry)
         organization_modules(industry.value)
@@ -789,7 +807,7 @@ def login(body: LoginRequest, request: Request, response: Response, db: Session 
     _ensure_login_not_throttled(db, request, body.email, body.org_slug)
     users = _find_users(db, body.email, body.org_slug)
     if len(users) > 1 and not body.org_slug:
-        raise HTTPException(400, "Workspace slug is required for this email")
+        raise HTTPException(400, "Business ID is required for this email")
     user = users[0] if len(users) == 1 else None
     password_ok = verify_password(body.password, user.hashed_password if user else DUMMY_PASSWORD_HASH)
     if not user or not password_ok:

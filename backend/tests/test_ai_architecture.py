@@ -131,6 +131,24 @@ def test_ambiguous_best_requires_a_governed_measure():
     assert query.requested_analysis == "ambiguous_best"
 
 
+def test_governed_clarification_remains_authorized_in_history():
+    query = SemanticQuery(
+        goal=QueryGoal.CLARIFY,
+        entity="student",
+        fields=["id", "name", "cgpa"],
+        filters=[QueryFilter(
+            field="graduation_year", operator=FilterOperator.EQ, value=2026,
+        )],
+        sort=[QuerySort(field="cgpa", direction="desc")],
+        limit=5,
+        requested_analysis="ambiguous_best",
+    )
+
+    assert _history_query_allowed(
+        _college_envelope({"student-1"}), query.model_dump(mode="json"),
+    )
+
+
 def test_entity_selection_resumes_original_query_without_a_synthetic_prompt():
     query = SemanticQuery(
         goal=QueryGoal.PROFILE,
@@ -262,8 +280,12 @@ def test_typed_security_refs_reauthorize_every_nested_student():
     assert not _security_allowed(envelope, label.model_dump(mode="json"), "company")
 
 
-def _college_envelope(student_ids, permissions=None):
-    scope = SimpleNamespace(unrestricted=False, student_ids=frozenset(student_ids))
+def _college_envelope(
+    student_ids, permissions=None, *, owner=False, policy_version=0,
+):
+    scope = SimpleNamespace(
+        unrestricted=owner, student_ids=frozenset(student_ids),
+    )
     domains = {
         "students", "academics", "assessments", "attendance", "readiness",
         "coding", "placements", "documents", "clearance",
@@ -277,8 +299,9 @@ def _college_envelope(student_ids, permissions=None):
             "ai.use", "college.students.view", "college.assessments.view",
             "college.placements.view",
         }),
-        owner=False,
-        domain_levels={domain: "view" for domain in domains},
+        owner=owner,
+        policy_version=policy_version,
+        domain_levels={domain: "manage" if owner else "view" for domain in domains},
         domain_scopes={domain: scope for domain in domains},
     )
 
@@ -372,6 +395,37 @@ def test_access_version_change_hides_aggregate_history_without_artifacts(monkeyp
     assert result["outcome"] == "access_limited"
     assert result["evidence"] == []
     assert "no longer available" in result["content"]
+
+
+def test_owner_version_change_reauthorizes_instead_of_hiding_history(monkeypatch):
+    permissions = {
+        "ai.use", "college.students.view", "college.attendance.view",
+    }
+    envelope = _college_envelope(
+        set(), permissions, owner=True, policy_version=3,
+    )
+    monkeypatch.setattr(
+        "app.api.v1.ai.resolve_access_envelope", lambda *_args, **_kwargs: envelope,
+    )
+    query = SemanticQuery(
+        goal=QueryGoal.AGGREGATE,
+        entity="student",
+        metrics=["average_attendance"],
+    )
+    message = SimpleNamespace(
+        id="message-1", conversation_id="conversation-1", turn_id="turn-1",
+        role="assistant", content="Average attendance is 92%.", outcome="success",
+        artifacts=[], suggestions=[], evidence=[{"facts": {"average": 92}}],
+        scope={}, semantic_query=query.model_dump(mode="json"), created_at=None,
+        meta={"access_version": 1, "policy_version": 2},
+    )
+
+    result = _authorized_message_dict(
+        None, SimpleNamespace(access_version=2), message,
+    )
+
+    assert result["outcome"] == "success"
+    assert result["content"] == "Average attendance is 92%."
 
 
 def test_authorized_history_redacts_internal_ids_from_visible_text(monkeypatch):

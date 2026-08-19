@@ -76,12 +76,14 @@ class SemanticCatalog:
         entities: Iterable[EntityDefinition],
         metrics: Iterable[MetricDefinition],
         analyses: Iterable[str] = (),
+        clarifications: Iterable[str] = (),
         qualitative_definitions: Iterable[str] = (),
     ):
         self.industry = industry
         self.entities = {item.key: item for item in entities}
         self.metrics = {item.key: item for item in metrics}
         self.analyses = frozenset(analyses)
+        self.clarifications = frozenset(clarifications)
         self.qualitative_definitions = frozenset(qualitative_definitions)
 
     def entity(self, key: str) -> EntityDefinition:
@@ -103,12 +105,25 @@ class SemanticCatalog:
         except KeyError as exc:
             raise CatalogError(f"Metric '{key}' is not registered") from exc
 
-    def validate(self, query: SemanticQuery) -> SemanticQuery:
+    def validate(
+        self,
+        query: SemanticQuery,
+        *,
+        allow_clarification: bool = False,
+    ) -> SemanticQuery:
         entity = self.entity(query.entity)
-        if query.goal not in entity.goals:
+        if query.goal not in entity.goals and not (
+            allow_clarification and query.goal == QueryGoal.CLARIFY
+        ):
             raise CatalogError(f"Goal '{query.goal}' is not available for '{query.entity}'")
-        if query.requested_analysis and query.requested_analysis not in self.analyses:
-            raise CatalogError(f"Analysis '{query.requested_analysis}' is not registered")
+        if query.requested_analysis:
+            approved_analyses = (
+                self.clarifications
+                if query.goal == QueryGoal.CLARIFY
+                else self.analyses
+            )
+            if query.requested_analysis not in approved_analyses:
+                raise CatalogError(f"Analysis '{query.requested_analysis}' is not registered")
         if (
             query.qualitative_definition
             and query.qualitative_definition not in self.qualitative_definitions
@@ -145,6 +160,7 @@ class SemanticCatalog:
         return {
             "industry": self.industry,
             "analyses": sorted(self.analyses),
+            "clarifications": sorted(self.clarifications),
             "qualitative_definitions": sorted(self.qualitative_definitions),
             "entities": {
                 entity.key: {
@@ -371,6 +387,11 @@ def college_catalog() -> SemanticCatalog:
             "group_eligibility_rate", "eligible_not_applied",
             "current_opportunity_eligibility", "structured_company_match",
             "explainable_readiness_not_prediction", "company_group_selection_rate",
+        },
+        clarifications={
+            "ambiguous_best", "undefined_student_profile_thresholds",
+            "high_package_threshold_required", "missing_company_referent",
+            "missing_referent",
         },
         qualitative_definitions={"overall_good_student", "placement_support"},
     )

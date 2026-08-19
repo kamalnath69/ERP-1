@@ -1,4 +1,5 @@
 from app.core.config import settings
+from app.services.email import send_auth_code_email
 from app.services.email_templates import render_auth_email
 from app.services.whatsapp import normalize_phone, send_whatsapp_message
 
@@ -18,6 +19,31 @@ def test_security_email_template_is_branded_and_inbox_safe():
     assert "Valid for 10 minutes" in html
     assert "https://app.edvatiq.com/verify-email" in html
     assert "<img" not in html
+
+
+def test_resend_auth_email_uses_a_bounded_client_and_idempotency(monkeypatch):
+    captured = {}
+
+    def fake_send(payload, options):
+        captured.update(payload=payload, options=options)
+        return {"id": "email-test-123"}
+
+    monkeypatch.setattr(settings, "EMAIL_PROVIDER", "resend")
+    monkeypatch.setattr(settings, "EMAIL_SEND_TIMEOUT_SECONDS", 8)
+    monkeypatch.setattr(settings, "RESEND_API_KEY", "re_test_key")
+    monkeypatch.setattr(settings, "RESEND_FROM_EMAIL", "Edvatiq <no-reply@edvatiq.app>")
+    monkeypatch.setattr("app.services.email.resend.Emails.send", fake_send)
+
+    sent = send_auth_code_email(
+        "owner@example.com",
+        "123456",
+        "email_verification",
+        idempotency_key="signup-email-challenge-1",
+    )
+
+    assert sent is True
+    assert captured["payload"]["to"] == ["owner@example.com"]
+    assert captured["options"] == {"idempotency_key": "signup-email-challenge-1"}
 
 
 def test_whatsapp_template_payload_is_normalized_and_tracked(monkeypatch):

@@ -14,6 +14,8 @@ function pushError(target, path, message) {
 export function normalizeApiError(error, fallback = "The request could not be completed") {
   const payload = payloadFor(error);
   const structured = payload?.error || {};
+  const status = error?.response?.status ?? error?.status ?? error?.originalStatus ?? null;
+  const code = structured.code || error?.code || payload?.code || null;
   const fieldErrors = {};
   const formErrors = Array.isArray(structured.form_errors) ? [...structured.form_errors] : [];
 
@@ -30,15 +32,21 @@ export function normalizeApiError(error, fallback = "The request could not be co
   });
 
   const detail = payload.detail;
-  const message = structured.message
+  const transportMessage = ["ECONNABORTED", "ETIMEDOUT"].includes(code)
+    ? "Edvatiq took too long to respond. Please try again."
+    : status === 0 || status === "NETWORK_ERROR" || code === "ERR_NETWORK"
+      ? "Could not reach Edvatiq. Check your connection and try again."
+      : null;
+  const message = transportMessage
+    || structured.message
     || payload.display_detail
     || (typeof detail === "string" ? detail : null)
     || (formErrors.length ? formErrors[0] : null)
     || fallback;
 
   return {
-    status: error?.response?.status || error?.status || error?.originalStatus || null,
-    code: structured.code || error?.code || null,
+    status,
+    code,
     message,
     fieldErrors,
     formErrors,

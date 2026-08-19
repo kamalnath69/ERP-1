@@ -19,7 +19,10 @@ from app.services.audit import log_action
 from app.services.auth_security import token_hash
 from app.services.billing import fulfill_invoice
 from app.services.public_site import attach_checkout_acceptance
-from app.services.signup_email import consume_signup_email_challenge
+from app.services.signup_email import (
+    OWNER_EMAIL_CONFLICT_DETAIL, consume_signup_email_challenge,
+    lock_signup_owner_email, signup_owner_email_conflict,
+)
 
 
 ACTIVE_CHECKOUT_STATUSES = {"creating", "ready", "paid"}
@@ -275,6 +278,13 @@ def finalize_signup(
         checkout.last_error = "Organization ID became unavailable after payment"
         db.commit()
         raise HTTPException(409, "Payment was received, but this Business ID needs support review")
+    lock_signup_owner_email(db, checkout.admin_email)
+    if signup_owner_email_conflict(db, checkout.admin_email, exclude_checkout_id=checkout.id):
+        checkout.status = "manual_review"
+        checkout.provider_payment_id = payment_id
+        checkout.last_error = "Owner email became unavailable after payment"
+        db.commit()
+        raise HTTPException(409, f"Payment was received, but account creation needs support review. {OWNER_EMAIL_CONFLICT_DETAIL}")
 
     try:
         industry = IndustryEnum(checkout.industry)

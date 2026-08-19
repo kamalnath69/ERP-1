@@ -148,8 +148,7 @@ def _semantic_query_tool(catalog: SemanticCatalog) -> dict[str, Any]:
     ]
     properties["requested_analysis"]["enum"] = [
         *sorted(catalog.analyses),
-        "ambiguous_best", "general_question", "missing_company_referent",
-        "missing_referent", None,
+        *sorted(catalog.clarifications), "general_question", None,
     ]
     return tool
 

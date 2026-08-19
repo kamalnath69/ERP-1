@@ -619,6 +619,12 @@ For an active tenant Owner:
 - write confirmations, access revalidation, idempotency, audit, and undo still
   apply.
 
+New organizations persist the Owner role assignment, every current permission,
+all College domains at `manage`, and the organization-wide scope in the same
+registration transaction, before the first authenticated response is returned.
+Runtime resolution remains authoritative, so later permissions and repaired
+policy rows cannot narrow an active Owner.
+
 Migration `20260817_0040_universal_assistant.py` created/repaired the immutable
 Owner roles, grants, assignments, and College policies. `owner_invariant_health`
 reports organizations without a fully provisioned active Owner through the
@@ -1199,6 +1205,13 @@ When an assistant message is read, the API reauthorizes:
 - current College domain levels and entity reach;
 - artifact and suggestion security labels;
 - access and policy versions.
+
+Clarification turns are revalidated against their governed entity, fields,
+filters, sort, domains, and security labels even though they are not executable
+data goals. An active Owner is re-evaluated against current labels and module
+entitlements after a version change instead of having an otherwise authorized
+answer hidden solely because an Owner-policy repair incremented the version.
+Non-Owner version changes continue to invalidate population answers.
 
 Authorized reads also validate each stored artifact against the current
 contract, repair historical College student links to client navigation IDs,
