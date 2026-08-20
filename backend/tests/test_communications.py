@@ -46,6 +46,30 @@ def test_resend_auth_email_uses_a_bounded_client_and_idempotency(monkeypatch):
     assert captured["options"] == {"idempotency_key": "signup-email-challenge-1"}
 
 
+def test_resend_auth_email_does_not_write_logs_in_serverless(monkeypatch):
+    def fail_if_mkdir_is_called(*_args, **_kwargs):
+        raise AssertionError("serverless email logging must not touch the application filesystem")
+
+    monkeypatch.setattr(settings, "SERVERLESS_RUNTIME", True)
+    monkeypatch.setattr(settings, "EMAIL_PROVIDER", "resend")
+    monkeypatch.setattr(settings, "RESEND_API_KEY", "re_test_key")
+    monkeypatch.setattr(settings, "RESEND_FROM_EMAIL", "Edvatiq <no-reply@edvatiq.app>")
+    monkeypatch.setattr("app.services.email.Path.mkdir", fail_if_mkdir_is_called)
+    monkeypatch.setattr(
+        "app.services.email.resend.Emails.send",
+        lambda _payload, _options: {"id": "email-serverless-123"},
+    )
+
+    sent = send_auth_code_email(
+        "owner@example.com",
+        "123456",
+        "email_verification",
+        idempotency_key="signup-email-serverless",
+    )
+
+    assert sent is True
+
+
 def test_whatsapp_template_payload_is_normalized_and_tracked(monkeypatch):
     captured = {}
 

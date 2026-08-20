@@ -15,13 +15,22 @@ from app.services.email_templates import render_auth_email
 
 def _email_logger() -> logging.Logger:
     logger = logging.getLogger("edvatiq.email")
-    log_path = Path(__file__).resolve().parents[2] / "logs" / "email.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    if not any(isinstance(handler, RotatingFileHandler) and Path(handler.baseFilename) == log_path for handler in logger.handlers):
-        handler = RotatingFileHandler(log_path, maxBytes=2_000_000, backupCount=5, encoding="utf-8")
-        handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-        logger.addHandler(handler)
     logger.setLevel(logging.INFO)
+    if settings.SERVERLESS_RUNTIME:
+        # Serverless filesystems are read-only outside their temporary directory.
+        # Let the root logger send these records to the provider's log stream.
+        return logger
+
+    log_path = Path(__file__).resolve().parents[2] / "logs" / "email.log"
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        if not any(isinstance(handler, RotatingFileHandler) and Path(handler.baseFilename) == log_path for handler in logger.handlers):
+            handler = RotatingFileHandler(log_path, maxBytes=2_000_000, backupCount=5, encoding="utf-8")
+            handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+            logger.addHandler(handler)
+    except OSError as exc:
+        # Diagnostics must never prevent a transactional email from being sent.
+        logger.warning("email_file_logging_unavailable error_type=%s", type(exc).__name__)
     return logger
 
 
