@@ -37,6 +37,10 @@ const profileSchema = z.object({
   state: z.string().trim().min(2, "Enter the state or region").max(100),
   jurisdiction: z.string().trim().min(2, "Enter the legal jurisdiction").max(240),
   support_email: z.string().trim().email("Enter a valid support email"),
+  contact_phone: z.string().trim().max(40, "Keep the phone number under 40 characters").refine(
+    (value) => !value || (/^[+\d()\-.\s]+$/.test(value) && value.replace(/\D/g, "").length >= 7),
+    "Enter a valid public phone number",
+  ),
   privacy_email: z.string().trim().email("Enter a valid privacy email"),
   grievance_contact: z.string().trim().min(3, "Enter the grievance contact").max(300),
   registration_identifiers: z.string().trim().max(500, "Keep identifiers under 500 characters"),
@@ -132,7 +136,7 @@ export default function LegalConsole() {
   return <div className="space-y-6">
     <PageHeader
       eyebrow="Public trust"
-      title="Legal publication and demo leads"
+      title="Legal publication and public enquiries"
       description="Publish authoritative policies, control registration readiness, and follow up on public enquiries from one auditable workspace."
       actions={<div className="flex flex-wrap items-center gap-2">{!versionTwoReady && <Button variant="outline" loading={preparingV2} loadingText="Preparing V2..." onClick={prepareVersionTwo}><Plus className="mr-1.5" />Prepare detailed V2 drafts</Button>}<StatusBadge status={data.ready ? "active" : "pending"} label={data.ready ? "Registration ready" : "Registration blocked"} /></div>}
     />
@@ -143,11 +147,11 @@ export default function LegalConsole() {
     <SegmentControl value={section} onChange={setSection} items={[
       { value: "documents", label: "Legal documents", count: counts.draft || 0 },
       { value: "profile", label: "Operator profile", count: data.missing_profile_fields.length || null },
-      { value: "leads", label: "Demo requests" },
+      { value: "leads", label: "Public enquiries" },
     ]} />
     {section === "documents" && <DocumentsPanel data={data} creating={creating} onCreate={createDraft} onEdit={setEditing} onPublish={setPublishing} />}
     {section === "profile" && <OperatorProfile data={data} onSaved={load} />}
-    {section === "leads" && <DemoLeads />}
+    {section === "leads" && <PublicEnquiries />}
     <DraftEditor document={editing} onClose={() => setEditing(null)} onSaved={async () => { setEditing(null); await load(); }} />
     <ValidatedActionDialog
       open={Boolean(publishing)}
@@ -199,7 +203,7 @@ function DocumentsPanel({ data, creating, onCreate, onEdit, onPublish }) {
 
 function OperatorProfile({ data, onSaved }) {
   const form = useForm({ resolver: zodResolver(profileSchema), defaultValues: { ...data.profile, version: data.profile_version }, ...FORM_OPTIONS });
-  useEffect(() => { form.reset({ ...data.profile, registration_identifiers: data.profile.registration_identifiers || "", version: data.profile_version }); }, [data, form]);
+  useEffect(() => { form.reset({ ...data.profile, contact_phone: data.profile.contact_phone || "", registration_identifiers: data.profile.registration_identifiers || "", version: data.profile_version }); }, [data, form]);
   const submit = form.handleSubmit(async (values) => {
     form.clearErrors("root.server");
     try {
@@ -218,6 +222,7 @@ function OperatorProfile({ data, onSaved }) {
       <div className="grid gap-4 sm:grid-cols-2">{field("country", "Country", form.control)}{field("state", "State or region", form.control)}</div>
       {field("jurisdiction", "Governing jurisdiction", form.control, { description: "Use the reviewed court or dispute jurisdiction wording." })}
       <div className="grid gap-4 sm:grid-cols-2">{field("support_email", "Support email", form.control, { type: "email", autoComplete: "email" })}{field("privacy_email", "Privacy email", form.control, { type: "email", autoComplete: "email" })}</div>
+      {field("contact_phone", "Public contact phone (optional)", form.control, { type: "tel", autoComplete: "tel", description: "Displayed on the public landing page for calls and WhatsApp." })}
       {field("grievance_contact", "Grievance contact", form.control, { description: "Name, designation, and a monitored contact channel." })}
       {field("registration_identifiers", "Registration identifiers (optional)", form.control)}
       <FormRootError error={form.formState.errors.root?.server} />
@@ -249,8 +254,9 @@ function DraftEditor({ document, onClose, onSaved }) {
   </DrawerForm>;
 }
 
-function DemoLeads() {
+function PublicEnquiries() {
   const [status, setStatus] = useState("all");
+  const [inquiryType, setInquiryType] = useState("all");
   const [search, setSearch] = useState("");
   const q = useDeferredValue(search.trim());
   const [items, setItems] = useState([]);
@@ -267,7 +273,7 @@ function DemoLeads() {
     setLoading(true);
     setError(false);
     try {
-      const response = await api.get("/super-admin/legal/demo-requests", { params: { status, q: q || undefined, cursor: cursor || undefined, limit: 25 } });
+      const response = await api.get("/super-admin/legal/demo-requests", { params: { status, inquiry_type: inquiryType, q: q || undefined, cursor: cursor || undefined, limit: 25 } });
       if (requestId !== requestRef.current) return;
       setItems((current) => append ? [...current, ...response.data.items.filter((row) => !current.some((item) => item.id === row.id))] : response.data.items);
       setNextCursor(response.data.next_cursor);
@@ -278,7 +284,7 @@ function DemoLeads() {
       if (requestId === requestRef.current) setLoading(false);
     }
   };
-  useEffect(() => { fetchPage(); }, [status, q]);
+  useEffect(() => { fetchPage(); }, [status, inquiryType, q]);
 
   const updateStatus = async (lead, value) => {
     setPending(lead.id);
@@ -286,7 +292,7 @@ function DemoLeads() {
       const response = await api.patch(`/super-admin/legal/demo-requests/${lead.id}`, { status: value });
       setItems((current) => current.map((item) => item.id === lead.id ? response.data : item));
       setSelected((current) => current?.id === lead.id ? response.data : current);
-      toast.success("Demo request updated");
+      toast.success("Enquiry updated");
     } catch (requestError) {
       toast.error(requestError.response?.data?.detail || "The lead could not be updated");
     } finally {
@@ -294,19 +300,20 @@ function DemoLeads() {
     }
   };
   const columns = [
-    { key: "organization", label: "Organization", render: (row) => <div><div className="font-semibold">{row.organization_name}</div><div className="mt-1 text-xs text-muted-foreground">{row.name} / {row.work_email}</div></div> },
+    { key: "contact", label: "Contact", render: (row) => <div><div className="font-semibold">{row.organization_name || row.name}</div><div className="mt-1 text-xs text-muted-foreground">{row.name} / {row.work_email}</div></div> },
+    { key: "type", label: "Type", render: (row) => <StatusBadge status={row.inquiry_type} tone={row.inquiry_type === "client_project" ? "info" : "neutral"} label={row.inquiry_type === "client_project" ? "Custom project" : "Product demo"} /> },
     { key: "industry", label: "Industry", render: (row) => sentence(row.industry) },
     { key: "received", label: "Received", render: (row) => dateTime(row.created_at) },
-    { key: "status", label: "Status", render: (row) => <select aria-label={`Status for ${row.organization_name}`} className="h-9 rounded-lg border bg-background px-2 text-xs" value={row.status} disabled={pending === row.id} onClick={(event) => event.stopPropagation()} onChange={(event) => updateStatus(row, event.target.value)}>{["new", "contacted", "qualified", "closed"].map((value) => <option value={value} key={value}>{sentence(value)}</option>)}</select> },
+    { key: "status", label: "Status", render: (row) => <select aria-label={`Status for ${row.organization_name || row.name}`} className="h-9 rounded-lg border bg-background px-2 text-xs" value={row.status} disabled={pending === row.id} onClick={(event) => event.stopPropagation()} onChange={(event) => updateStatus(row, event.target.value)}>{["new", "contacted", "qualified", "closed"].map((value) => <option value={value} key={value}>{sentence(value)}</option>)}</select> },
   ];
   return <div className="space-y-4">
-    <Surface className="p-3"><div className="flex flex-col gap-3 sm:flex-row"><div className="relative min-w-0 flex-1"><MagnifyingGlass className="absolute left-3 top-2.5 text-muted-foreground" /><Input className="pl-10" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search name, email, or organization" /></div><SegmentControl className="w-full sm:w-auto" value={status} onChange={setStatus} items={["all", "new", "contacted", "qualified", "closed"].map((value) => ({ value, label: sentence(value) }))} /></div></Surface>
-    <Surface className="overflow-hidden"><div className="flex items-center gap-3 border-b p-4"><span className="grid h-9 w-9 place-items-center rounded-lg bg-secondary"><UsersThree /></span><div><h2 className="font-semibold">Public demo enquiries</h2><p className="text-xs text-muted-foreground">Persisted before notification and isolated from marketing consent.</p></div></div>
-      {error && !items.length ? <ErrorState className="m-4" title="Demo requests could not be loaded" retry={() => fetchPage()} /> : <DataTable className="rounded-none border-0 shadow-none" columns={columns} rows={items} loading={loading && !items.length} onRowClick={setSelected} empty={<EmptyState variant={q || status !== "all" ? "filtered" : "section"} alignment="left" icon={EnvelopeSimple} title={q || status !== "all" ? "No matching demo requests" : "No demo requests yet"} description={q || status !== "all" ? "Change the search or status filter." : "New enquiries from the public site will appear here."} />} />}
-      <CursorListFooter count={items.length} hasMore={hasMore} loading={loading} error={error && items.length > 0} onLoadMore={() => fetchPage({ append: true, cursor: nextCursor })} onRetry={() => fetchPage({ append: Boolean(items.length), cursor: items.length ? nextCursor : null })} noun="requests" />
+    <Surface className="p-3"><div className="flex flex-col gap-3 lg:flex-row"><div className="relative min-w-0 flex-1"><MagnifyingGlass className="absolute left-3 top-2.5 text-muted-foreground" /><Input className="pl-10" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search name, email, or organization" /></div><select aria-label="Enquiry type" className="h-10 rounded-lg border bg-background px-3 text-sm" value={inquiryType} onChange={(event) => setInquiryType(event.target.value)}><option value="all">All enquiry types</option><option value="product_demo">Product demos</option><option value="client_project">Custom projects</option></select><SegmentControl className="w-full lg:w-auto" value={status} onChange={setStatus} items={["all", "new", "contacted", "qualified", "closed"].map((value) => ({ value, label: sentence(value) }))} /></div></Surface>
+    <Surface className="overflow-hidden"><div className="flex items-center gap-3 border-b p-4"><span className="grid h-9 w-9 place-items-center rounded-lg bg-secondary"><UsersThree /></span><div><h2 className="font-semibold">Public enquiries</h2><p className="text-xs text-muted-foreground">Product demos and custom projects are persisted before notification and isolated from marketing consent.</p></div></div>
+      {error && !items.length ? <ErrorState className="m-4" title="Public enquiries could not be loaded" retry={() => fetchPage()} /> : <DataTable className="rounded-none border-0 shadow-none" columns={columns} rows={items} loading={loading && !items.length} onRowClick={setSelected} empty={<EmptyState variant={q || status !== "all" || inquiryType !== "all" ? "filtered" : "section"} alignment="left" icon={EnvelopeSimple} title={q || status !== "all" || inquiryType !== "all" ? "No matching enquiries" : "No enquiries yet"} description={q || status !== "all" || inquiryType !== "all" ? "Change the search or filters." : "New enquiries from the public site will appear here."} />} />}
+      <CursorListFooter count={items.length} hasMore={hasMore} loading={loading} error={error && items.length > 0} onLoadMore={() => fetchPage({ append: true, cursor: nextCursor })} onRetry={() => fetchPage({ append: Boolean(items.length), cursor: items.length ? nextCursor : null })} noun="enquiries" />
     </Surface>
-    <DrawerForm open={Boolean(selected)} onOpenChange={(open) => { if (!open && pending !== selected?.id) setSelected(null); }} title={selected?.organization_name || "Demo request"} description={selected ? `Received ${dateTime(selected.created_at)}` : ""}>
-      {selected && <div className="space-y-5"><div className="grid gap-3 sm:grid-cols-2"><LeadValue label="Contact" value={selected.name} /><LeadValue label="Work email" value={selected.work_email} /><LeadValue label="Industry" value={sentence(selected.industry)} /><LeadValue label="Role" value={selected.role || "Not provided"} /><LeadValue label="Phone" value={selected.phone || "Not provided"} /><LeadValue label="Notification" value={selected.notified_at ? "Delivered" : "Pending or unavailable"} /></div><div><div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Message</div><p className="mt-2 whitespace-pre-wrap rounded-xl bg-secondary/45 p-4 text-sm leading-6">{selected.message || "No additional message."}</p></div><div><label className="text-sm font-medium" htmlFor="lead-status">Follow-up status</label><select id="lead-status" className="mt-2 h-10 w-full rounded-lg border bg-background px-3 text-sm" value={selected.status} disabled={pending === selected.id} onChange={(event) => updateStatus(selected, event.target.value)}>{["new", "contacted", "qualified", "closed"].map((value) => <option value={value} key={value}>{sentence(value)}</option>)}</select></div></div>}
+    <DrawerForm open={Boolean(selected)} onOpenChange={(open) => { if (!open && pending !== selected?.id) setSelected(null); }} title={selected?.organization_name || selected?.name || "Public enquiry"} description={selected ? `Received ${dateTime(selected.created_at)}` : ""}>
+      {selected && <div className="space-y-5"><div className="grid gap-3 sm:grid-cols-2"><LeadValue label="Enquiry type" value={selected.inquiry_type === "client_project" ? "Custom software project" : "Edvatiq product demo"} /><LeadValue label="Contact" value={selected.name} /><LeadValue label="Email" value={selected.work_email} /><LeadValue label="Organization or venture" value={selected.organization_name || "Not provided"} /><LeadValue label="Industry" value={sentence(selected.industry)} /><LeadValue label="Role" value={selected.role || "Not provided"} /><LeadValue label="Phone" value={selected.phone || "Not provided"} /><LeadValue label="Notification" value={selected.notified_at ? "Delivered" : "Pending or unavailable"} /></div><div><div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Message</div><p className="mt-2 whitespace-pre-wrap rounded-xl bg-secondary/45 p-4 text-sm leading-6">{selected.message || "No additional message."}</p></div><div><label className="text-sm font-medium" htmlFor="lead-status">Follow-up status</label><select id="lead-status" className="mt-2 h-10 w-full rounded-lg border bg-background px-3 text-sm" value={selected.status} disabled={pending === selected.id} onChange={(event) => updateStatus(selected, event.target.value)}>{["new", "contacted", "qualified", "closed"].map((value) => <option value={value} key={value}>{sentence(value)}</option>)}</select></div></div>}
     </DrawerForm>
   </div>;
 }

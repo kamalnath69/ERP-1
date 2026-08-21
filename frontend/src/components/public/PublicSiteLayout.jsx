@@ -1,20 +1,22 @@
 import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { Link, Outlet, useLocation } from "react-router-dom";
-import { ArrowRight, List, Sparkle } from "@phosphor-icons/react";
+import { ArrowRight, List, Phone, Sparkle, WhatsappLogo } from "@phosphor-icons/react";
 
 import BrandLogo from "@/components/brand/BrandLogo";
 import { Sheet, SheetClose, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { useAuth } from "@/contexts/AuthContext";
 import api from "@/lib/api";
+import { publicContactLinks } from "@/lib/publicContact";
 
 const PublicSiteContext = createContext(null);
 
 const navItems = [
   { label: "Product", to: "/#platform", section: "product" },
   { label: "Solutions", to: "/#industries", section: "solutions" },
-  { label: "Docs", to: "/docs", section: "resources" },
+  { label: "AI", to: "/#ai", section: "ai" },
+  { label: "Custom projects", to: "/#services", section: "services" },
   { label: "Pricing", to: "/#pricing", section: "pricing" },
-  { label: "About", to: "/#about", section: "company" },
+  { label: "Docs", to: "/docs", section: "resources" },
 ];
 
 function usePublicCatalog() {
@@ -45,6 +47,8 @@ function sectionFor(pathname, hash) {
   if (pathname.startsWith("/about")) return "company";
   if (["/security", "/terms", "/privacy", "/refund-policy"].some((path) => pathname.startsWith(path)) || pathname.startsWith("/docs")) return "resources";
   if (pathname === "/" && hash === "#industries") return "solutions";
+  if (pathname === "/" && hash === "#ai") return "ai";
+  if (pathname === "/" && hash === "#services") return "services";
   if (pathname === "/" && hash === "#pricing") return "pricing";
   if (pathname === "/" && hash === "#about") return "company";
   if (pathname === "/" && hash === "#contact") return "contact";
@@ -67,7 +71,9 @@ export default function PublicSiteLayout() {
   const data = usePublicCatalog();
   const { user } = useAuth();
   const location = useLocation();
-  const active = sectionFor(location.pathname, location.hash);
+  const [observedSection, setObservedSection] = useState(null);
+  const [scrolled, setScrolled] = useState(false);
+  const active = observedSection || sectionFor(location.pathname, location.hash);
   const cta = useMemo(() => publicCta(user, data.site, data.catalog), [user, data.site, data.catalog]);
 
   useEffect(() => {
@@ -79,23 +85,53 @@ export default function PublicSiteLayout() {
     return () => window.clearTimeout(timer);
   }, [location.pathname, location.hash]);
 
+  useEffect(() => {
+    if (location.pathname !== "/" || typeof IntersectionObserver === "undefined") {
+      setObservedSection(null);
+      return undefined;
+    }
+    const sections = [
+      ["platform", "product"], ["industries", "solutions"], ["ai", "ai"],
+      ["services", "services"], ["pricing", "pricing"],
+    ];
+    const observer = new IntersectionObserver((entries) => {
+      const visible = entries.filter((entry) => entry.isIntersecting).sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+      if (visible) setObservedSection(visible.target.dataset.publicSection || null);
+    }, { rootMargin: "-28% 0px -58%", threshold: [0.01, 0.2, 0.45] });
+    sections.forEach(([id, section]) => {
+      const node = document.getElementById(id);
+      if (node) {
+        node.dataset.publicSection = section;
+        observer.observe(node);
+      }
+    });
+    return () => observer.disconnect();
+  }, [location.pathname]);
+
+  useEffect(() => {
+    const update = () => setScrolled(window.scrollY > 12);
+    update();
+    window.addEventListener("scroll", update, { passive: true });
+    return () => window.removeEventListener("scroll", update);
+  }, []);
+
   return <PublicSiteContext.Provider value={data}>
     <div className="marketing-site flex min-h-screen flex-col bg-background text-foreground">
       <a href="#public-content" className="fixed left-4 top-3 z-[70] -translate-y-20 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-lg transition-transform focus:translate-y-0">Skip to content</a>
-      <header className="sticky top-0 z-50 border-b bg-background/90 backdrop-blur-xl">
+      <header className={`sticky top-0 z-50 border-b backdrop-blur-xl transition-[background-color,box-shadow] ${scrolled ? "bg-background/94 shadow-[0_8px_30px_hsl(var(--shadow-color)/.055)]" : "bg-background/82"}`}>
         <div className="mx-auto flex h-16 max-w-[1440px] items-center gap-5 px-4 sm:px-6 lg:px-8">
           <Link to="/" className="shrink-0" aria-label="Edvatiq home">
             <BrandLogo nameClassName="font-marketing text-xl font-semibold" />
           </Link>
-          <nav className="ml-auto hidden items-center gap-1 lg:flex" aria-label="Public navigation">
+          <nav className="ml-auto hidden items-center gap-0.5 xl:flex" aria-label="Public navigation">
             {navItems.map((item) => <Link key={item.label} to={item.to} aria-current={active === item.section ? "page" : undefined} className={`rounded-lg px-3.5 py-2 text-sm font-medium transition-colors ${active === item.section ? "bg-secondary text-foreground" : "text-muted-foreground hover:bg-secondary hover:text-foreground"}`}>{item.label}</Link>)}
           </nav>
-          <div className="ml-auto hidden items-center gap-2 sm:flex lg:ml-3">
+          <div className="ml-auto hidden items-center gap-2 sm:flex xl:ml-3">
             {!user && <Link to="/login" className="rounded-xl px-4 py-2.5 text-sm font-semibold hover:bg-secondary">Sign in</Link>}
             <Link to={cta.to} className="inline-flex h-10 items-center gap-2 rounded-xl bg-primary px-4 text-sm font-semibold text-primary-foreground shadow-sm transition-transform hover:-translate-y-0.5">{cta.label}<ArrowRight /></Link>
           </div>
           <Sheet>
-            <SheetTrigger asChild><button type="button" className="ml-auto grid h-10 w-10 place-items-center rounded-xl border bg-card sm:ml-0 lg:hidden" aria-label="Open navigation"><List size={20} /></button></SheetTrigger>
+            <SheetTrigger asChild><button type="button" className="ml-auto grid h-10 w-10 place-items-center rounded-xl border bg-card sm:ml-0 xl:hidden" aria-label="Open navigation"><List size={20} /></button></SheetTrigger>
             <SheetContent side="right" className="flex w-[88vw] max-w-sm flex-col p-0">
               <SheetHeader className="border-b px-5 py-5 text-left"><SheetTitle><BrandLogo markClassName="h-8 w-8 rounded-lg" nameClassName="text-base" /></SheetTitle></SheetHeader>
               <nav className="flex flex-1 flex-col gap-1 p-4" aria-label="Mobile public navigation">
@@ -120,11 +156,12 @@ export default function PublicSiteLayout() {
 
 function PublicFooter({ site }) {
   const supportEmail = site?.support_email || "sales@edvatiq.com";
+  const contact = publicContactLinks(site?.contact_phone);
   return <footer className="bg-primary text-primary-foreground">
     <div className="mx-auto max-w-[1440px] px-4 pb-8 pt-14 sm:px-6 lg:px-8 lg:pt-16">
       <div className="grid gap-10 border-b border-primary-foreground/12 pb-12 sm:grid-cols-2 lg:grid-cols-12">
-        <div className="sm:col-span-2 lg:col-span-5"><Link to="/" className="inline-flex"><BrandLogo markClassName="h-10 w-10" nameClassName="font-marketing text-2xl font-semibold text-primary-foreground" /></Link><p className="mt-5 max-w-md text-sm leading-7 text-primary-foreground/58">Placement intelligence and focused operations, backed by permission-aware records and evidence-linked AI.</p><a href={`mailto:${supportEmail}`} className="mt-5 inline-flex text-sm font-semibold text-accent hover:underline">{supportEmail}</a></div>
-        <FooterGroup title="Product" links={[["Platform", "/#platform"], ["Edvatiq AI", "/#ai"], ["Plans", "/#pricing"], ["Documentation", "/docs"]]} />
+        <div className="sm:col-span-2 lg:col-span-5"><Link to="/" className="inline-flex"><BrandLogo markClassName="h-10 w-10" nameClassName="font-marketing text-2xl font-semibold text-primary-foreground" /></Link><p className="mt-5 max-w-md text-sm leading-7 text-primary-foreground/58">Operating intelligence, focused software, and evidence-backed AI for organizations that need clearer work.</p><div className="mt-5 flex flex-col items-start gap-2 text-sm font-semibold"><a href={`mailto:${supportEmail}`} className="inline-flex items-center gap-2 text-accent hover:underline">{supportEmail}</a><a href={contact.tel} className="inline-flex items-center gap-2 text-primary-foreground/72 hover:text-primary-foreground"><Phone size={16} />{contact.display}</a><a href={contact.whatsapp} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 text-primary-foreground/72 hover:text-primary-foreground"><WhatsappLogo size={16} />WhatsApp</a></div></div>
+        <FooterGroup title="Product" links={[["Platform", "/#platform"], ["Edvatiq AI", "/#ai"], ["Custom projects", "/#services"], ["Plans", "/#pricing"]]} />
         <FooterGroup title="Company" links={[["About", "/#about"], ["Security", "/security"], ["Contact", "/#contact"], ["Sign in", "/login"]]} />
         <FooterGroup title="Legal" links={[["Terms", "/terms"], ["Privacy", "/privacy"], ["Refund policy", "/refund-policy"]]} />
       </div>

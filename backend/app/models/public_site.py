@@ -78,9 +78,12 @@ class DemoRequest(TimestampMixin, Base):
     )
 
     id: Mapped[str] = uuid_pk()
+    inquiry_type: Mapped[str] = mapped_column(
+        String(32), default="product_demo", server_default="product_demo", nullable=False
+    )
     name: Mapped[str] = mapped_column(String(160), nullable=False)
     work_email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
-    organization_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    organization_name: Mapped[str | None] = mapped_column(String(200))
     industry: Mapped[str] = mapped_column(String(40), nullable=False)
     role: Mapped[str | None] = mapped_column(String(120))
     phone: Mapped[str | None] = mapped_column(String(40))

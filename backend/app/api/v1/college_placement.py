@@ -850,6 +850,16 @@ def get_placement_dashboard(
         include_attendance=evidence_access["attendance"] is not None,
         include_coding=evidence_access["coding"] is not None,
     )
+    payload["access"] = {
+        "scope": "organization" if access.unrestricted else "restricted",
+        "capabilities": {
+            "attendance": evidence_access["attendance"] is not None,
+            "assessments": evidence_access["assessments"] is not None,
+            "coding": evidence_access["coding"] is not None,
+            "readiness": primary_access[1] is not None,
+            "placements": primary_access[2] is not None,
+        },
+    }
     db.commit()
     return payload
 

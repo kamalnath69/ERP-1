@@ -2,7 +2,10 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 
-import Dashboard from "./Dashboard";
+import Dashboard, {
+  resolveBusinessDashboardProfile,
+  resolveBusinessSectionOrder,
+} from "./Dashboard";
 
 vi.mock("react-redux", () => ({
   useDispatch: () => vi.fn(),
@@ -61,7 +64,20 @@ vi.mock("@/store/api/workspaceApi", () => ({
   useSaveMyPreferenceMutation: () => [vi.fn()],
 }));
 
-test("uses a compact metric ribbon before the balanced analytics grid", () => {
+test("resolves business role defaults without overriding a saved order", () => {
+  expect(resolveBusinessDashboardProfile(["front-desk"])).toBe("operations");
+  expect(resolveBusinessDashboardProfile(["front-desk", "owner"])).toBe("leadership");
+
+  const widgets = [
+    { id: "queue", kind: "work_queue" },
+    { id: "trend", kind: "line_chart" },
+    { id: "notes", kind: "note" },
+  ];
+  expect(resolveBusinessSectionOrder(widgets, "leadership", false)).toEqual(["analytics", "execution", "other"]);
+  expect(resolveBusinessSectionOrder(widgets, "leadership", true)).toEqual(["execution", "analytics", "other"]);
+});
+
+test("uses a compact metric ribbon before independent dashboard lanes", () => {
   const html = renderToStaticMarkup(<MemoryRouter><Dashboard /></MemoryRouter>);
 
   expect(html).not.toContain("Quick actions");
@@ -71,7 +87,7 @@ test("uses a compact metric ribbon before the balanced analytics grid", () => {
   expect(html).toContain("lg:items-start");
   expect((html.match(/data-dashboard-metric=/g) || [])).toHaveLength(4);
   expect(html).toContain('aria-label="Key business metrics"');
-  expect(html).toContain("grid-cols-2");
+  expect(html).toContain("dashboard-metric-grid");
   expect(html.indexOf("Collections trend")).toBeLessThan(html.indexOf("Sales payment mix"));
   expect(html.indexOf("Sales payment mix")).toBeLessThan(html.indexOf("New-client growth"));
   expect(html).toContain("Collections trend");
@@ -81,7 +97,11 @@ test("uses a compact metric ribbon before the balanced analytics grid", () => {
   expect(html).not.toContain("The four numbers worth seeing first");
   expect(html).not.toContain("Movement, mix, and growth");
   expect(html).not.toContain("Three complementary views");
-  expect(html).toContain("items-stretch");
-  expect(html).toContain("auto-rows-fr");
+  expect(html).toContain("dashboard-canvas");
+  expect(html).toContain("dashboard-lanes");
+  expect(html).toContain('data-dashboard-profile="leadership"');
+  expect(html).not.toContain("items-stretch");
+  expect(html).not.toContain("auto-rows-fr");
+  expect(html).not.toContain("h-full");
   expect(html).not.toContain("Â");
 });

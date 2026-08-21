@@ -21,6 +21,7 @@ LEGAL_PROFILE_DEFAULTS = {
     "state": "",
     "jurisdiction": "",
     "support_email": "sales@edvatiq.com",
+    "contact_phone": "+919787867648",
     "privacy_email": "",
     "grievance_contact": "",
     "registration_identifiers": "",

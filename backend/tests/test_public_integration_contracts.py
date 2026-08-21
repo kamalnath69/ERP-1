@@ -7,7 +7,10 @@ from pydantic import ValidationError
 from app.api.v1.college_integrations import (
     CredentialBody, PushBatchBody, _extract_prefix, _issue_token, integration_openapi,
 )
-from app.api.v1.public_site import LegalDraftBody, LegalDraftUpdateBody, PublishBody
+from app.api.v1.public_site import (
+    DemoRequestBody, LegalDraftBody, LegalDraftUpdateBody, LegalProfileBody,
+    PublishBody, _enquiry_notification,
+)
 from app.services.college_imports import normalize_row, validate_row
 from app.services.public_site import (
     LEGAL_PROFILE_DEFAULTS, VERSION_TWO_DOCUMENTS,
@@ -21,6 +24,46 @@ def test_legal_defaults_do_not_invent_operator_identity_or_jurisdiction():
     assert LEGAL_PROFILE_DEFAULTS["country"] == ""
     assert LEGAL_PROFILE_DEFAULTS["state"] == ""
     assert LEGAL_PROFILE_DEFAULTS["jurisdiction"] == ""
+    assert LEGAL_PROFILE_DEFAULTS["contact_phone"] == "+919787867648"
+
+
+def test_public_enquiry_contract_is_backward_compatible_and_project_aware():
+    common = {
+        "name": "Kamal Nath",
+        "work_email": "kamal@example.com",
+        "industry": "other",
+        "privacy_document_id": "privacy-1",
+        "privacy_acknowledged": True,
+    }
+    legacy = DemoRequestBody(**common, organization_name="Example College")
+    assert legacy.inquiry_type == "product_demo"
+
+    project = DemoRequestBody(**common, inquiry_type="client_project")
+    assert project.organization_name is None
+
+    with pytest.raises(ValidationError, match="Organization name is required"):
+        DemoRequestBody(**common)
+
+
+def test_public_contact_phone_and_notification_copy_are_validated():
+    profile = LegalProfileBody(
+        brand_name="Edvatiq", legal_name="Edvatiq Labs", registered_address="Chennai, Tamil Nadu",
+        country="India", state="Tamil Nadu", jurisdiction="Chennai courts",
+        support_email="sales@edvatiq.com", contact_phone="+91 97878 67648",
+        privacy_email="privacy@edvatiq.com", grievance_contact="Support team",
+        version=1,
+    )
+    assert profile.contact_phone == "+91 97878 67648"
+
+    row = type("Enquiry", (), {
+        "inquiry_type": "client_project", "name": "Kamal Nath", "work_email": "kamal@example.com",
+        "organization_name": None, "industry": "other", "role": "Founder", "phone": None,
+        "message": "Build an internal operations portal.",
+    })()
+    subject, text, body = _enquiry_notification(row)
+    assert subject == "Project enquiry from Kamal Nath"
+    assert "Custom software project" in text
+    assert "New custom software project enquiry" in body
 
 
 def test_legal_markdown_is_html_free_version_locked_and_hashable():

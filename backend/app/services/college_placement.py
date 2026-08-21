@@ -1060,8 +1060,6 @@ def placement_dashboard(
             "application_count": application_counts.get(opportunity.id, 0),
             "action_url": f"/app/college?section=drives&opportunity={opportunity.id}",
         })
-        if len(active_drive_deadlines) == 5:
-            break
 
     brief = []
     insufficient_evidence = sum(
@@ -1151,9 +1149,17 @@ def placement_dashboard(
             }
             for department_id_value, values in department_stats.items()
         ],
-        "active_drive_deadlines": active_drive_deadlines,
+        "active_drive_deadlines": active_drive_deadlines[:5],
         "brief": brief[:3],
         "attention": attention[:30],
+        "totals": {
+            "attention_issues": len(attention),
+            "attention_students": len({
+                row["student_id"] for row in attention if row.get("student_id")
+            }),
+            "upcoming_drive_deadlines": len(active_drive_deadlines),
+            "departments": len(department_stats),
+        },
         "coverage": {
             "rankable": sum(1 for row in snapshots.values() if float(row.coverage_percent) >= minimum_coverage),
             "total": len(student_ids),

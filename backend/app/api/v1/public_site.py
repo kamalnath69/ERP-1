@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response, status
-from pydantic import EmailStr, Field, field_validator
+from pydantic import EmailStr, Field, field_validator, model_validator
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -46,10 +46,16 @@ class LegalProfileBody(RequestModel):
     state: str = Field(min_length=2, max_length=100)
     jurisdiction: str = Field(min_length=2, max_length=240)
     support_email: EmailStr
+    contact_phone: str | None = Field(default=None, max_length=40)
     privacy_email: EmailStr
     grievance_contact: str = Field(min_length=3, max_length=300)
     registration_identifiers: str | None = Field(default=None, max_length=500)
     version: int = Field(ge=1)
+
+    @field_validator("contact_phone")
+    @classmethod
+    def public_phone_number(cls, value: str | None) -> str | None:
+        return valid_phone(value)
 
 
 class LegalDraftBody(RequestModel):
@@ -74,9 +80,10 @@ class PublishBody(RequestModel):
 
 
 class DemoRequestBody(RequestModel):
+    inquiry_type: Literal["product_demo", "client_project"] = "product_demo"
     name: str = Field(min_length=2, max_length=160)
     work_email: EmailStr
-    organization_name: str = Field(min_length=2, max_length=200)
+    organization_name: str | None = Field(default=None, min_length=2, max_length=200)
     industry: Literal["gym", "salon", "clinic", "college", "other"]
     role: str | None = Field(default=None, max_length=120)
     phone: str | None = Field(default=None, max_length=40)
@@ -90,9 +97,42 @@ class DemoRequestBody(RequestModel):
     def phone_number(cls, value: str | None) -> str | None:
         return valid_phone(value)
 
+    @model_validator(mode="after")
+    def require_demo_organization(self):
+        if self.inquiry_type == "product_demo" and not self.organization_name:
+            raise ValueError("Organization name is required for a product demo")
+        return self
+
 
 class LeadStatusBody(RequestModel):
     status: Literal["new", "contacted", "qualified", "closed"]
+
+
+def _enquiry_notification(row: DemoRequest) -> tuple[str, str, str]:
+    project = row.inquiry_type == "client_project"
+    heading = "New custom software project enquiry" if project else "New Edvatiq product demo request"
+    type_label = "Custom software project" if project else "Edvatiq product demo"
+    organization = row.organization_name or "Not provided"
+    text = (
+        f"{heading}\n\nType: {type_label}\nName: {row.name}\nEmail: {row.work_email}\n"
+        f"Organization or venture: {organization}\nIndustry: {row.industry}\n"
+        f"Role: {row.role or '-'}\nPhone: {row.phone or '-'}\n\n{row.message or ''}"
+    )
+    safe = {key: html.escape(str(value or "-")) for key, value in {
+        "type": type_label, "name": row.name, "email": row.work_email,
+        "organization": organization, "industry": row.industry, "role": row.role,
+        "phone": row.phone, "message": row.message,
+    }.items()}
+    body = (
+        f"<h2>{heading}</h2>"
+        f"<p><strong>Type:</strong> {safe['type']}<br><strong>Name:</strong> {safe['name']}<br>"
+        f"<strong>Email:</strong> {safe['email']}<br><strong>Organization or venture:</strong> {safe['organization']}<br>"
+        f"<strong>Industry:</strong> {safe['industry']}<br><strong>Role:</strong> {safe['role']}<br>"
+        f"<strong>Phone:</strong> {safe['phone']}</p><p>{safe['message']}</p>"
+    )
+    subject_source = (row.organization_name or row.name).replace("\r", " ").replace("\n", " ")
+    subject_prefix = "Project enquiry" if project else "Product demo request"
+    return f"{subject_prefix} from {subject_source}", text, body
 
 
 def _notify_demo_request(request_id: str, recipient: str) -> None:
@@ -100,24 +140,8 @@ def _notify_demo_request(request_id: str, recipient: str) -> None:
         row = db.get(DemoRequest, request_id)
         if not row:
             return
-        text = (
-            f"New Edvatiq demo request\n\nName: {row.name}\nEmail: {row.work_email}\n"
-            f"Organization: {row.organization_name}\nIndustry: {row.industry}\n"
-            f"Role: {row.role or '-'}\nPhone: {row.phone or '-'}\n\n{row.message or ''}"
-        )
-        safe = {key: html.escape(str(value or "-")) for key, value in {
-            "name": row.name, "email": row.work_email, "organization": row.organization_name,
-            "industry": row.industry, "role": row.role, "phone": row.phone, "message": row.message,
-        }.items()}
-        body = (
-            "<h2>New Edvatiq demo request</h2>"
-            f"<p><strong>Name:</strong> {safe['name']}<br><strong>Email:</strong> {safe['email']}<br>"
-            f"<strong>Organization:</strong> {safe['organization']}<br><strong>Industry:</strong> {safe['industry']}<br>"
-            f"<strong>Role:</strong> {safe['role']}<br><strong>Phone:</strong> {safe['phone']}</p>"
-            f"<p>{safe['message']}</p>"
-        )
-        subject_org = row.organization_name.replace("\r", " ").replace("\n", " ")
-        if send_email(recipient, f"Demo request from {subject_org}", text, body, "demo_request"):
+        subject, text, body = _enquiry_notification(row)
+        if send_email(recipient, subject, text, body, "demo_request"):
             row.notified_at = now_utc()
             db.commit()
 
@@ -129,6 +153,7 @@ def public_site(response: Response, db: Session = Depends(get_db)):
     return {
         "brand": legal["operator"].get("brand_name") or "Edvatiq",
         "support_email": legal["operator"].get("support_email") or "sales@edvatiq.com",
+        "contact_phone": legal["operator"].get("contact_phone") or "+919787867648",
         "legal_ready": legal["ready"],
         "legal_documents": legal["documents"],
     }
@@ -170,8 +195,9 @@ def create_demo_request(body: DemoRequestBody, request: Request, background: Bac
         DemoRequest.created_at >= cutoff,
     )) if ip_hash else 0
     if recent and recent >= 5:
-        raise HTTPException(429, "Too many demo requests. Please wait before trying again")
+        raise HTTPException(429, "Too many enquiries. Please wait before trying again")
     row = DemoRequest(
+        inquiry_type=body.inquiry_type,
         name=body.name,
         work_email=str(body.work_email).lower(),
         organization_name=body.organization_name,
@@ -366,7 +392,8 @@ def publish_legal_document(document_id: str, body: PublishBody, actor=Depends(re
 
 def _lead_payload(row: DemoRequest) -> dict:
     return {
-        "id": row.id, "name": row.name, "work_email": row.work_email,
+        "id": row.id, "inquiry_type": row.inquiry_type,
+        "name": row.name, "work_email": row.work_email,
         "organization_name": row.organization_name, "industry": row.industry,
         "role": row.role, "phone": row.phone, "message": row.message,
         "status": row.status, "created_at": row.created_at, "notified_at": row.notified_at,
@@ -376,20 +403,26 @@ def _lead_payload(row: DemoRequest) -> dict:
 @super_router.get("/demo-requests")
 def list_demo_requests(
     status_filter: Literal["all", "new", "contacted", "qualified", "closed"] = Query("all", alias="status"),
+    inquiry_type: Literal["all", "product_demo", "client_project"] = "all",
     q: str | None = None,
     cursor: str | None = None,
     limit: int = Query(25, ge=1, le=100),
     actor=Depends(require_platform_permission("overview.view")),
     db: Session = Depends(get_db),
 ):
-    filters = {"status": status_filter, "q": q}
+    filters = {"status": status_filter, "inquiry_type": inquiry_type, "q": q}
     values = decode_cursor(cursor, scope="super-admin.demo-requests", organization_id=None, filters=filters)
     query = select(DemoRequest)
     if status_filter != "all":
         query = query.where(DemoRequest.status == status_filter)
+    if inquiry_type != "all":
+        query = query.where(DemoRequest.inquiry_type == inquiry_type)
     if q:
         term = f"%{q.strip()}%"
-        query = query.where(or_(DemoRequest.name.ilike(term), DemoRequest.work_email.ilike(term), DemoRequest.organization_name.ilike(term)))
+        query = query.where(or_(
+            DemoRequest.name.ilike(term), DemoRequest.work_email.ilike(term),
+            func.coalesce(DemoRequest.organization_name, "").ilike(term),
+        ))
     if values:
         at = datetime.fromisoformat(str(values["at"]))
         row_id = str(values["id"])

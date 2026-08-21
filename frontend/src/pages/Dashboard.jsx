@@ -12,7 +12,8 @@ import PlacementDashboard from "@/components/college/PlacementDashboard";
 import { EntityAvatar } from "@/components/entities/EntityProfile";
 import {
   ChartPanel, DrawerForm, EmptyState, ErrorState, InsightPanel,
-  PageHeader, PageShell, PageSkeleton, SegmentControl, StatusBadge,
+  DashboardBand, DashboardCanvas, DashboardLanes, DashboardSkeleton,
+  PageHeader, PageShell, SegmentControl, StatusBadge,
   formatMetric,
 } from "@/components/system";
 import { Button } from "@/components/ui/button";
@@ -55,7 +56,7 @@ function BusinessDashboard() {
   );
   const roleText = (data?.roles || []).map(humanize).join(" + ");
 
-  if (query.isLoading && !data) return <PageSkeleton cards={4} />;
+  if (query.isLoading && !data) return <DashboardSkeleton />;
   if (query.isError && !data) return <PageShell><ErrorState title="Your dashboard could not be loaded" description={query.error?.data?.detail || "Live business information is temporarily unavailable."} retry={query.refetch} /></PageShell>;
 
   const go = (destination) => {
@@ -71,26 +72,36 @@ function BusinessDashboard() {
   const primaryMetrics = selectPrimaryMetrics(data?.metrics || [], data?.industry || organization?.industry);
   const primaryIds = new Set(primaryMetrics.map((metric) => metric.id));
   const secondaryMetrics = (data?.metrics || []).filter((metric) => !primaryIds.has(metric.id));
+  const profile = resolveBusinessDashboardProfile(data?.roles || []);
+  const hasSavedLayout = Boolean(savedLayout?.order?.length || savedLayout?.hidden?.length);
+  const sectionOrder = resolveBusinessSectionOrder(arrangedWidgets, profile, hasSavedLayout);
+
+  const sections = {
+    analytics: <DashboardBand key="analytics" as="section" aria-label="Business analytics">
+      <AnalyticsGrid widgets={chartWidgets} secondaryMetrics={secondaryMetrics} go={go} />
+    </DashboardBand>,
+    execution: (workWidget || attentionWidget) ? <DashboardBand key="execution" as="section" aria-label="Today's execution">
+      <ExecutionGrid workWidget={workWidget} attentionWidget={attentionWidget} go={go} profile={profile} hasWork={hasWork} hasAttention={hasAttention} />
+    </DashboardBand> : null,
+    other: otherWidgets.length ? <DashboardBand key="other" as="section" aria-label="More business information">
+      <SupportingWidgets widgets={otherWidgets} go={go} />
+    </DashboardBand> : null,
+  };
 
   return <PageShell className="reveal pb-10" data-testid="dashboard-page">
-    <PageHeader
-      eyebrow={`${location?.name || organization?.name || "Business"} / ${roleText || "Workspace"}`}
-      title={`${greeting()}, ${user?.first_name}.`}
-      className="lg:flex-row lg:items-start lg:justify-between xl:items-start"
-      actions={<div role="group" aria-label="Dashboard period" className="flex max-w-full items-center gap-2"><SegmentControl value={range} onChange={setRange} items={[7, 30, 90].map((days) => ({ value: days, label: `${days} days` }))} /><Button variant="outline" size="icon" className="shrink-0" aria-label="Customize dashboard" onClick={() => setCustomizing(true)}><Gear /></Button></div>}
-    />
+    <DashboardCanvas data-dashboard-profile={profile}>
+      <DashboardBand as="div">
+        <PageHeader
+          eyebrow={`${location?.name || organization?.name || "Business"} / ${roleText || "Workspace"}`}
+          title={`${greeting()}, ${user?.first_name}.`}
+          className="lg:flex-row lg:items-start lg:justify-between xl:items-start"
+          actions={<div role="group" aria-label="Dashboard period" className="flex max-w-full items-center gap-2"><SegmentControl value={range} onChange={setRange} items={[7, 30, 90].map((days) => ({ value: days, label: `${days} days` }))} /><Button variant="outline" size="icon" className="shrink-0" aria-label="Customize dashboard" onClick={() => setCustomizing(true)}><Gear /></Button></div>}
+        />
+      </DashboardBand>
 
-    <MetricRibbon metrics={primaryMetrics} go={go} />
-    <AnalyticsGrid widgets={chartWidgets} secondaryMetrics={secondaryMetrics} go={go} />
-
-    {(workWidget || attentionWidget) && <section aria-label="Today's execution">
-      {hasWork || hasAttention ? <div className="grid min-w-0 items-start gap-5 xl:grid-cols-12">
-        {hasWork && <DashboardWidget widget={workWidget} go={go} compact className={hasAttention ? "xl:col-span-5" : "xl:col-span-12"} />}
-        {hasAttention && <DashboardWidget widget={attentionWidget} go={go} className={hasWork ? "xl:col-span-7" : "xl:col-span-12"} />}
-      </div> : <EmptyState variant="inline" alignment="left" icon={CheckCircle} title="You are caught up" description="There are no assigned tasks or client signals that need attention right now." />}
-    </section>}
-
-    {!!otherWidgets.length && <section className="grid gap-5 xl:grid-cols-12">{otherWidgets.map((widget) => <DashboardWidget key={widget.id} widget={widget} go={go} className="xl:col-span-6" />)}</section>}
+      <DashboardBand as="div"><MetricRibbon metrics={primaryMetrics} go={go} /></DashboardBand>
+      {sectionOrder.map((section) => sections[section])}
+    </DashboardCanvas>
 
     <DashboardCustomizer
       open={customizing}
@@ -115,7 +126,7 @@ function BusinessDashboard() {
 function MetricRibbon({ metrics, go }) {
   if (!metrics.length) return null;
   return <section className="surface-card reveal-stagger overflow-hidden" aria-label="Key business metrics">
-    <div className="grid grid-cols-2 gap-px bg-border lg:grid-cols-4">
+    <div className="dashboard-metric-grid gap-px bg-border">
       {metrics.map((metric) => {
         const change = metric.comparison?.change_percent;
         const DeltaIcon = change > 0 ? ArrowUp : change < 0 ? ArrowDown : null;
@@ -148,15 +159,17 @@ function MetricRibbon({ metrics, go }) {
 function AnalyticsGrid({ widgets, secondaryMetrics, go }) {
   const populatedWidgets = widgets.filter(hasChartData);
   if (!populatedWidgets.length && !secondaryMetrics.length) return <EmptyState variant="section" alignment="left" icon={ChartBar} title="Insights will build from your activity" description="Record sales, visits, appointments, or stock movement to begin seeing business trends here." />;
-  const chartCount = populatedWidgets.length;
-  return <div className="grid min-w-0 items-stretch gap-5 xl:grid-cols-12">
-    {populatedWidgets.map((widget, index) => <DashboardWidget key={widget.id} widget={widget} go={go} className={chartSpan(index, chartCount, secondaryMetrics.length > 0)} />)}
-    {!!secondaryMetrics.length && <OperationalSnapshot metrics={secondaryMetrics} go={go} className={snapshotSpan(chartCount)} wide={chartCount === 0 || chartCount === 2} />}
-  </div>;
+  const cards = populatedWidgets.map((widget) => <DashboardWidget key={widget.id} widget={widget} go={go} />);
+  if (!cards.length) return <DashboardLanes primary={<OperationalSnapshot metrics={secondaryMetrics} go={go} wide />} />;
+  const primaryCount = Math.ceil(cards.length / 2);
+  const primary = cards.slice(0, primaryCount);
+  const supporting = cards.slice(primaryCount);
+  if (secondaryMetrics.length) supporting.push(<OperationalSnapshot key="operational-snapshot" metrics={secondaryMetrics} go={go} wide={cards.length === 2} />);
+  return <DashboardLanes primary={primary} supporting={supporting} />;
 }
 
 function OperationalSnapshot({ metrics, go, className, wide }) {
-  return <InsightPanel className={className} title="Operational snapshot" subtitle="Additional live measures, kept compact" icon={ChartBar}>
+  return <InsightPanel className={cn("dashboard-card", className)} title="Operational snapshot" subtitle="Additional live measures, kept compact" icon={ChartBar}>
     <div className={cn(wide && "sm:grid sm:grid-cols-2")}>
       {metrics.map((metric, index) => {
         const Row = metric.destination ? "button" : "div";
@@ -172,22 +185,41 @@ function OperationalSnapshot({ metrics, go, className, wide }) {
   </InsightPanel>;
 }
 
-function DashboardWidget({ widget, go, className, compact = false, fillHeight = false }) {
+function ExecutionGrid({ workWidget, attentionWidget, go, profile, hasWork, hasAttention }) {
+  if (!hasWork && !hasAttention) return <EmptyState variant="inline" alignment="left" icon={CheckCircle} title="You are caught up" description="There are no assigned tasks or client signals that need attention right now." />;
+  const work = hasWork ? <DashboardWidget key="work" widget={workWidget} go={go} compact /> : null;
+  const attention = hasAttention ? <DashboardWidget key="attention" widget={attentionWidget} go={go} /> : null;
+  const leadWithAttention = profile === "leadership";
+  return <DashboardLanes
+    primary={leadWithAttention ? (attention || work) : (work || attention)}
+    supporting={hasWork && hasAttention ? (leadWithAttention ? work : attention) : null}
+  />;
+}
+
+function SupportingWidgets({ widgets, go }) {
+  const splitAt = Math.ceil(widgets.length / 2);
+  const render = (widget) => <DashboardWidget key={widget.id} widget={widget} go={go} />;
+  return <DashboardLanes
+    primary={widgets.slice(0, splitAt).map(render)}
+    supporting={widgets.slice(splitAt).map(render)}
+  />;
+}
+
+function DashboardWidget({ widget, go, className, compact = false }) {
   if (CHART_KINDS.has(widget.kind)) {
     const chartType = widget.kind === "donut_chart" ? "donut" : widget.kind === "bar_chart" ? "bar" : "area";
     const hasData = hasChartData(widget);
     return <ChartPanel
-      className={className}
-      fillHeight={fillHeight}
+      className={cn("dashboard-card", className)}
       title={widget.title}
       subtitle={widget.subtitle}
       action={widget.destination && <Button variant="ghost" size="sm" onClick={() => go(widget.destination)}>Details<ArrowRight /></Button>}
     >
-      {hasData ? <TrendChart data={widget.data} format={widget.format} type={chartType} xKey={widget.x_key || "date"} series={widget.series} ariaLabel={`${widget.title}. ${widget.subtitle || "Business performance"}`} /> : <EmptyState variant="section" icon={ChartBar} title={widget.empty?.title || `No ${widget.title.toLowerCase()} data`} description={widget.empty?.message || "This view will fill as activity is recorded."} className="border-0 bg-transparent" />}
+      {hasData ? <TrendChart data={widget.data} format={widget.format} type={chartType} xKey={widget.x_key || "date"} series={widget.series} height="clamp(14rem, 54cqi, 18rem)" ariaLabel={`${widget.title}. ${widget.subtitle || "Business performance"}`} /> : <EmptyState variant="section" icon={ChartBar} title={widget.empty?.title || `No ${widget.title.toLowerCase()} data`} description={widget.empty?.message || "This view will fill as activity is recorded."} className="border-0 bg-transparent" />}
     </ChartPanel>;
   }
 
-  if (widget.kind === "work_queue") return <InsightPanel className={className} title={widget.title} subtitle={widget.subtitle}>
+  if (widget.kind === "work_queue") return <InsightPanel className={cn("dashboard-card", className)} title={widget.title} subtitle={widget.subtitle}>
     {widget.data?.length ? <div className="flex-1 divide-y">{widget.data.slice(0, compact ? 6 : 8).map((item) => <button type="button" key={`${item.source}:${item.id}`} onClick={() => go(item.destination)} className="flex w-full items-start gap-3 px-4 py-3.5 text-left transition-colors hover:bg-surface-hover sm:px-5">
       <span className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-secondary text-muted-foreground"><Clock size={16} /></span>
       <span className="min-w-0 flex-1">
@@ -199,8 +231,8 @@ function DashboardWidget({ widget, go, className, compact = false, fillHeight = 
     </button>)}</div> : <EmptyState compact icon={CheckCircle} title={widget.empty?.title} description={widget.empty?.message} className="m-4" />}
   </InsightPanel>;
 
-  if (widget.kind === "attention") return <InsightPanel className={className} title={widget.title} subtitle={widget.subtitle}>
-    {widget.data?.length ? <div className="grid flex-1 auto-rows-fr gap-px bg-border md:grid-cols-2">{widget.data.map((item) => <button type="button" key={item.id} onClick={() => go(item.destination)} className="flex min-w-0 items-start gap-3 bg-card p-4 text-left transition-colors hover:bg-surface-hover">
+  if (widget.kind === "attention") return <InsightPanel className={cn("dashboard-card", className)} title={widget.title} subtitle={widget.subtitle}>
+    {widget.data?.length ? <div className="divide-y">{widget.data.map((item) => <button type="button" key={item.id} onClick={() => go(item.destination)} className="flex w-full min-w-0 items-start gap-3 bg-card p-4 text-left transition-colors hover:bg-surface-hover">
       <EntityAvatar name={item.client?.name} kind="client" className="h-10 w-10 rounded-xl text-xs" />
       <span className="min-w-0 flex-1"><span className="flex items-center gap-2"><span className="truncate text-sm font-semibold">{item.client?.name}</span><span className={cn("h-2 w-2 shrink-0 rounded-full", item.state === "action_needed" ? "bg-danger" : item.state === "watch" ? "bg-warning" : "bg-positive")} /></span><span className="mt-1 block text-xs font-semibold">{item.title}</span><span className="mt-1 line-clamp-2 block text-[11px] leading-5 text-muted-foreground">{item.reason}</span></span>
     </button>)}</div> : <EmptyState compact icon={UsersThree} title={widget.empty?.title} description={widget.empty?.message} className="m-4" />}
@@ -266,19 +298,28 @@ function selectPrimaryMetrics(metrics, industry) {
   return selected;
 }
 
-function chartSpan(index, count, hasSnapshot) {
-  if (count === 1) return hasSnapshot ? "xl:col-span-8" : "xl:col-span-12";
-  if (count === 2) return index === 0 ? "xl:col-span-8" : "xl:col-span-4";
-  if (index === 0) return "xl:col-span-8";
-  if (index === 1) return "xl:col-span-4";
-  if (index === 2) return hasSnapshot ? "xl:col-span-7" : "xl:col-span-12";
-  return "xl:col-span-6";
+const BUSINESS_LEADERSHIP_ROLES = new Set([
+  "owner", "business-owner", "administrator", "admin", "manager", "finance-manager", "accountant", "auditor",
+]);
+
+export function resolveBusinessDashboardProfile(roles = []) {
+  const normalized = roles.map((role) => String(role || "").trim().toLowerCase().replaceAll("_", "-").replaceAll(" ", "-"));
+  return normalized.some((role) => BUSINESS_LEADERSHIP_ROLES.has(role)) ? "leadership" : "operations";
 }
 
-function snapshotSpan(chartCount) {
-  if (chartCount === 1) return "xl:col-span-4";
-  if (chartCount >= 3) return "xl:col-span-5";
-  return "xl:col-span-12";
+export function resolveBusinessSectionOrder(widgets, profile, hasSavedLayout) {
+  const defaults = profile === "leadership"
+    ? ["analytics", "execution", "other"]
+    : ["execution", "analytics", "other"];
+  if (!hasSavedLayout) return defaults;
+  const ordered = [];
+  widgets.forEach((widget) => {
+    const section = CHART_KINDS.has(widget.kind)
+      ? "analytics"
+      : ["work_queue", "attention"].includes(widget.kind) ? "execution" : "other";
+    if (!ordered.includes(section)) ordered.push(section);
+  });
+  return [...ordered, ...defaults.filter((section) => !ordered.includes(section))];
 }
 
 function hasChartData(widget) {

@@ -221,7 +221,13 @@ def test_college_academic_structure_lifecycle_bulk_and_multi_cohort_scope(colleg
     assert {row["id"] for row in students.json()["items"]} == {first["id"], second["id"]}
     dashboard = client.get("/api/college/placement-dashboard", headers=headers, params=cohort_params[:2])
     assert dashboard.status_code == 200, dashboard.text
-    assert dashboard.json()["metrics"]["participating_students"] == 2
+    dashboard_payload = dashboard.json()
+    assert dashboard_payload["metrics"]["participating_students"] == 2
+    assert dashboard_payload["access"]["scope"] == "organization"
+    assert all(dashboard_payload["access"]["capabilities"].values())
+    assert set(dashboard_payload["totals"]) == {
+        "attention_issues", "attention_students", "upcoming_drive_deadlines", "departments",
+    }
 
     with SessionLocal() as db:
         grants = {
@@ -437,7 +443,21 @@ def test_enterprise_policy_scopes_hod_data_fields_dashboard_and_finance(college_
 
     dashboard = client.get("/api/college/placement-dashboard", headers=hod_headers)
     assert dashboard.status_code == 200, dashboard.text
-    assert {row["id"] for row in dashboard.json()["filters"]["cohorts"]} == {ece_a["id"]}
+    dashboard_payload = dashboard.json()
+    assert {row["id"] for row in dashboard_payload["filters"]["cohorts"]} == {ece_a["id"]}
+    assert dashboard_payload["access"]["scope"] == "restricted"
+    assert dashboard_payload["access"]["capabilities"]["attendance"] is True
+    assert dashboard_payload["access"]["capabilities"]["assessments"] is True
+    assert dashboard_payload["access"]["capabilities"]["coding"] is False
+    assert dashboard_payload["coverage"]["total"] == 1
+
+    owner_dashboard = client.get("/api/college/placement-dashboard", headers=owner_headers)
+    assert owner_dashboard.status_code == 200, owner_dashboard.text
+    owner_payload = owner_dashboard.json()
+    assert owner_payload["access"]["scope"] == "organization"
+    assert owner_payload["coverage"]["total"] == 3
+    for key in ("attention_issues", "attention_students", "upcoming_drive_deadlines", "departments"):
+        assert dashboard_payload["totals"][key] <= owner_payload["totals"][key]
 
     finance = client.get("/api/sales/workspace", headers=hod_headers)
     assert finance.status_code == 403
@@ -1282,6 +1302,18 @@ def test_college_placement_intelligence_is_evidence_backed_and_audited(college_a
     assert dashboard_payload["department_comparison"][0]["department"] == "Computer Science"
     assert dashboard_payload["brief"]
     assert "active_drive_deadlines" in dashboard_payload
+    assert dashboard_payload["access"] == {
+        "scope": "organization",
+        "capabilities": {
+            "attendance": True,
+            "assessments": True,
+            "coding": True,
+            "readiness": True,
+            "placements": True,
+        },
+    }
+    assert dashboard_payload["totals"]["departments"] == len(dashboard_payload["department_comparison"])
+    assert dashboard_payload["totals"]["upcoming_drive_deadlines"] >= len(dashboard_payload["active_drive_deadlines"])
     assert set(application_list.json()) >= {"items", "next_cursor", "has_more"}
     companies_page = client.get("/api/college/companies", headers=headers, params={"limit": 1})
     opportunities_page = client.get("/api/college/opportunities", headers=headers, params={"limit": 1})

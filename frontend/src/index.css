@@ -123,9 +123,135 @@
 }
 
 @layer components {
+  .landing-page {
+    --landing-paper: 42 38% 97%;
+    --landing-paper-deep: 40 22% 94%;
+    position: relative;
+    isolation: isolate;
+    background: hsl(var(--landing-paper));
+  }
+  .landing-hero {
+    background:
+      radial-gradient(circle at 12% 8%, hsl(var(--chart-2) / 0.1), transparent 28rem),
+      radial-gradient(circle at 88% 84%, hsl(var(--accent) / 0.1), transparent 30rem),
+      linear-gradient(145deg, hsl(var(--landing-paper)), hsl(var(--card)) 56%, hsl(var(--landing-paper-deep)));
+  }
+  .landing-section-title {
+    font-size: clamp(2.45rem, 4.6vw, 4.8rem);
+    line-height: 1.02;
+    letter-spacing: -0.045em;
+  }
+  .landing-grid {
+    background-image:
+      linear-gradient(hsl(var(--primary) / 0.055) 1px, transparent 1px),
+      linear-gradient(90deg, hsl(var(--primary) / 0.055) 1px, transparent 1px),
+      radial-gradient(circle, hsl(var(--accent) / 0.16) 1px, transparent 1.5px);
+    background-position: 0 0, 0 0, 21px 21px;
+    background-size: 42px 42px, 42px 42px, 42px 42px;
+  }
+  .landing-grid-dark {
+    background-image:
+      linear-gradient(hsl(var(--primary-foreground) / 0.032) 1px, transparent 1px),
+      linear-gradient(90deg, hsl(var(--primary-foreground) / 0.032) 1px, transparent 1px);
+    background-size: 44px 44px;
+  }
+  .landing-ambient {
+    pointer-events: none;
+    position: absolute;
+    border-radius: 999px;
+    filter: blur(80px);
+    opacity: 0.58;
+  }
+  .landing-ambient-one {
+    left: -8rem;
+    top: 8rem;
+    width: 24rem;
+    height: 24rem;
+    background: hsl(var(--chart-2) / 0.16);
+  }
+  .landing-ambient-two {
+    right: -9rem;
+    bottom: 2rem;
+    width: 27rem;
+    height: 27rem;
+    background: hsl(var(--accent) / 0.13);
+  }
+  .landing-hero-halo {
+    background: linear-gradient(135deg, hsl(var(--chart-2) / 0.15), hsl(var(--accent) / 0.12));
+  }
+  .landing-product-shell {
+    perspective: 1400px;
+    transform-style: preserve-3d;
+  }
+  .landing-editorial-card {
+    border-radius: 1.5rem;
+    border: 1px solid hsl(var(--primary) / 0.11);
+    background:
+      linear-gradient(145deg, hsl(var(--card)), hsl(var(--landing-paper-deep)));
+    box-shadow: 0 18px 50px hsl(var(--shadow-color) / 0.055);
+  }
+  .landing-workflow-canvas {
+    background:
+      radial-gradient(circle at 92% 8%, hsl(var(--accent) / 0.16), transparent 18rem),
+      radial-gradient(circle at 4% 100%, hsl(var(--chart-2) / 0.16), transparent 20rem),
+      hsl(var(--primary));
+  }
+  .landing-ai-scene {
+    background:
+      linear-gradient(145deg, hsl(var(--card)), hsl(var(--landing-paper-deep)));
+  }
+  .landing-service-card {
+    position: relative;
+    overflow: hidden;
+    box-shadow: 0 16px 45px hsl(var(--shadow-color) / 0.055);
+    transition: transform 260ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 260ms ease;
+  }
+  .landing-service-card::after {
+    content: "";
+    position: absolute;
+    right: -4rem;
+    bottom: -5rem;
+    width: 10rem;
+    height: 10rem;
+    border-radius: 999px;
+    background: hsl(var(--accent) / 0.08);
+  }
+  .landing-service-card:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 22px 55px hsl(var(--shadow-color) / 0.09);
+  }
+  .landing-pricing {
+    background:
+      radial-gradient(circle at 8% 4%, hsl(var(--chart-2) / 0.08), transparent 28rem),
+      radial-gradient(circle at 94% 94%, hsl(var(--accent) / 0.07), transparent 30rem),
+      hsl(var(--card));
+  }
   .surface-card {
     @apply rounded-2xl border bg-card text-card-foreground;
     box-shadow: 0 1px 2px hsl(var(--shadow-color) / 0.035), 0 10px 30px hsl(var(--shadow-color) / 0.035);
+  }
+  .dashboard-canvas { container: dashboard / inline-size; }
+  .dashboard-band { inline-size: 100%; }
+  .dashboard-lanes { display: grid; align-items: start; gap: 1.25rem; }
+  .dashboard-lane { display: flex; min-width: 0; flex-direction: column; align-self: start; gap: 1.25rem; }
+  .dashboard-card { container: dashboard-card / inline-size; align-self: start; inline-size: 100%; }
+  .dashboard-card-header { @apply flex items-start justify-between gap-3 px-4 py-4 sm:px-5; }
+  .dashboard-card-footer { @apply flex min-h-12 items-center justify-between gap-3 border-t bg-surface-subtle/35 px-4 py-2.5 sm:px-5; }
+  .dashboard-metric-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.75rem; }
+  .dashboard-filter-compact { display: flex; }
+  .dashboard-filter-expanded { display: none; }
+  @container dashboard (min-width: 48rem) {
+    .dashboard-metric-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .dashboard-filter-compact { display: none; }
+    .dashboard-filter-expanded { display: grid; }
+  }
+  @container dashboard (min-width: 72rem) {
+    .dashboard-lanes { grid-template-columns: minmax(0, 7fr) minmax(20rem, 5fr); }
+    .dashboard-lanes-single { grid-template-columns: minmax(0, 1fr); }
+  }
+  @container dashboard (min-width: 90rem) {
+    .dashboard-lanes { grid-template-columns: minmax(0, 8fr) minmax(22rem, 4fr); }
+    .dashboard-lanes-single { grid-template-columns: minmax(0, 1fr); }
   }
   .surface-interactive {
     @apply transition-[border-color,box-shadow,transform,background-color] duration-200;
@@ -288,6 +414,7 @@
     scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
   }
+  .landing-ambient { display: none; }
 }
 
 @media print {

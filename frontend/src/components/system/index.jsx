@@ -39,6 +39,71 @@ export function Surface({ children, className, interactive = false, ...props }) 
   return <section className={cn("surface-card", interactive && "surface-interactive", className)} {...props}>{children}</section>;
 }
 
+export function DashboardCanvas({ children, className, ...props }) {
+  return <div className={cn("dashboard-canvas min-w-0 space-y-5 md:space-y-6", className)} {...props}>{children}</div>;
+}
+
+export function DashboardBand({ children, className, as: Component = "section", ...props }) {
+  return <Component className={cn("dashboard-band min-w-0", className)} {...props}>{children}</Component>;
+}
+
+export function DashboardLanes({
+  primary,
+  supporting,
+  className,
+  primaryClassName,
+  supportingClassName,
+  ...props
+}) {
+  const hasSupporting = React.Children.count(supporting) > 0;
+  return <div className={cn("dashboard-lanes min-w-0", !hasSupporting && "dashboard-lanes-single", className)} {...props}>
+    <div className={cn("dashboard-lane", primaryClassName)} data-dashboard-lane="primary">{primary}</div>
+    {hasSupporting && <aside className={cn("dashboard-lane", supportingClassName)} data-dashboard-lane="supporting">{supporting}</aside>}
+  </div>;
+}
+
+export function DashboardPreviewCard({
+  eyebrow,
+  title,
+  description,
+  action,
+  children,
+  footer,
+  className,
+  titleAs: Title = "h2",
+  ...props
+}) {
+  return <Surface className={cn("dashboard-card overflow-hidden", className)} data-dashboard-card {...props}>
+    {(eyebrow || title || description || action) && <div className="dashboard-card-header">
+      <div className="min-w-0 flex-1">
+        {eyebrow && <p className="overline">{eyebrow}</p>}
+        {title && <Title className="mt-1 font-display text-base font-semibold tracking-[-0.025em] sm:text-lg">{title}</Title>}
+        {description && <p className="mt-1 text-xs leading-5 text-muted-foreground">{description}</p>}
+      </div>
+      {action && <div className="shrink-0">{action}</div>}
+    </div>}
+    {children}
+    {footer && <div className="dashboard-card-footer">{footer}</div>}
+  </Surface>;
+}
+
+export function DashboardSkeleton({ className, embedded = false }) {
+  const primary = <>
+    <Skeleton className="h-80 rounded-2xl" />
+    <Skeleton className="h-64 rounded-2xl" />
+  </>;
+  const supporting = <>
+    <Skeleton className="h-64 rounded-2xl" />
+    <Skeleton className="h-52 rounded-2xl" />
+  </>;
+  const content = <DashboardCanvas className={className} aria-label="Loading dashboard">
+      <div><Skeleton className="h-3 w-28" /><Skeleton className="mt-3 h-9 w-72 max-w-full" /><Skeleton className="mt-3 h-4 w-[34rem] max-w-full" /></div>
+      <div className="dashboard-metric-grid">{Array.from({ length: 4 }, (_, index) => <Skeleton key={index} className="h-28 rounded-xl" />)}</div>
+      <DashboardLanes primary={primary} supporting={supporting} />
+    </DashboardCanvas>;
+  return embedded ? content : <PageShell>{content}</PageShell>;
+}
+
 const statusTone = {
   active: "positive", healthy: "positive", completed: "positive", paid: "positive", available: "positive", operational: "positive", open: "positive",
   watch: "warning", warning: "warning", pending: "warning", partially_paid: "warning", low: "warning", expiring: "warning", scheduled: "info",

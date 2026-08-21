@@ -2,7 +2,7 @@ import React from "react";
 import BusinessChart from "@/components/charts/BusinessChart";
 
 export default function TrendChart({
-  data = [], format = "number", type = "area", xKey = "date", series, ariaLabel,
+  data = [], format = "number", type = "area", xKey = "date", series, height, ariaLabel,
 }) {
   const resolvedSeries = Array.isArray(series) && series.length
     ? series.filter((item) => item?.key)
@@ -22,6 +22,7 @@ export default function TrendChart({
     type={type}
     xKey={xKey}
     series={resolvedSeries}
+    height={height}
     ariaLabel={ariaLabel || "Business performance chart"}
   />;
 }
