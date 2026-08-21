@@ -1,5 +1,15 @@
 let checkoutLoader;
 
+function waitForHostDialogRelease() {
+  return new Promise((resolve) => {
+    const schedule = typeof window.requestAnimationFrame === "function"
+      ? window.requestAnimationFrame.bind(window)
+      : (callback) => window.setTimeout(callback, 0);
+    // Radix releases its body-level pointer lock in an effect after the dialog closes.
+    schedule(() => schedule(() => resolve()));
+  });
+}
+
 export function loadCashfreeCheckout() {
   if (typeof window.Cashfree === "function") return Promise.resolve(window.Cashfree);
   if (checkoutLoader) return checkoutLoader;
@@ -28,4 +38,17 @@ export function loadCashfreeCheckout() {
     document.body.appendChild(script);
   });
   return checkoutLoader;
+}
+
+export async function openCashfreeModal(cashfree, paymentSessionId, lifecycle = {}) {
+  lifecycle.beforeOpen?.();
+  await waitForHostDialogRelease();
+  try {
+    return await cashfree.checkout({
+      paymentSessionId,
+      redirectTarget: "_modal",
+    });
+  } finally {
+    lifecycle.afterClose?.();
+  }
 }

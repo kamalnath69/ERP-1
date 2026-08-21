@@ -26,7 +26,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAuth } from "@/contexts/AuthContext";
 import useCursorPagination from "@/hooks/useCursorPagination";
 import { usePendingAction } from "@/hooks/usePendingAction";
-import { loadCashfreeCheckout } from "@/lib/cashfree";
+import { loadCashfreeCheckout, openCashfreeModal } from "@/lib/cashfree";
 import { loadRazorpayCheckout } from "@/lib/razorpay";
 import { requiredText } from "@/lib/validation";
 import {
@@ -94,6 +94,7 @@ export default function Billing() {
   const [renewalMode, setRenewalMode] = useState("auto_renew");
   const [review, setReview] = useState(null);
   const [working, setWorking] = useState(false);
+  const [hostedCheckoutActive, setHostedCheckoutActive] = useState(false);
   const [comparisonOpen, setComparisonOpen] = useState(false);
   const [cancellationOpen, setCancellationOpen] = useState(false);
   const [invoiceStatus, setInvoiceStatus] = useState("all");
@@ -258,10 +259,15 @@ export default function Billing() {
       const cashfree = window.Cashfree({
         mode: checkout.checkout_mode || (checkout.mode === "test" ? "sandbox" : "production"),
       });
-      const checkoutResult = await cashfree.checkout({
-        paymentSessionId: checkout.payment_session_id,
-        redirectTarget: "_modal",
+      const checkoutResult = await openCashfreeModal(cashfree, checkout.payment_session_id, {
+        beforeOpen: () => setHostedCheckoutActive(true),
+        afterClose: () => setHostedCheckoutActive(false),
       });
+      if (checkoutResult?.error) {
+        setWorking(false);
+        toast.error(checkoutResult.error.message || "Cashfree checkout could not be completed");
+        return;
+      }
       const verification = await verifyPayment({ invoice_id: checkout.invoice_id }).unwrap();
       if (verification.status && verification.status !== "paid") {
         setWorking(false);
@@ -510,7 +516,7 @@ export default function Billing() {
 
     <ReviewSheet
       review={review}
-      open={Boolean(review)}
+      open={Boolean(review) && !hostedCheckoutActive}
       close={() => !working && setReview(null)}
       working={working}
       confirm={confirmReview}
